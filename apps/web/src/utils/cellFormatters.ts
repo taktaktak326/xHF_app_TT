@@ -18,42 +18,6 @@ export type StatusDisplay = {
   range?: string;
 };
 
-const pickRelevantStatus = <T extends { startDate: string; endDate: string; status?: string | null }>(
-  items: T[],
-) => {
-  if (!items || items.length === 0) return null;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  const overlapsToday = (item: T) => {
-    const start = new Date(item.startDate);
-    const end = new Date(item.endDate);
-    return start <= today && today <= end;
-  };
-  const startsAfterToday = (item: T) => new Date(item.startDate) > today;
-
-  const bySeverityThenDate = (a: T, b: T) => {
-    const sev = statusSeverity(a.status) - statusSeverity(b.status);
-    if (sev !== 0) return sev;
-    return new Date(a.startDate).getTime() - new Date(b.startDate).getTime();
-  };
-
-  const active = [...items].filter(overlapsToday).sort(bySeverityThenDate);
-  if (active[0]) return active[0];
-
-  const upcoming = [...items].filter(startsAfterToday).sort(bySeverityThenDate);
-  if (upcoming[0]) return upcoming[0];
-
-  const past = [...items]
-    .slice()
-    .sort((a, b) => {
-      const sev = statusSeverity(a.status) - statusSeverity(b.status);
-      if (sev !== 0) return sev;
-      return new Date(b.endDate).getTime() - new Date(a.endDate).getTime();
-    });
-  return past[0] ?? null;
-};
-
 export const formatCropEstablishmentStage = (season: CropSeason | null): string => {
   const stage = season?.cropEstablishmentGrowthStageIndex;
   return stage ? `BBCH${stage}` : 'N/A';
@@ -192,7 +156,7 @@ export const formatCurrentWaterRecommendations = (recommendations: CropSeason['w
     recommendations.filter(rec => rec.status !== 'INACTIVE' && rec.status !== 'NOT_NEEDED'),
     'actionType',
   ).map((rec, recIndex) => {
-    const description = rec.description || rec.actionType || rec.type;
+    const description = rec.description || rec.actionType;
     const dateRange =
       rec.startDate && rec.endDate
         ? `(${getLocalDateString(rec.startDate)} - ${formatInclusiveEndDate(rec.endDate)})`
@@ -220,7 +184,7 @@ export const formatRecommendations = (recommendations: CropSeason['nutritionReco
     'actionType',
   )
     .map(rec => {
-      const label = rec.description || rec.actionType || (rec as any).type || '推奨';
+      const label = rec.description || rec.actionType || '推奨';
       const dateRange =
         rec.startDate && rec.endDate
           ? `${getLocalDateString(rec.startDate)} - ${formatInclusiveEndDate(rec.endDate)}`

@@ -3,7 +3,7 @@ import type { FC } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useData } from '../context/DataContext';
-import type { LoginAndTokenResp, Field, BaseTask } from '../types/farm';
+import type { LoginAndTokenResp, Field, BaseTask, CountryCropGrowthStagePrediction } from '../types/farm';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceArea } from 'recharts';
 import './FarmsPage.css'; // Reuse common styles
 import './SprayingWeatherPage.css';
@@ -245,9 +245,10 @@ export function SprayingWeatherPage() {
     return field ? field.name : 'Unknown Field';
   }, [combinedOut, fieldUuid]);
   const plannedTasksByDate = useMemo(() => {
-    if (!combinedOut?.response?.data?.fieldsV2) return {} as Record<string, PlannedTaskBadge[]>;
+    const empty = { badges: {} as Record<string, PlannedTaskBadge[]>, tasks: {} as Record<string, PlannedTaskEntry[]> };
+    if (!combinedOut?.response?.data?.fieldsV2) return empty;
     const fieldUuids = clusterState?.fieldUuids?.length ? clusterState.fieldUuids : fieldUuid ? [fieldUuid] : [];
-    if (fieldUuids.length === 0) return {} as Record<string, PlannedTaskBadge[]>;
+    if (fieldUuids.length === 0) return empty;
     const map: Record<string, PlannedTaskBadge[]> = {};
     const tasks: Record<string, PlannedTaskEntry[]> = {};
     combinedOut.response.data.fieldsV2
@@ -409,7 +410,7 @@ const WeatherDisplay: FC<{
 
     return Object.entries(data).sort(([dateA], [dateB]) => dateA.localeCompare(dateB));
   }, [weatherData]);
-  const candidateDays = useMemo(() => {
+  const candidateDays = useMemo((): CandidateDay[] => {
     const summarizeFactors = (sprayEntries: SprayWeather[]) => {
       const summary = {} as Record<SprayFactor['factor'], { good: number; moderate: number; bad: number; label: string; tone: string }>;
       FACTOR_ORDER.forEach((factor) => {
@@ -447,7 +448,7 @@ const WeatherDisplay: FC<{
     };
     return groupedData.map(([dateKey, dayData]) => {
       const windows = buildSprayWindows(dayData.spray);
-      const dayTone = windows.some(w => w.type === 'recommended')
+      const dayTone: CandidateDay['dayTone'] = windows.some(w => w.type === 'recommended')
         ? 'recommended'
         : windows.some(w => w.type === 'possible')
           ? 'possible'

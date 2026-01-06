@@ -717,49 +717,46 @@ export function SatelliteMapPage() {
             )}
             {displayMagnitudes.length > 0 && (
               <div className="satellite-magnitudes-grid">
-                {displayMagnitudes.map(({ layer, mag }, idx) => {
-                  const nearTasks = tasksNearDate(selectedField?.uuid ?? selectedFieldUuid, layer?.date);
-                  return (
-                    <div key={mag.imageUrl ?? mag.vectorTilesUrl ?? `${mag.type}-${idx}`} className="satellite-magnitude">
-                      {mag.imageUrl && (
-                        <div className="satellite-image-block">
-                          <div className="satellite-image-wrapper">
-                            {imagePreviews[mag.imageUrl] ? (
-                              <img
-                                className="satellite-image clickable-image"
-                                src={imagePreviews[mag.imageUrl]}
-                                alt={mag.type ?? 'image'}
-                                loading="lazy"
-                                onClick={() => openImage(mag.imageUrl)}
-                              />
-                            ) : (
-                              <div className="satellite-image-placeholder">読み込み中...</div>
-                            )}
-                          </div>
+                {displayMagnitudes.map(({ layer, mag }, idx) => (
+                  <div key={mag.imageUrl ?? mag.vectorTilesUrl ?? `${mag.type}-${idx}`} className="satellite-magnitude">
+                    {mag.imageUrl && (
+                      <div className="satellite-image-block">
+                        <div className="satellite-image-wrapper">
+                          {imagePreviews[mag.imageUrl] ? (
+                            <img
+                              className="satellite-image clickable-image"
+                              src={imagePreviews[mag.imageUrl]}
+                              alt={mag.type ?? 'image'}
+                              loading="lazy"
+                              onClick={() => openImage(mag.imageUrl)}
+                            />
+                          ) : (
+                            <div className="satellite-image-placeholder">読み込み中...</div>
+                          )}
                         </div>
-                      )}
-                      <div className="satellite-thumb-date">{formatDateJst(layer?.date)}</div>
-                      <div className="satellite-thumb-label">
-                        <span className="satellite-chip">{labelForType(layer?.type)}</span>
-                        {shouldShowMagnitudeLabel(layer?.type) && mag?.type && (
-                          <span className="satellite-chip satellite-chip--sub">
-                            {labelForMagnitudeType(mag.type)}
-                          </span>
-                        )}
                       </div>
-                      {mag.vectorTilesUrl && (
-                        <a className="map-button map-button--tiny" href={mag.vectorTilesUrl} target="_blank" rel="noreferrer">
-                          タイル
-                        </a>
-                      )}
-                      {mag.vectorTilesStyleUrl && (
-                        <a className="map-button map-button--tiny" href={mag.vectorTilesStyleUrl} target="_blank" rel="noreferrer">
-                          スタイル
-                        </a>
+                    )}
+                    <div className="satellite-thumb-date">{formatDateJst(layer?.date)}</div>
+                    <div className="satellite-thumb-label">
+                      <span className="satellite-chip">{labelForType(layer?.type)}</span>
+                      {shouldShowMagnitudeLabel(layer?.type) && mag?.type && (
+                        <span className="satellite-chip satellite-chip--sub">
+                          {labelForMagnitudeType(mag.type)}
+                        </span>
                       )}
                     </div>
-                  );
-                })}
+                    {mag.vectorTilesUrl && (
+                      <a className="map-button map-button--tiny" href={mag.vectorTilesUrl} target="_blank" rel="noreferrer">
+                        タイル
+                      </a>
+                    )}
+                    {mag.vectorTilesStyleUrl && (
+                      <a className="map-button map-button--tiny" href={mag.vectorTilesStyleUrl} target="_blank" rel="noreferrer">
+                        スタイル
+                      </a>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </div>

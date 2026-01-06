@@ -206,6 +206,7 @@ interface WeatherDailyAggregate {
   humidityAvg: number | null;
   windSpeedAvg: number | null;
   windDirectionDeg: number | null;
+  gdd?: number | null;
 }
 
 interface FieldWeatherDaily extends WeatherDailyAggregate {
