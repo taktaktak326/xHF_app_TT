@@ -47,6 +47,11 @@ type SprayWindow = {
   type: 'recommended' | 'possible';
 };
 
+type ActiveWindow = {
+  start: number;
+  type: SprayWindow['type'];
+};
+
 interface SprayWeather {
   fromDate: string;
   result: 'RECOMMENDED' | 'NOT_RECOMMENDED' | 'POSSIBLE' | 'moderate';
@@ -115,12 +120,13 @@ const buildSprayWindows = (sprayEntries: SprayWeather[]): SprayWindow[] => {
   const windows: SprayWindow[] = [];
   const classify = (result: SprayWeather['result']) =>
     result === 'RECOMMENDED' ? 'recommended' : result === 'POSSIBLE' || result === 'moderate' ? 'possible' : null;
-  let active: { start: number; type: SprayWindow['type'] } | null = null;
+  let active: ActiveWindow | null = null;
   sorted.forEach((entry, index) => {
     const type = classify(entry.result);
     if (!type) {
       if (active) {
-        windows.push({ start: active.start, end: sorted[index - 1]?.hour ?? active.start, type: active.type });
+        const prevHour = index > 0 ? sorted[index - 1].hour : active.start;
+        windows.push({ start: active.start, end: prevHour, type: active.type });
         active = null;
       }
       return;
@@ -130,12 +136,13 @@ const buildSprayWindows = (sprayEntries: SprayWeather[]): SprayWindow[] => {
       return;
     }
     if (active.type !== type || entry.hour !== sorted[index - 1]?.hour + 1) {
-      windows.push({ start: active.start, end: sorted[index - 1]?.hour ?? active.start, type: active.type });
+      const prevHour = index > 0 ? sorted[index - 1].hour : active.start;
+      windows.push({ start: active.start, end: prevHour, type: active.type });
       active = { start: entry.hour, type };
     }
   });
   if (active) {
-    const lastHour = sorted[sorted.length - 1]?.hour ?? active.start;
+    const lastHour = sorted.length > 0 ? sorted[sorted.length - 1].hour : active.start;
     windows.push({ start: active.start, end: lastHour, type: active.type });
   }
   return windows;
