@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import './FarmsPage.css';
 import './SatelliteMapPage.css';
 import { useData } from '../context/DataContext';
@@ -225,21 +225,6 @@ export function SatelliteMapPage() {
     // 古い順（左から古い→新しい）
     return items.sort((a, b) => a.dateValue - b.dateValue);
   }, [limitedLayers, allowedImageSet]);
-
-  const tasksNearDate = useCallback((fieldUuid?: string | null, targetDate?: string) => {
-    if (!fieldUuid || !targetDate) return [];
-    const list = tasksByField.get(fieldUuid) ?? [];
-    const target = new Date(targetDate);
-    if (Number.isNaN(target.getTime())) return [];
-    return list
-      .filter((t) => {
-        const d = new Date(t.date);
-        if (Number.isNaN(d.getTime())) return false;
-        const diff = Math.abs(d.getTime() - target.getTime());
-        return diff <= 20 * 86400000;
-      })
-      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-  }, [tasksByField]);
 
   const sortedLatestByField = useMemo(() => {
     const arr = [...latestByField];

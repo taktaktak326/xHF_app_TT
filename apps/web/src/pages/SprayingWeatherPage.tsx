@@ -41,6 +41,12 @@ interface SprayFactor {
   result: 'good' | 'moderate' | 'poor';
 }
 
+type SprayWindow = {
+  start: number;
+  end: number;
+  type: 'recommended' | 'possible';
+};
+
 interface SprayWeather {
   fromDate: string;
   result: 'RECOMMENDED' | 'NOT_RECOMMENDED' | 'POSSIBLE' | 'moderate';
@@ -103,13 +109,13 @@ const toJstPlannedDateIso = (dateInput: string): string | null => {
 };
 
 const buildSprayWindows = (sprayEntries: SprayWeather[]) => {
-  const sorted = [...sprayEntries]
+  const sorted: Array<{ hour: number; result: SprayWeather['result'] }> = [...sprayEntries]
     .map(s => ({ hour: getJstHour(s.fromDate), result: s.result }))
     .sort((a, b) => a.hour - b.hour);
-  const windows: Array<{ start: number; end: number; type: 'recommended' | 'possible' }> = [];
+  const windows: SprayWindow[] = [];
   const classify = (result: SprayWeather['result']) =>
     result === 'RECOMMENDED' ? 'recommended' : result === 'POSSIBLE' || result === 'moderate' ? 'possible' : null;
-  let active: { start: number; type: 'recommended' | 'possible' } | null = null;
+  let active: { start: number; type: SprayWindow['type'] } | null = null;
   sorted.forEach((entry, index) => {
     const type = classify(entry.result);
     if (!type) {
@@ -365,7 +371,7 @@ interface GroupedWeatherData {
 
 type CandidateDay = {
   dateKey: string;
-  windows: Array<{ start: number; end: number; type: 'recommended' | 'possible' }>;
+  windows: SprayWindow[];
   dayTone: 'recommended' | 'possible' | 'bad';
   factorSummary: Record<SprayFactor['factor'], { good: number; moderate: number; bad: number; label: string; tone: string }>;
 };
