@@ -108,7 +108,7 @@ const toJstPlannedDateIso = (dateInput: string): string | null => {
   return new Date(utcMs).toISOString().replace('.000Z', 'Z');
 };
 
-const buildSprayWindows = (sprayEntries: SprayWeather[]) => {
+const buildSprayWindows = (sprayEntries: SprayWeather[]): SprayWindow[] => {
   const sorted: Array<{ hour: number; result: SprayWeather['result'] }> = [...sprayEntries]
     .map(s => ({ hour: getJstHour(s.fromDate), result: s.result }))
     .sort((a, b) => a.hour - b.hour);

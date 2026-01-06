@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import './FarmsPage.css';
 import './SatelliteMapPage.css';
 import { useData } from '../context/DataContext';
@@ -149,40 +149,6 @@ export function SatelliteMapPage() {
     return urls.slice(0, previewLimit);
   }, [limitedLayers, previewLimit, magnitudeVisible]);
   const allowedImageSet = useMemo(() => new Set(allowedImageUrls), [allowedImageUrls]);
-
-  const tasksByField = useMemo(() => {
-    const map = new Map<string, Array<{ kind: 'spray' | 'fert'; date: string }>>();
-
-    const pushTask = (bucket: Array<{ kind: 'spray' | 'fert'; date: string }>, task: any) => {
-      const date = task?.executionDate || task?.plannedDate || task?.dueDate;
-      if (!date) return;
-      const hint = (task?.creationFlowHint ?? task?.dosedMap?.creationFlowHint ?? '').toLowerCase();
-      const typeHint = (task?.type ?? task?.sprayingType ?? '').toString().toLowerCase();
-      const mapTypeHint = (task?.dosedMap?.type ?? '').toString().toLowerCase();
-      const isFert =
-        hint.includes('nutri') ||
-        hint.includes('fert') ||
-        typeHint.includes('nutrition') ||
-        mapTypeHint.includes('nutrition');
-      bucket.push({ kind: isFert ? 'fert' : 'spray', date });
-    };
-
-    fields.forEach((field: any) => {
-      const fieldUuid = field?.uuid;
-      if (!fieldUuid) return;
-      const list: Array<{ kind: 'spray' | 'fert'; date: string }> = [];
-
-      // 圃場直下のタスクがあれば取り込み
-      (field?.sprayingsV2 ?? field?.sprayings ?? field?.tasks ?? []).forEach((task: any) => pushTask(list, task));
-
-      (field?.cropSeasonsV2 ?? []).forEach((season: any) => {
-        (season?.sprayingsV2 ?? season?.sprayings ?? season?.tasks ?? []).forEach((task: any) => pushTask(list, task));
-      });
-
-      map.set(fieldUuid, list);
-    });
-    return map;
-  }, [fields]);
 
   const latestByField = useMemo(() => {
     const map = new Map<string, {
