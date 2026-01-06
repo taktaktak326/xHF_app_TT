@@ -120,30 +120,34 @@ const buildSprayWindows = (sprayEntries: SprayWeather[]): SprayWindow[] => {
   const windows: SprayWindow[] = [];
   const classify = (result: SprayWeather['result']) =>
     result === 'RECOMMENDED' ? 'recommended' : result === 'POSSIBLE' || result === 'moderate' ? 'possible' : null;
-  let active: ActiveWindow | null = null;
+  let activeStart: number | null = null;
+  let activeType: SprayWindow['type'] | null = null;
   sorted.forEach((entry, index) => {
     const type = classify(entry.result);
     if (!type) {
-      if (active) {
-        const prevHour = index > 0 ? sorted[index - 1].hour : active.start;
-        windows.push({ start: active.start, end: prevHour, type: active.type });
-        active = null;
+      if (activeStart !== null && activeType) {
+        const prevHour = index > 0 ? sorted[index - 1].hour : activeStart;
+        windows.push({ start: activeStart, end: prevHour, type: activeType });
+        activeStart = null;
+        activeType = null;
       }
       return;
     }
-    if (!active) {
-      active = { start: entry.hour, type };
+    if (activeStart === null || !activeType) {
+      activeStart = entry.hour;
+      activeType = type;
       return;
     }
-    if (active.type !== type || entry.hour !== sorted[index - 1]?.hour + 1) {
-      const prevHour = index > 0 ? sorted[index - 1].hour : active.start;
-      windows.push({ start: active.start, end: prevHour, type: active.type });
-      active = { start: entry.hour, type };
+    if (activeType !== type || entry.hour !== sorted[index - 1]?.hour + 1) {
+      const prevHour = index > 0 ? sorted[index - 1].hour : activeStart;
+      windows.push({ start: activeStart, end: prevHour, type: activeType });
+      activeStart = entry.hour;
+      activeType = type;
     }
   });
-  if (active) {
-    const lastHour = sorted.length > 0 ? sorted[sorted.length - 1].hour : active.start;
-    windows.push({ start: active.start, end: lastHour, type: active.type });
+  if (activeStart !== null && activeType) {
+    const lastHour = sorted.length > 0 ? sorted[sorted.length - 1].hour : activeStart;
+    windows.push({ start: activeStart, end: lastHour, type: activeType });
   }
   return windows;
 };
