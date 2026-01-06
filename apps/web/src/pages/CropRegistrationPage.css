@@ -1,0 +1,953 @@
+.registration-app-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.registration-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  border-bottom: 1px solid #444;
+}
+
+.registration-home-content {
+  display: flex;
+  justify-content: center;
+  padding: 2rem 0;
+}
+
+.home-card {
+  background: #1f1f23;
+  border: 1px solid #2f2f33;
+  border-radius: 12px;
+  padding: 2rem;
+  max-width: 720px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
+}
+
+.home-title {
+  margin: 0;
+}
+
+.home-subtitle {
+  margin: 0;
+  color: #bbbbc5;
+}
+
+.home-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.home-button {
+  flex: 1;
+  min-width: 240px;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  border-radius: 12px;
+  border: 1px solid #34343a;
+  background: linear-gradient(135deg, #2d2d32, #232329);
+  color: #ffffff;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.home-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
+}
+
+.home-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.home-button:disabled:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.button-icon {
+  font-size: 2rem;
+}
+
+.button-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.button-title {
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.button-description {
+  font-size: 0.85rem;
+  color: #c2c2cc;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1.5rem;
+}
+
+.modal-content {
+  width: 100%;
+  max-width: 1100px;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: #1d1d21;
+  border-radius: 12px;
+  border: 1px solid #34343a;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+}
+
+.registration-confirmation-modal {
+  z-index: 1200;
+}
+
+.registration-confirmation-modal .modal-content {
+  max-width: 960px;
+  padding: 2rem;
+}
+
+.registration-confirmation-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.registration-confirmation-header h3 {
+  margin: 0;
+}
+
+.registration-confirmation-header p {
+  margin: 0.5rem 0 0;
+  color: #bbbbc5;
+  font-size: 0.95rem;
+}
+
+.registration-confirmation-table-wrapper {
+  overflow-x: auto;
+}
+
+.registration-confirmation-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+}
+
+.registration-confirmation-table th,
+.registration-confirmation-table td {
+  border-bottom: 1px solid #2f2f33;
+  padding: 0.75rem 0.9rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.registration-confirmation-table th {
+  font-weight: 600;
+  background: #24242a;
+}
+
+.registration-confirmation-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.confirmation-field-name {
+  font-weight: 600;
+}
+
+.confirmation-field-location,
+.confirmation-subtext {
+  color: #9a9aa5;
+  font-size: 0.85rem;
+  margin-top: 0.25rem;
+}
+
+.registration-confirmation-error {
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  background: rgba(255, 107, 107, 0.12);
+  color: #ff8f8f;
+  border: 1px solid rgba(255, 107, 107, 0.3);
+}
+
+.registration-confirmation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.confirmation-modal-overlay {
+  padding: 0 1.5rem;
+}
+
+.confirmation-modal-content {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 2rem;
+  background: #1f1f23;
+  border-radius: 12px;
+  border: 1px solid #34343a;
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.confirmation-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.modal-button {
+  padding: 0.6rem 1.4rem;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.modal-button.secondary {
+  background: #2d2d33;
+  color: #f2f2f7;
+}
+
+.modal-button.danger {
+  background: #ff6b6b;
+  color: #0f0f12;
+}
+
+.details-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: 2rem;
+}
+
+.details-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.cancel-button {
+  border: 1px solid #444;
+  background: transparent;
+  color: #f5f5ff;
+  border-radius: 8px;
+  padding: 0.5rem 1.2rem;
+  cursor: pointer;
+}
+
+.wizard-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.wizard-step {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.wizard-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.wizard-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.wizard-nav-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.wizard-nav-button {
+  border: none;
+  border-radius: 8px;
+  padding: 0.65rem 1.4rem;
+  background: #646cff;
+  color: white;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.wizard-nav-button.secondary {
+  background: #2d2d33;
+}
+
+.wizard-nav-button.delete-button {
+  background: #ff6b6b;
+}
+
+.form-sections-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.form-section-card {
+  background: #232329;
+  border: 1px solid #34343a;
+  border-radius: 12px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.form-section-title {
+  margin: 0;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.form-group label {
+  font-size: 0.85rem;
+  color: #c7c7d0;
+}
+
+input[type='text'],
+input[type='number'],
+input[type='date'],
+input[type='search'],
+select {
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid #3a3a40;
+  background: #1c1c20;
+  color: #f5f5ff;
+}
+
+.variety-dropdown {
+  position: relative;
+  width: 100%;
+}
+
+.variety-dropdown-toggle {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid #3a3a40;
+  background: #1c1c20;
+  color: #f5f5ff;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.variety-dropdown-toggle:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.variety-dropdown.open .variety-dropdown-toggle {
+  border-color: #646cff;
+}
+
+.variety-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  right: 0;
+  padding: 0.75rem;
+  background: #1c1c20;
+  border: 1px solid #424249;
+  border-radius: 10px;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.45);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.variety-dropdown-search {
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid #3a3a40;
+  background: #16161a;
+  color: #f5f5ff;
+}
+
+.variety-options-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.variety-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: #202027;
+  color: #f5f5ff;
+  cursor: pointer;
+  text-align: left;
+  transition: border 0.15s ease, background 0.15s ease;
+}
+
+.variety-option:hover {
+  border-color: #646cff;
+  background: #262632;
+}
+
+.variety-option.selected {
+  border-color: #9196ff;
+  background: rgba(100, 108, 255, 0.15);
+}
+
+.variety-option-name {
+  font-weight: 600;
+}
+
+.variety-option-meta {
+  font-size: 0.75rem;
+  color: #b7b7c6;
+}
+
+.form-helper-text {
+  font-size: 0.75rem;
+  margin-top: 0.25rem;
+  display: block;
+}
+
+.crop-selection-body {
+  gap: 1rem;
+}
+
+.crop-selection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 1rem;
+}
+
+.crop-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1rem;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #292930, #202027);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: transform 0.15s ease, border 0.15s ease;
+}
+
+.crop-tile:hover {
+  transform: translateY(-2px);
+  border-color: #646cff;
+}
+
+.crop-icon {
+  font-size: 2rem;
+}
+
+.crop-subtext {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  color: #9da2ff;
+  word-break: break-all;
+}
+
+.crop-list-empty {
+  text-align: center;
+  color: #a0a0ab;
+  padding: 2rem 1rem;
+  background: #24242b;
+  border-radius: 12px;
+}
+
+.field-search-input,
+.crop-search-input {
+  width: 100%;
+}
+
+.field-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.field-list-header-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.selected-count-badge {
+  background: #2f4cff;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+}
+
+.field-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.field-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  border-radius: 10px;
+  background: #1e1e24;
+  border: 1px solid #323238;
+  cursor: pointer;
+  transition: border 0.15s ease;
+}
+
+.field-card.selected {
+  border-color: #646cff;
+  background: #26262f;
+}
+
+.field-card.registered {
+  background: rgba(255, 255, 255, 0.04);
+  cursor: default;
+}
+
+.field-card-empty {
+  text-align: center;
+  padding: 1.5rem;
+  background: #24242b;
+  border-radius: 12px;
+  color: #a0a0ab;
+}
+
+.field-name {
+  font-weight: 600;
+}
+
+.field-details {
+  color: #a0a0ab;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.85rem;
+}
+
+.cancel-registration-button {
+  border: none;
+  background: transparent;
+  color: #ff6b6b;
+  font-size: 1.25rem;
+  cursor: pointer;
+}
+
+.registered-fields-container {
+  border: 1px solid #34343a;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.registered-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: #25252d;
+  cursor: pointer;
+}
+
+.collapse-toggle-button {
+  border: none;
+  background: none;
+  color: #f5f5ff;
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+.collapsible-content {
+  max-height: 500px;
+  overflow: hidden;
+  transition: max-height 0.25s ease;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.collapsible-content.collapsed {
+  max-height: 0;
+  padding: 0 1rem;
+}
+
+.registered-pagination {
+  align-self: center;
+}
+
+.calendar-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  background: #232329;
+  border: 1px solid #34343a;
+  border-radius: 12px;
+  padding: 1.5rem;
+}
+
+.calendar-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.calendar-controls button {
+  border: 1px solid #3a3a40;
+  background: #1d1d21;
+  color: #ffffff;
+  border-radius: 6px;
+  width: 36px;
+  height: 36px;
+  cursor: pointer;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.day-name {
+  text-align: center;
+  font-weight: 600;
+  color: #c2c2cc;
+}
+
+.day-name.sunday {
+  color: #ff8a80;
+}
+
+.day-name.saturday {
+  color: #81d4fa;
+}
+
+.calendar-day {
+  position: relative;
+  min-height: 72px;
+  border-radius: 10px;
+  background: #1e1e25;
+  border: 1px solid transparent;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 0.5rem;
+  cursor: pointer;
+  transition: border 0.15s ease, background 0.15s ease;
+}
+
+.calendar-day:hover {
+  border-color: #646cff;
+}
+
+.calendar-day.selection-mode {
+  background: #1c1c21;
+}
+
+.calendar-day.today {
+  border-color: #646cff;
+}
+
+.calendar-day.selected {
+  border-color: #76ff03;
+}
+
+.calendar-day.sunday span {
+  color: #ff8a80;
+}
+
+.calendar-day.saturday span {
+  color: #81d4fa;
+}
+
+.calendar-day.empty {
+  background: transparent;
+  border: none;
+  cursor: default;
+}
+
+.registration-count {
+  position: absolute;
+  bottom: 0.4rem;
+  right: 0.5rem;
+  background: rgba(100, 108, 255, 0.15);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.75rem;
+}
+
+.calendar-view-body {
+  display: grid;
+  grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+  gap: 1.5rem;
+}
+
+.calendar-view-details {
+  background: #232329;
+  border: 1px solid #34343a;
+  border-radius: 12px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.calendar-table-section {
+  margin-top: 2rem;
+  background: #232329;
+  border: 1px solid #34343a;
+  border-radius: 12px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.calendar-table-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-end;
+}
+
+.calendar-table-filters .filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 200px;
+}
+
+.calendar-table-filters input,
+.calendar-table-filters select {
+  width: 100%;
+}
+
+.calendar-table-wrapper {
+  overflow-x: auto;
+}
+
+.calendar-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+}
+
+.calendar-table th,
+.calendar-table td {
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid #34343a;
+  text-align: left;
+}
+
+.calendar-table th {
+  background: #1f1f23;
+  color: #d6d6df;
+  font-weight: 600;
+}
+
+.calendar-table tbody tr:hover {
+  background: #2a2a31;
+}
+
+.calendar-table-empty {
+  text-align: center;
+  padding: 1.5rem 0;
+  color: #a5a5af;
+}
+
+.calendar-table-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.calendar-table-actions .btn-edit,
+.calendar-table-actions .btn-delete {
+  border: none;
+  border-radius: 6px;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.calendar-table-actions .btn-edit {
+  background: #646cff;
+  color: #ffffff;
+}
+
+.calendar-table-actions .btn-delete {
+  background: #ff6b6b;
+  color: #0f0f12;
+}
+
+.calendar-table-pagination {
+  margin-top: 0.5rem;
+}
+
+.daily-registrations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.daily-registration-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+  background: #1d1d21;
+  border-radius: 10px;
+  border: 1px solid #323238;
+}
+
+.edit-button {
+  border: none;
+  background: #646cff;
+  color: #ffffff;
+  padding: 0.45rem 0.9rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.no-registrations-message,
+.no-date-selected-message {
+  padding: 1.5rem;
+  background: #24242b;
+  border-radius: 12px;
+  color: #a5a5af;
+}
+
+.calendar-step-body {
+  gap: 1.5rem;
+}
+
+.calendar-selection-header {
+  margin: 0;
+  color: #c2c2cc;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.pagination-controls button {
+  border: 1px solid #3a3a40;
+  background: #1d1d21;
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 0.45rem 0.9rem;
+  cursor: pointer;
+}
+
+.pagination-info {
+  font-size: 0.85rem;
+  color: #c2c2cc;
+}
+
+.loading-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 4rem 0;
+  color: #f5f5ff;
+}
+
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: #646cff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 1024px) {
+  .calendar-view-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .home-actions {
+    flex-direction: column;
+  }
+
+  .wizard-nav {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .wizard-nav-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}

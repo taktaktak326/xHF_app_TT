@@ -1,0 +1,374 @@
+.ndvi-page-container {
+  padding: 2rem;
+}
+
+.ndvi-button-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.season-selection-container {
+  position: relative;
+  width: 450px;
+  margin-bottom: 1.5rem;
+}
+
+.season-selection-header {
+  background-color: #252529;
+  padding: 0.75rem 1.25rem;
+  border-radius: 8px;
+  border: 1px solid #3a3a3f;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: border-color 0.25s;
+}
+
+.season-selection-header:hover {
+  border-color: #646cff;
+}
+
+.season-selection-header-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #9e9e9e;
+  transition: color 0.25s;
+}
+
+.season-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  width: 100%;
+  background: #202024;
+  border: 1px solid #3a3a3f;
+  border-radius: 0 0 12px 12px;
+  margin-top: 4px;
+  padding: 1rem;
+  z-index: 10;
+  max-height: 70vh;
+  overflow-y: auto;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  border-top: none;
+}
+
+.season-dropdown::-webkit-scrollbar {
+  width: 8px;
+}
+
+.season-dropdown::-webkit-scrollbar-thumb {
+  background: #4a4a4f;
+  border-radius: 4px;
+}
+
+.field-season-group {
+  margin-bottom: 1rem;
+}
+
+.field-season-group h4 {
+  margin: 0 0 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #3a3a3f;
+  color: #e0e0e0;
+  font-size: 1.1em;
+}
+
+.season-checkbox-item {
+  display: flex;
+  align-items: center;
+  padding: 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.season-checkbox-item:hover {
+  background-color: #313136;
+}
+
+.season-checkbox-item input {
+  margin-right: 0.75rem;
+  width: 16px;
+  height: 16px;
+  accent-color: #646cff;
+}
+
+.season-checkbox-item label {
+  color: #f0f0f0;
+  cursor: pointer;
+}
+
+.season-checkbox-item.selected {
+  background-color: #2a2a40;
+}
+
+/* テーブルのソート可能なヘッダー */
+.fields-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.ndvi-tooltip {
+  background-color: #252529;
+  border: 1px solid #4a4a4f;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  color: #f0f0f0;
+  min-width: 220px;
+}
+
+.ndvi-tooltip__header {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: #ffffff;
+}
+
+.ndvi-tooltip__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ndvi-tooltip__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.ndvi-tooltip__marker {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-right: 0.5rem;
+}
+
+.ndvi-tooltip__label {
+  flex: 1;
+  color: #d7d7dc;
+}
+
+.ndvi-tooltip__value {
+  font-variant-numeric: tabular-nums;
+  color: #ffffff;
+}
+
+.ndvi-table tbody tr.is-highlighted {
+  background: rgba(100, 108, 255, 0.18);
+  transition: background 0.2s ease;
+}
+
+.series-toggle-container {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px solid #3a3a3f;
+  border-radius: 10px;
+  background-color: #202024;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.series-toggle-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.series-toggle-actions button {
+  padding: 0.4rem 1rem;
+  border-radius: 6px;
+  border: 1px solid rgba(100, 108, 255, 0.45);
+  background: linear-gradient(135deg, rgba(100, 108, 255, 0.25), rgba(100, 108, 255, 0.08));
+  color: #e0e0e0;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.series-toggle-actions button:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(127, 134, 255, 0.45), rgba(100, 108, 255, 0.12));
+  border-color: #9296ff;
+}
+
+.series-toggle-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.series-toggle-list {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.series-toggle-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: #f0f0f0;
+  font-size: 0.95rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid rgba(100, 108, 255, 0.35);
+  background-color: #252529;
+  transition: border-color 0.25s ease, background-color 0.25s ease, transform 0.25s ease;
+}
+
+.series-toggle-item:hover {
+  border-color: #8085ff;
+  background-color: #2b2b31;
+  transform: translateY(-1px);
+}
+
+.series-toggle-item input[type='checkbox'] {
+  accent-color: #646cff;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.series-toggle-item.inactive {
+  opacity: 0.55;
+  border-color: rgba(79, 79, 86, 0.6);
+}
+
+.series-toggle-item.highlighted {
+  border-color: #c1c4ff;
+  box-shadow: 0 0 12px rgba(100, 108, 255, 0.35);
+}
+
+.series-toggle-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  box-shadow: 0 0 8px rgba(100, 108, 255, 0.35);
+}
+
+.series-toggle-label {
+  flex: 1;
+  line-height: 1.2;
+}
+
+.chart-placeholder {
+  width: 100%;
+  height: 100%;
+  border: 1px dashed #4a4a4f;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 1rem;
+  color: #b0b0b5;
+  background: rgba(37, 37, 41, 0.6);
+}
+
+.weather-chart-section {
+  margin-top: 2.5rem;
+  padding: 1.25rem 1.5rem 1.75rem;
+  border: 1px solid #3a3a3f;
+  border-radius: 12px;
+  background: rgba(32, 32, 36, 0.95);
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.weather-chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.weather-chart-header h3 {
+  margin: 0;
+}
+
+.weather-chart-container {
+  height: 320px;
+}
+
+.weather-toggle-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.weather-toggle-actions button {
+  padding: 0.35rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid rgba(100, 108, 255, 0.45);
+  background: linear-gradient(135deg, rgba(100, 108, 255, 0.25), rgba(100, 108, 255, 0.08));
+  color: #e0e0e0;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.weather-toggle-actions button:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(127, 134, 255, 0.45), rgba(100, 108, 255, 0.12));
+  border-color: #9296ff;
+}
+
+.weather-toggle-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.weather-toggle-grid {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.weather-toggle-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: #f0f0f0;
+  font-size: 0.95rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid rgba(100, 108, 255, 0.35);
+  background-color: #252529;
+  transition: border-color 0.25s ease, background-color 0.25s ease, transform 0.25s ease;
+}
+
+.weather-toggle-item:hover {
+  border-color: #8085ff;
+  background-color: #2b2b31;
+  transform: translateY(-1px);
+}
+
+.weather-toggle-item.inactive {
+  opacity: 0.55;
+  border-color: rgba(79, 79, 86, 0.6);
+}
+
+.weather-toggle-item input[type='checkbox'] {
+  accent-color: #646cff;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.weather-toggle-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  box-shadow: 0 0 8px rgba(100, 108, 255, 0.35);
+  flex-shrink: 0;
+}
+
+.weather-toggle-label {
+  flex: 1;
+}

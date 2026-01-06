@@ -1,0 +1,8 @@
+node_modules
+apps/api/data/pref_city.geojson
+apps/api/data/*.tar.gz
+.git
+.gitignore
+__pycache__
+*.pyc
+.DS_Store

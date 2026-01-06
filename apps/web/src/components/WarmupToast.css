@@ -1,0 +1,98 @@
+.warmup-toast {
+  position: fixed;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  width: min(320px, 90vw);
+  background: rgba(24, 26, 32, 0.95);
+  border: 1px solid rgba(121, 134, 255, 0.35);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  color: #e0e7ff;
+  z-index: 2500;
+  overflow: hidden;
+  backdrop-filter: blur(6px);
+  animation: warmup-toast-fade-in 0.25s ease;
+}
+
+.warmup-toast__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem 0.5rem;
+}
+
+.warmup-toast__title {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.warmup-toast__close {
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+
+.warmup-toast__progress {
+  height: 6px;
+  margin: 0 1rem;
+  border-radius: 999px;
+  background: rgba(224, 224, 255, 0.2);
+  overflow: hidden;
+}
+
+.warmup-toast__progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #7c89ff, #64b5f6);
+  transition: width 0.3s ease;
+}
+
+.warmup-toast__body {
+  padding: 0.5rem 1rem 0.75rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.warmup-toast__body p {
+  margin: 0.1rem 0;
+}
+
+.warmup-toast__error {
+  color: #ff8a80;
+}
+
+.warmup-toast__actions {
+  padding: 0 1rem 0.75rem;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.warmup-toast__actions button {
+  border: none;
+  background: #7c89ff;
+  color: #fff;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.warmup-toast--success {
+  border-color: rgba(76, 175, 80, 0.5);
+}
+
+.warmup-toast--failed {
+  border-color: rgba(255, 107, 107, 0.5);
+}
+
+@keyframes warmup-toast-fade-in {
+  from {
+    transform: translateY(16px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "xhf-app-root",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build:web": "npm run build --workspace web",
+    "lint:web": "npm run lint --workspace web",
+    "dev:web": "npm run dev --workspace web"
+  }
+}

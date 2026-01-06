@@ -1,0 +1,1825 @@
+# apps/api/main.py
+import asyncio
+import json
+from datetime import datetime, timedelta, timezone
+import io
+import zipfile
+import os
+import threading
+import time
+from typing import Optional, List, Any, Dict
+from urllib.parse import urlparse, unquote, quote
+
+import httpx
+from dotenv import load_dotenv
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Path
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse, Response
+from pydantic import BaseModel
+
+from settings import settings
+from schemas import (
+    LoginReq,
+    FourValues,
+    FarmsReq,
+    FieldsReq,
+    CombinedFieldDataTasksReq,
+    CombinedFieldsReq,  # ★ 追加
+    BiomassNdviReq,
+    BiomassLaiReq,
+    FieldNotesReq,
+    WeatherByFieldReq,
+    FieldDataLayersReq,
+    FieldDataLayerImageReq,
+    SprayingTaskUpdateReq,
+    MasterdataCropsReq,
+    MasterdataVarietiesReq,
+    MasterdataPartnerTillagesReq,
+    MasterdataTillageSystemsReq,
+    CropSeasonCreateReq,
+    CrossFarmDashboardSearchReq,
+)
+from pydantic import BaseModel
+from services.gigya import gigya_login_impl
+from services.xarvio import get_api_token_impl
+from services.graphql_client import call_graphql
+from services.field_location import enrich_field_with_location, get_pref_city_status, start_pref_city_warmup
+from services.cache import get_last_response, get_by_operation, clear_cache, save_response
+from graphql.queries import (
+    FARMS_OVERVIEW,
+    FIELDS_BY_FARM,
+    COMBINED_DATA_BASE,
+    COMBINED_FIELD_DATA_TASKS,
+    COMBINED_DATA_INSIGHTS,
+    COMBINED_DATA_PREDICTIONS,
+    BIOMASS_NDVI,
+    FIELD_NOTES_BY_FARMS,
+    WEATHER_HISTORIC_FORECAST_DAILY,
+    WEATHER_CLIMATOLOGY_DAILY,
+    SPRAY_WEATHER,
+    WEATHER_HISTORIC_FORECAST_HOURLY,
+    FIELD_DATA_LAYER_IMAGES,
+)
+from graphql.payloads import make_payload
+
+# .env 読み込み
+load_dotenv()
+
+
+class AttachmentDownload(BaseModel):
+    url: str
+    fileName: Optional[str] = None
+    farmUuid: Optional[str] = None
+    farmName: Optional[str] = None
+
+
+class AttachmentsZipReq(BaseModel):
+    attachments: List[AttachmentDownload]
+    zipName: Optional[str] = None
+
+
+def _filename_from_url(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        name = parsed.path.split("/")[-1]
+        name = unquote(name)
+        return name or "attachment"
+    except Exception:
+        return "attachment"
+
+
+def _sanitize_zip_name(name: Optional[str]) -> str:
+    base = (name or "attachments").strip()
+    if not base:
+        base = "attachments"
+    # allow unicode; just strip characters illegal in filenames on major OS
+    safe = base
+    for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
+        safe = safe.replace(ch, '_')
+    if not safe.lower().endswith(".zip"):
+        safe = f"{safe}.zip"
+    return safe
+
+
+def _content_disposition(zip_name: str) -> str:
+    ascii_fallback = zip_name
+    try:
+        ascii_fallback = zip_name.encode("ascii", "ignore").decode("ascii")
+    except Exception:
+        ascii_fallback = "attachments.zip"
+    if not ascii_fallback:
+        ascii_fallback = "attachments.zip"
+    encoded = quote(zip_name)
+    return f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded}'
+
+IMAGE_CACHE_TTL_SEC = int(os.getenv("IMAGE_CACHE_TTL", "300"))
+_image_cache: Dict[str, Dict[str, Any]] = {}
+_image_cache_lock = threading.Lock()
+
+
+def _image_cache_get(url: str):
+    now = time.time()
+    with _image_cache_lock:
+        entry = _image_cache.get(url)
+        if not entry:
+            return None
+        if entry["expires_at"] < now:
+            _image_cache.pop(url, None)
+            return None
+        return entry
+
+
+def _image_cache_set(url: str, content: bytes, content_type: str):
+    expires_at = time.time() + IMAGE_CACHE_TTL_SEC
+    with _image_cache_lock:
+        _image_cache[url] = {
+            "content": content,
+            "content_type": content_type,
+            "expires_at": expires_at,
+        }
+
+
+api_app = FastAPI(title="xhf-app: Gigya login -> Xarvio API token")
+
+# CORS（開発中は緩め / 本番は適切に制限してください）
+api_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_origin_regex=".*",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _sanitize_filename(raw_filename: Optional[str]) -> str:
+    """
+    Eliminate path traversal and empty names; fall back to 'download'.
+    """
+    if not raw_filename:
+        return "download"
+    cleaned = unquote(raw_filename).strip().replace("\\", "_").replace("/", "_")
+    return cleaned or "download"
+
+
+def _ascii_fallback(name: str) -> str:
+    ascii_name = "".join(ch if ord(ch) < 128 else "_" for ch in name).strip("_")
+    return ascii_name or "download"
+
+
+def _summarize_response(label: str, res: Any) -> Dict[str, Any]:
+    """
+    Debug helper: return a token-safe summary of a cached/fetched response or exception.
+    """
+    summary: Dict[str, Any] = {"label": label}
+    if res is None:
+        summary["status"] = "missing"
+        summary["ok"] = False
+        return summary
+    if isinstance(res, Exception):
+        summary["ok"] = False
+        summary["error"] = str(res)
+        summary["exception_type"] = res.__class__.__name__
+        return summary
+    summary["ok"] = res.get("ok")
+    summary["status"] = res.get("status")
+    summary["reason"] = res.get("reason")
+    summary["source"] = res.get("source")
+    payload = (res.get("request") or {}).get("payload") or {}
+    summary["operationName"] = payload.get("operationName")
+    errors = (res.get("response") or {}).get("errors")
+    if errors:
+        summary["graphql_errors"] = errors[:3]
+    return summary
+
+
+def build_locale_candidates(raw_locale: Optional[str]) -> List[Optional[str]]:
+    """
+    Xarvio のマスターAPIは locale パラメータのバリデーションが厳しく、
+    ドキュメントと実装に差異があるケースがあるため複数の候補を試す。
+    優先順位:
+      1. フロントから指定された値（そのまま・大文字化・小文字化）
+      2. 言語コードと国コードの組み合わせ（大文字/小文字）
+      3. 国コードのみ
+      4. デフォルトの EN-GB
+      5. locale なし
+    """
+    candidates: List[Optional[str]] = []
+    if raw_locale:
+        normalized = raw_locale.strip().replace("_", "-")
+        if normalized:
+            base_variants = [
+                normalized,
+                normalized.upper(),
+                normalized.lower(),
+            ]
+            if "-" in normalized:
+                lang, region = normalized.split("-", 1)
+                lang = lang.strip()
+                region = region.strip()
+                combo_variants = [
+                    f"{lang.lower()}-{region.upper()}",
+                    f"{lang.upper()}-{region.upper()}",
+                    f"{lang.lower()}-{region.lower()}",
+                    f"{lang.upper()}-{region.lower()}",
+                    lang.lower(),
+                    lang.upper(),
+                    region.upper(),
+                    region.lower(),
+                ]
+                base_variants.extend([variant for variant in combo_variants if variant])
+            for variant in base_variants:
+                cleaned = variant.replace("_", "-")
+                if cleaned and cleaned not in candidates:
+                    candidates.append(cleaned)
+    if "EN-GB" not in candidates:
+        candidates.append("EN-GB")
+    if None not in candidates:
+        candidates.append(None)
+    return candidates
+
+
+def _merge_cropseason_payload(core: Optional[Dict[str, Any]], extra: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Merge cropSeasonsV2-level data from extra into core (field/season update).
+    If core is None, return extra. If extra is None, return core.
+    """
+    if not extra:
+        return core
+    if not core:
+        return extra
+    try:
+        core_fields = core["response"]["data"]["fieldsV2"]
+        extra_fields = extra["response"]["data"]["fieldsV2"]
+        extra_map = {f["uuid"]: f for f in extra_fields if f.get("uuid")}
+        for field in core_fields:
+            f_uuid = field.get("uuid")
+            if not f_uuid or f_uuid not in extra_map:
+                continue
+            core_cs_map = {cs.get("uuid"): cs for cs in field.get("cropSeasonsV2", []) if cs.get("uuid")}
+            for cs in extra_map[f_uuid].get("cropSeasonsV2", []):
+                cs_uuid = cs.get("uuid")
+                if cs_uuid and cs_uuid in core_cs_map:
+                    core_cs_map[cs_uuid].update(cs)
+        return core
+    except Exception:
+        return core
+
+# ---------------------------
+#        Health Check
+# ---------------------------
+@api_app.get("/healthz")
+async def healthz():
+    return {"ok": True, "graphql_endpoint": settings.GRAPHQL_ENDPOINT}
+
+
+@api_app.post("/warmup")
+async def warmup(force: bool = False):
+    try:
+        status = start_pref_city_warmup(force=force)
+    except Exception as exc:  # pylint: disable=broad-except
+        raise HTTPException(status_code=500, detail={"reason": "warmup_failed", "detail": str(exc)})
+    return JSONResponse({"ok": True, **status})
+
+
+@api_app.get("/warmup/status")
+async def warmup_status():
+    status = get_pref_city_status()
+    return JSONResponse({"ok": True, **status})
+
+
+# ---------------------------
+#     Attachment Download
+# ---------------------------
+@api_app.get("/download-attachment")
+async def download_attachment(url: str, filename: Optional[str] = None):
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(400, {"reason": "invalid_url", "detail": "Only http/https URLs are allowed."})
+
+    safe_filename = _sanitize_filename(filename or parsed.path.rsplit("/", 1)[-1])
+    ascii_filename = _ascii_fallback(safe_filename)
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(url)
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                detail = exc.response.text[:200] if exc.response else str(exc)
+                raise HTTPException(
+                    status_code=exc.response.status_code if exc.response else 502,
+                    detail={"reason": "download_failed", "detail": detail},
+                )
+
+        content_type = resp.headers.get("content-type") or "application/octet-stream"
+        disposition = (
+            f'attachment; filename="{ascii_filename}"; filename*=UTF-8\'\'{quote(safe_filename)}'
+        )
+        headers = {"Content-Disposition": disposition}
+        return Response(content=resp.content, media_type=content_type, headers=headers)
+    except HTTPException:
+        raise
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail={"reason": "download_failed", "detail": str(exc)})
+    except Exception as exc:  # pylint: disable=broad-except
+        raise HTTPException(status_code=500, detail={"reason": "download_failed", "detail": str(exc)})
+
+# ---------------------------
+#        Auth & Token
+# ---------------------------
+@api_app.post("/login")
+async def login(req: LoginReq):
+    out = await gigya_login_impl(req.email, req.password)
+    return JSONResponse(out)
+
+@api_app.post("/get-api-token")
+async def get_api_token(four: FourValues):
+    token = await get_api_token_impl(four)
+    return JSONResponse({"ok": True, "api_token": token})
+
+@api_app.post("/login-and-token")
+async def login_and_token(req: LoginReq):
+    # 1) Gigya ログイン
+    four_resp = await gigya_login_impl(req.email, req.password)
+    if not four_resp.get("ok"):
+        raise HTTPException(401, {"reason": "login failed", "detail": four_resp})
+
+    four = FourValues(
+        login_token=four_resp.get("login_token") or "",
+        gigya_uuid=four_resp.get("gigya_uuid") or "",
+        gigya_uuid_signature=four_resp.get("gigya_uuid_signature") or "",
+        gigya_signature_timestamp=four_resp.get("gigya_signature_timestamp") or "",
+    )
+
+    # 2) Xarvio API トークン
+    api_token = await get_api_token_impl(four)
+    return JSONResponse({
+        "ok": True,
+        "login": four.dict(),
+        "api_token": api_token,
+    })
+
+# ---------------------------
+#        GraphQL Proxies
+# ---------------------------
+@api_app.post("/farms")
+async def farms(req: FarmsReq, background_tasks: BackgroundTasks):
+    payload = make_payload("FarmsOverview", FARMS_OVERVIEW)
+    out = await call_graphql(payload, req.login_token, req.api_token)
+    if not req.includeTokens:
+        out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
+    background_tasks.add_task(start_pref_city_warmup)
+    return JSONResponse(out)
+
+@api_app.post("/fields")
+async def fields(req: FieldsReq):
+    variables = {"farmUuid": req.farm_uuid}
+    payload = make_payload("FieldsByFarm", FIELDS_BY_FARM, variables)
+    out = await call_graphql(payload, req.login_token, req.api_token)
+    if not req.includeTokens:
+        out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
+    return JSONResponse(out)
+
+
+@api_app.post("/field-data-layers")
+async def field_data_layers(req: FieldDataLayersReq):
+    """
+    特定圃場の衛星マップ用データレイヤを取得する。
+    """
+    default_types = [
+        "BIOMASS_SINGLE_IMAGE_LAI",
+        "BIOMASS_NDVI",
+        "TRUE_COLOR_ANALYSIS",
+        "BIOMASS_PROXY_MONITORING_VECTOR_ANALYSIS",
+        "WEED_CLASSIFICATION_NDVI",
+        "BIOMASS_MULTI_IMAGE_LAI",
+    ]
+    variables = {"fieldUuid": req.field_uuid, "types": req.types or default_types}
+    payload = make_payload("FieldDataLayerImages", FIELD_DATA_LAYER_IMAGES, variables)
+
+    cached_response = get_by_operation("FieldDataLayerImages", payload)
+    if cached_response:
+        cached = dict(cached_response)
+        cached.setdefault("source", "cache")
+        return JSONResponse(cached)
+
+    out = await call_graphql(payload, req.login_token, req.api_token)
+    out["source"] = "api"
+    if not req.includeTokens:
+        if out.get("request", {}).get("headers", {}).get("Cookie"):
+            out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
+
+    save_response("FieldDataLayerImages", payload, out)
+    print("💾 [CACHE] Saved response for operation: FieldDataLayerImages")
+    return JSONResponse(out)
+
+
+@api_app.post("/field-data-layer/image")
+async def field_data_layer_image(req: FieldDataLayerImageReq):
+    """
+    fieldDataLayersの画像URLをバックエンド経由で取得し、トークン付きで代理取得する。
+    """
+    cached = _image_cache_get(req.image_url)
+    if cached:
+        return StreamingResponse(io.BytesIO(cached["content"]), media_type=cached.get("content_type") or "application/octet-stream")
+
+    headers = {
+        "Accept": "*/*",
+        "Cookie": f"LOGIN_TOKEN={req.login_token}; DF_TOKEN={req.api_token}",
+        "User-Agent": "xhf-app/1.0",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(req.image_url, headers=headers)
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=f"Image fetch failed: {exc.response.text}")
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Image fetch request error: {exc}")
+    except Exception as exc:  # pylint: disable=broad-except
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
+
+    content_type = resp.headers.get("content-type", "application/octet-stream")
+    _image_cache_set(req.image_url, resp.content, content_type)
+    return StreamingResponse(io.BytesIO(resp.content), media_type=content_type)
+
+def merge_fields_data(base_data, insights_data, predictions_data, tasks_data):
+    """複数のレスポンスデータをマージする"""
+    fields_map = {field['uuid']: field for field in base_data['data']['fieldsV2']}
+
+    # insights, predictions, tasks をマージ
+    for data_source in [insights_data, predictions_data, tasks_data]:
+        if not data_source or not data_source.get('data') or not data_source['data'].get('fieldsV2'):
+            continue
+        for field_update in data_source['data']['fieldsV2']:
+            field_uuid = field_update['uuid']
+            if field_uuid in fields_map:
+                if 'cropSeasonsV2' in field_update and field_update['cropSeasonsV2']:
+                    cs_map = {cs['uuid']: cs for cs in fields_map[field_uuid].get('cropSeasonsV2', [])}
+                    for cs_update in field_update['cropSeasonsV2']:
+                        if cs_update['uuid'] in cs_map:
+                            cs_map[cs_update['uuid']].update(cs_update)
+
+    merged = list(fields_map.values())
+    for field in merged:
+        enrich_field_with_location(field)
+    return merged
+
+
+@api_app.post("/combined-fields")
+async def combined_fields(req: CombinedFieldsReq):
+    """
+    選択した複数の Farm UUID に対し、CombinedFieldData を実行して返す。
+    body 例:
+    {
+      "login_token": "...",
+      "api_token": "...",
+      "farm_uuids": ["uuid1", "uuid2"],
+      "languageCode": "ja",
+      "cropSeasonLifeCycleStates": ["ACTIVE", "PLANNED"],
+      "withBoundarySvg": true,
+      "includeTokens": false
+    }
+    """
+    JST = timezone(timedelta(hours=9))
+    now_jst = datetime.now(JST)
+    from_dt_utc = now_jst.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=9)
+    till_dt_utc = (now_jst + timedelta(days=30)).replace(hour=23, minute=59, second=59, microsecond=999000) - timedelta(hours=9)
+    from_date = from_dt_utc.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    till_date = till_dt_utc.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+    # 各サブリクエスト設定を config 化
+    include_tasks = getattr(req, "includeTasks", True)
+    request_configs = {
+        "base": {
+            "optional": False,
+            "payload": make_payload("CombinedDataBase", COMBINED_DATA_BASE, {
+                "farmUuids": req.farm_uuids,
+                "languageCode": req.languageCode,
+                "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+                "withBoundary": req.withBoundarySvg,
+            }),
+        },
+        "insights": {
+            "optional": True,
+            "timeout": 10.0,
+            "payload": make_payload("CombinedDataInsights", COMBINED_DATA_INSIGHTS, {
+                "farmUuids": req.farm_uuids,
+                "fromDate": from_date,
+                "tillDate": till_date,
+                "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+                "withrisk": True,
+            }),
+        },
+        "predictions": {
+            "optional": True,
+            "timeout": 10.0,
+            "payload": make_payload("CombinedDataPredictions", COMBINED_DATA_PREDICTIONS, {
+                "farmUuids": req.farm_uuids,
+                "languageCode": req.languageCode,
+                "countryCode": req.countryCode,
+                "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+            }),
+        },
+        "risk1": {
+            "optional": True,
+            "payload": make_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
+                "farmUuids": req.farm_uuids,
+                "fromDate": from_date,
+                "tillDate": till_date,
+                "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+                "withCropSeasonsV2": True,
+                "withactionRecommendations": True,
+                "withnutritionRecommendations": True,
+                "withwaterRecommendations": True,
+                "withactionWindows": True,
+                "withweedManagementRecommendations": True,
+                "withCropSeasonStatus": False,
+                "withNutritionStatus": False,
+                "withWaterStatus": False,
+                "withrisk": False,
+            }),
+        },
+        "risk2": {
+            "optional": True,
+            "payload": make_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
+                "farmUuids": req.farm_uuids,
+                "fromDate": from_date,
+                "tillDate": till_date,
+                "languageCode": req.languageCode,
+                "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+                "withCropSeasonsV2": True,
+                "withactionRecommendations": False,
+                "withnutritionRecommendations": False,
+                "withwaterRecommendations": False,
+                "withactionWindows": False,
+                "withweedManagementRecommendations": False,
+                "withCropSeasonStatus": True,
+                "withNutritionStatus": True,
+                "withWaterStatus": True,
+                "withrisk": True,
+                "withtimingStreessesInfo": True,
+            }),
+        },
+    }
+
+    if include_tasks:
+        request_configs["tasks"] = {
+            "optional": True,
+            "payload": make_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
+                "farmUuids": req.farm_uuids,
+                "languageCode": req.languageCode,
+                "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+                # boundary は base のみに限定
+                "withBoundary": False,
+                "withCropSeasonsV2": True,
+                "withHarvests": req.withHarvests,
+                "withCropEstablishments": req.withCropEstablishments,
+                "withLandPreparations": req.withLandPreparations,
+                "withDroneFlights": req.withDroneFlights,
+                "withSeedTreatments": req.withSeedTreatments,
+                "withSeedBoxTreatments": req.withSeedBoxTreatments,
+                "withSmartSprayingTasks": req.withSmartSprayingTasks,
+                "withWaterManagementTasks": req.withWaterManagementTasks,
+                "withScoutingTasks": req.withScoutingTasks,
+                "withObservations": req.withObservations,
+                "withSprayingsV2": req.withSprayingsV2,
+                "withSoilSamplingTasks": req.withSoilSamplingTasks,
+            }),
+        }
+        request_configs["tasks_sprayings"] = {
+            "optional": True,
+            "condition": lambda rq: rq.withSprayingsV2,
+            "payload": make_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
+                "farmUuids": req.farm_uuids,
+                "languageCode": req.languageCode,
+                "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+                "withBoundary": False,
+                "withCropSeasonsV2": True,
+                "withHarvests": False,
+                "withCropEstablishments": False,
+                "withLandPreparations": False,
+                "withDroneFlights": False,
+                "withSeedTreatments": False,
+                "withSeedBoxTreatments": False,
+                "withSmartSprayingTasks": False,
+                "withWaterManagementTasks": False,
+                "withScoutingTasks": False,
+                "withObservations": False,
+                "withSprayingsV2": True,
+                "withSoilSamplingTasks": False,
+            }),
+        }
+
+    warmup_status = start_pref_city_warmup()
+    operation_name_for_cache = "CombinedFieldData" # フロントエンドの互換性のため
+
+    # ストリーミングモード: NDJSON で順次返す（フロント側が対応している場合のみ）
+    if req.stream:
+        # 先にキャッシュが揃っていれば一括で返す（ストリーム不要）
+        cache_lookup_stream = {}
+        for label, cfg in request_configs.items():
+            if cfg.get("condition") and not cfg["condition"](req):
+                continue
+            payload = cfg["payload"]
+            op_name = payload.get("operationName") or "CombinedFieldData"
+            cache_lookup_stream[label] = get_by_operation(op_name, payload)
+        def _ok(res: Any) -> bool:
+            return isinstance(res, dict) and res.get("ok", True) is not False
+        # 全ラベル（条件付きを含む）がキャッシュに揃っている場合のみストリームを省略
+        all_labels_ready = all(
+            _ok(cache_lookup_stream.get(label))
+            for label, cfg in request_configs.items()
+            if not cfg.get("condition") or cfg["condition"](req)
+        )
+        if all_labels_ready:
+            base_res = cache_lookup_stream["base"]
+            insights_res = cache_lookup_stream["insights"] if _ok(cache_lookup_stream["insights"]) else None
+            predictions_res = cache_lookup_stream["predictions"] if _ok(cache_lookup_stream["predictions"]) else None
+            tasks_res = cache_lookup_stream.get("tasks") if _ok(cache_lookup_stream.get("tasks")) else None
+            tasks_sprayings_res = cache_lookup_stream.get("tasks_sprayings") if _ok(cache_lookup_stream.get("tasks_sprayings")) else None
+            risk1_res = cache_lookup_stream["risk1"] if _ok(cache_lookup_stream["risk1"]) else None
+            risk2_res = cache_lookup_stream["risk2"] if _ok(cache_lookup_stream["risk2"]) else None
+            tasks_res = _merge_cropseason_payload(tasks_res, tasks_sprayings_res)
+            tasks_res = _merge_cropseason_payload(tasks_res, risk1_res)
+            tasks_res = _merge_cropseason_payload(tasks_res, risk2_res)
+            merged_fields = merge_fields_data(
+                base_res["response"],
+                insights_res["response"] if insights_res else None,
+                predictions_res["response"] if predictions_res else None,
+                tasks_res["response"] if tasks_res else None,
+            )
+            warnings = []
+            if not insights_res: warnings.append({"reason": "insights_pending"})
+            if not predictions_res: warnings.append({"reason": "predictions_pending"})
+            if not tasks_res: warnings.append({"reason": "tasks_pending"})
+            out_cache = {
+                "ok": True,
+                "status": 200,
+                "source": "cache",
+                "response": {"data": {"fieldsV2": merged_fields}},
+                "warnings": warnings,
+                "_sub_responses": {
+                    "base": base_res,
+                    "insights": insights_res,
+                    "predictions": predictions_res,
+                    "tasks": tasks_res,
+                    "tasks_sprayings": tasks_sprayings_res,
+                    "risk1": risk1_res,
+                    "risk2": risk2_res,
+                },
+                "warmup": warmup_status,
+            }
+            return JSONResponse(out_cache)
+
+        def _log_stream_result(label: str, res: Any):
+            try:
+                if isinstance(res, Exception):
+                    print(f"[STREAM][{label}] exception: {res}")
+                    return
+                if isinstance(res, dict) and res.get("ok") is False:
+                    status = res.get("status")
+                    reason = res.get("reason") or res.get("response", {}).get("errors")
+                    print(f"[STREAM][{label}] ok:false status={status} reason={reason}")
+                    return
+                if isinstance(res, dict) and res.get("ok", True) is True:
+                    status = res.get("status")
+                    data = res.get("response", {}).get("data", {})
+                    fields_count = len(data.get("fieldsV2") or data.get("fields") or [])
+                    print(f"[STREAM][{label}] ok:true status={status} fields={fields_count}")
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"[STREAM][{label}] log error: {exc}")
+
+        async def streamer():
+            # キャッシュは使わず都度取得
+            tasks_map = {}
+            for label, cfg in request_configs.items():
+                if cfg.get("condition") and not cfg["condition"](req):
+                    continue
+                tasks_map[label] = asyncio.create_task(call_graphql(cfg["payload"], req.login_token, req.api_token))
+
+            # 先に base を返す
+            base_res = await tasks_map["base"]
+            try:
+                for f in base_res.get("response", {}).get("data", {}).get("fieldsV2", []) or []:
+                    enrich_field_with_location(f)
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"[WARN] enrich location failed in stream base: {exc}")
+            yield json.dumps({"type": "base", "data": base_res}) + "\n"
+
+            # 残りは完了した順に返す
+            stream_results = {"base": base_res}
+            task_label_map = {v: k for k, v in tasks_map.items()}
+            for task in asyncio.as_completed([t for k, t in tasks_map.items() if k != "base"]):
+                label = task_label_map.get(task, "unknown")
+                try:
+                    res = await task
+                except Exception as exc:  # pylint: disable=broad-except
+                    res = {"ok": False, "error": str(exc)}
+                _log_stream_result(label, res)
+                stream_results[label] = res
+                yield json.dumps({"type": label, "data": res}) + "\n"
+
+            try:
+                summary = {
+                    key: (
+                        "missing" if key not in stream_results else
+                        f"ok={stream_results[key].get('ok')}" if isinstance(stream_results[key], dict) else
+                        stream_results[key].__class__.__name__
+                    )
+                    for key in request_configs.keys()
+                }
+                print(f"[STREAM] summary {summary}")
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"[STREAM] summary log error: {exc}")
+
+            yield json.dumps({"type": "done", "warmup": warmup_status}) + "\n"
+
+        return StreamingResponse(streamer(), media_type="application/x-ndjson")
+
+    # 1. まずキャッシュを確認し、不足分だけ API を呼び出す
+    operation_name_for_cache = "CombinedFieldData" # フロントエンドの互換性のため
+    payload_map = {label: cfg["payload"] for label, cfg in request_configs.items()}
+    cache_lookup = {
+        label: get_by_operation(operation_name_for_cache if label != "base" else "CombinedDataBase", cfg["payload"])
+        for label, cfg in request_configs.items()
+        if not cfg.get("condition") or cfg["condition"](req)
+    }
+
+    prepared_cache = {}
+    for key, cached in cache_lookup.items():
+        if cached:
+            if cached.get("ok") is False:
+                continue
+            prepared = {**cached}
+            prepared.setdefault("request", {"payload": payload_map[key]})
+            prepared["source"] = "cache"
+            prepared_cache[key] = prepared
+
+    # combined-fields 由来のキャッシュなら、埋め込まれたサブレスポンスを流用して不足を補う
+    tasks_cache = prepared_cache.get("tasks") or cache_lookup.get("tasks")
+    if tasks_cache and tasks_cache.get("_sub_responses"):
+        subs = tasks_cache.get("_sub_responses") or {}
+        for key in ("base", "insights", "predictions", "tasks"):
+            if subs.get(key) and (key not in prepared_cache or key == "tasks"):
+                prepared_cache[key] = subs[key]
+
+    fetch_plan = []
+    if "base" not in prepared_cache:
+        fetch_plan.append(("base", call_graphql(request_configs["base"]["payload"], req.login_token, req.api_token)))
+    for label, cfg in request_configs.items():
+        if cfg.get("condition") and not cfg["condition"](req):
+            continue
+        if label not in prepared_cache:
+            fetch_plan.append((label, call_graphql(cfg["payload"], req.login_token, req.api_token)))
+
+    # optional ラベルは一定時間で諦めて部分成功に回す
+    optional_labels_with_timeout = {label for label, cfg in request_configs.items() if cfg.get("optional")}
+    timeout_sec = 10.0
+
+    async def _maybe_timeout(label: str, coro):
+        if label not in optional_labels_with_timeout:
+            return await coro
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout_sec)
+        except Exception as exc:  # pylint: disable=broad-except
+            return exc
+
+    fetched: Dict[str, Any] = {}
+    if fetch_plan:
+        # ラベル → Task のマップを作り、タイムアウト付きで「揃ったものから」回収
+        tasks_map = {label: asyncio.create_task(_maybe_timeout(label, coro)) for label, coro in fetch_plan}
+        timeout_sec = 7.0
+        done, pending = await asyncio.wait(tasks_map.values(), timeout=timeout_sec)
+        # 回収できたもの
+        for task in done:
+            try:
+                result = task.result()
+            except Exception as exc:  # pylint: disable=broad-except
+                result = exc
+            label = next((k for k, v in tasks_map.items() if v is task), None)
+            if label:
+                fetched[label] = result
+        # タイムアウトして残ったものはキャンセルして TimeoutError を格納（optionalのみ想定）
+        for task in pending:
+            task.cancel()
+            label = next((k for k, v in tasks_map.items() if v is task), None)
+            if label:
+                fetched[label] = asyncio.TimeoutError(f"{label} timed out after {timeout_sec}s")
+
+    # insights だけはタイムアウトが多いので個別にリトライする
+    if "insights" not in prepared_cache:
+        insights_attempts = 2
+        insights_delay = 3  # seconds
+        insights_result: Any = None
+        payload_insights = request_configs["insights"]["payload"]
+        for attempt in range(1, insights_attempts + 1):
+            try:
+                insights_result = await call_graphql(payload_insights, req.login_token, req.api_token)
+                break
+            except Exception as exc:  # pylint: disable=broad-except
+                insights_result = exc
+                if attempt >= insights_attempts:
+                    break
+                await asyncio.sleep(insights_delay)
+        fetched["insights"] = insights_result
+
+    # 取得状況をまとめておく（成功/失敗問わず）。フロントやログでデバッグに使う。
+    diagnostics = {
+        label: _summarize_response(
+            label,
+            prepared_cache.get(label) or fetched.get(label) or cache_lookup.get(label),
+        )
+        for label in (["base", "insights", "predictions"] + (["tasks"] if include_tasks else []))
+    }
+
+    # エラーチェック（Base は必須、他は警告を添えて部分成功を許容）
+    def _is_error(res: Any) -> bool:
+        return isinstance(res, Exception) or (isinstance(res, dict) and res.get("ok") is False)
+
+    errors_by_label = {
+        label: res
+        for label, res in {**prepared_cache, **fetched}.items()
+        if _is_error(res)
+    }
+
+    critical_labels = {"base"}
+    optional_labels = {label for label, cfg in request_configs.items() if cfg.get("optional")}
+
+    critical_errors = [res for label, res in errors_by_label.items() if label in critical_labels]
+    optional_errors = {label: res for label, res in errors_by_label.items() if label in optional_labels}
+
+    if critical_errors:
+        first_error = critical_errors[0]
+        if isinstance(first_error, Exception):
+            detail = {"reason": "combined_fields_failed", "detail": str(first_error), "diagnostics": diagnostics}
+            raise HTTPException(status_code=500, detail=detail)
+        error_payload = {
+            **first_error,
+            "reason": "combined_fields_failed",
+            "diagnostics": diagnostics,
+            "fetch_plan": [label for label, _ in fetch_plan],
+        }
+        return JSONResponse(status_code=first_error.get("status", 500), content=error_payload)
+
+    base_res = prepared_cache.get("base") or fetched.get("base")
+    insights_res_candidate = prepared_cache.get("insights") or fetched.get("insights")
+    insights_res = insights_res_candidate if isinstance(insights_res_candidate, dict) and insights_res_candidate.get("ok", True) is not False else None
+    predictions_res_candidate = prepared_cache.get("predictions") or fetched.get("predictions")
+    predictions_res = predictions_res_candidate if isinstance(predictions_res_candidate, dict) and predictions_res_candidate.get("ok", True) is not False else None
+    tasks_res_candidate = prepared_cache.get("tasks") or fetched.get("tasks")
+    tasks_res = tasks_res_candidate if isinstance(tasks_res_candidate, dict) and tasks_res_candidate.get("ok", True) is not False else None
+    tasks_sprayings_candidate = prepared_cache.get("tasks_sprayings") or fetched.get("tasks_sprayings")
+    tasks_sprayings_res = tasks_sprayings_candidate if isinstance(tasks_sprayings_candidate, dict) and tasks_sprayings_candidate.get("ok", True) is not False else None
+    risk1_candidate = prepared_cache.get("risk1") or fetched.get("risk1")
+    risk1_res = risk1_candidate if isinstance(risk1_candidate, dict) and risk1_candidate.get("ok", True) is not False else None
+    risk2_candidate = prepared_cache.get("risk2") or fetched.get("risk2")
+    risk2_res = risk2_candidate if isinstance(risk2_candidate, dict) and risk2_candidate.get("ok", True) is not False else None
+
+    # combined-fields 由来のキャッシュであれば、サブレスポンスを優先的に流用する
+    if tasks_res and tasks_res.get("_sub_responses"):
+        base_res = base_res or tasks_res["_sub_responses"].get("base")
+        insights_res = insights_res or tasks_res["_sub_responses"].get("insights")
+        predictions_res = predictions_res or tasks_res["_sub_responses"].get("predictions")
+        tasks_res = tasks_res["_sub_responses"].get("tasks") or tasks_res
+
+    if not base_res:
+        raise HTTPException(status_code=500, detail="必要なデータの取得に失敗しました（base が欠落）。")
+
+    warnings = []
+    for label, err in optional_errors.items():
+        if label == "insights" and not insights_res:
+            warnings.append({"reason": "insights_unavailable", "detail": str(err)})
+        if label == "predictions" and not predictions_res:
+            warnings.append({"reason": "predictions_unavailable", "detail": str(err)})
+        if label == "tasks" and not tasks_res:
+            warnings.append({"reason": "tasks_unavailable", "detail": str(err)})
+        if label == "tasks_sprayings" and not tasks_sprayings_res:
+            warnings.append({"reason": "tasks_sprayings_unavailable", "detail": str(err)})
+        if label == "risk1" and not risk1_res:
+            warnings.append({"reason": "risk_recommendations_unavailable", "detail": str(err)})
+        if label == "risk2" and not risk2_res:
+            warnings.append({"reason": "risk_status_unavailable", "detail": str(err)})
+
+    # Sprayings / Risk を別レスポンスからマージ
+    tasks_res = _merge_cropseason_payload(tasks_res, tasks_sprayings_res)
+    tasks_res = _merge_cropseason_payload(tasks_res, risk1_res)
+    tasks_res = _merge_cropseason_payload(tasks_res, risk2_res)
+
+    # 3つのレスポンスをマージ
+    merged_fields = merge_fields_data(
+        base_res['response'],
+        insights_res['response'] if insights_res else None,
+        predictions_res['response'] if predictions_res else None,
+        tasks_res['response'] if tasks_res else None,
+    )
+
+    # 位置情報が欠落している場合は、強制ウォームアップして再付与を試みる
+    def _has_complete_location(field: dict) -> bool:
+        loc = field.get("location") or {}
+        return bool(loc.get("prefecture")) and bool(loc.get("municipality")) and loc.get("latitude") is not None and loc.get("longitude") is not None
+
+    if any(not _has_complete_location(f) for f in merged_fields):
+        try:
+            warmup_status = start_pref_city_warmup(force=True)
+            for f in merged_fields:
+                enrich_field_with_location(f)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WARN] failed to force warmup for location enrichment: {exc}")
+    else:
+        warmup_status = warmup_status if 'warmup_status' in locals() else start_pref_city_warmup()
+
+
+    source_label = "cache" if not fetch_plan else "api"
+
+    # フロントエンドに返す最終的なレスポンスを構築
+    out = {
+        "ok": True,
+        "status": 200,
+        "source": source_label,
+        "request": { # 代表としてbaseリクエストを格納
+            "url": base_res["request"]["url"],
+            "headers": base_res["request"]["headers"],
+            "payload": request_configs["base"]["payload"],
+        },
+        "response": {
+            "data": {
+                "fieldsV2": merged_fields
+            }
+        },
+        # デバッグ用に個別のレスポンスも格納
+        "_sub_responses": {
+            "base": base_res,
+            "insights": insights_res,
+            "predictions": predictions_res,
+            "tasks": tasks_res,
+            "tasks_sprayings": tasks_sprayings_res,
+            "risk1": risk1_res,
+            "risk2": risk2_res,
+        },
+        "warmup": warmup_status,
+        "locationEnrichmentPending": not warmup_status.get("loaded", False),
+    }
+    if warnings:
+        out["warnings"] = warnings
+
+    if not req.includeTokens:
+        out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
+
+    def _has_complete_location(field: dict) -> bool:
+        location = field.get("location") or {}
+        prefecture = location.get("prefecture")
+        municipality = location.get("municipality")
+        return bool(prefecture) and bool(municipality)
+
+    if all(_has_complete_location(field) for field in merged_fields):
+        payload_for_cache = (
+            request_configs.get("tasks", {}).get("payload")
+            or request_configs["base"]["payload"]
+        )
+        save_response(operation_name_for_cache, payload_for_cache, out)
+        print(f"💾 [CACHE] Saved response for operation: {operation_name_for_cache}")
+    else:
+        print(f"⚠️ [CACHE] Skipped cache save for {operation_name_for_cache} due to missing location info")
+    return JSONResponse(out)
+
+@api_app.post("/combined-field-data-tasks")
+async def combined_field_data_tasks(req: CombinedFieldDataTasksReq):
+    """
+    指定された farmUuids と各種フラグに基づいて、タスク関連のフィールドデータを取得する。
+    """
+    variables = {
+        "farmUuids": req.farm_uuids,
+        "languageCode": req.languageCode,
+        "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+        "withBoundary": req.withBoundary,
+        "withCropSeasonsV2": req.withCropSeasonsV2,
+        "withHarvests": req.withHarvests,
+        "withCropEstablishments": req.withCropEstablishments,
+        "withLandPreparations": req.withLandPreparations,
+        "withDroneFlights": req.withDroneFlights,
+        "withSeedTreatments": req.withSeedTreatments,
+        "withSeedBoxTreatments": req.withSeedBoxTreatments,
+        "withSmartSprayingTasks": req.withSmartSprayingTasks,
+        "withWaterManagementTasks": req.withWaterManagementTasks,
+        "withScoutingTasks": req.withScoutingTasks,
+        "withObservations": req.withObservations,
+        "withSprayingsV2": req.withSprayingsV2,
+        "withSoilSamplingTasks": req.withSoilSamplingTasks,
+    }
+    # フロントエンドの互換性のため、オペレーション名は "CombinedFieldData" を使用
+    operation_name = "CombinedFieldData"
+    payload = make_payload(operation_name, COMBINED_FIELD_DATA_TASKS, variables)
+
+    # 1. キャッシュを確認
+    cached_response = get_by_operation(operation_name, payload)
+    if cached_response:
+        cached_response["source"] = "cache"
+        print(f"✅ [CACHE] Used cache for operation: {operation_name}")
+        return JSONResponse(cached_response)
+
+    # 2. キャッシュがなければAPIを呼び出す
+    out = await call_graphql(payload, req.login_token, req.api_token)
+
+    out["source"] = "api"
+    if not req.includeTokens:
+        # レスポンスにトークンが含まれている場合、マスクする
+        if out.get("request", {}).get("headers", {}).get("Cookie"):
+            out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
+
+    # 3. 最終的なレスポンスをキャッシュに保存
+    # エラーレスポンスはキャッシュしない
+    if out.get("ok"):
+        save_response(operation_name, payload, out)
+        print(f"💾 [CACHE] Saved response for operation: {operation_name}")
+
+    return JSONResponse(out)
+
+@api_app.post("/tasks/v2/sprayings/{task_uuid}")
+async def update_spraying_task(task_uuid: str, req: SprayingTaskUpdateReq):
+    """
+    Sprayings タスクの予定日/実行日を更新するプロキシ。
+    """
+    if not req.plannedDate and not req.executionDate:
+        raise HTTPException(400, {"reason": "missing_update_fields"})
+
+    url = f"https://fm-api.xarvio.com/api/tasks/v2/sprayings/{task_uuid}"
+    if_match = req.ifMatch
+    if not if_match:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                get_headers = {
+                    "Accept": "application/json",
+                    "Cookie": f"LOGIN_TOKEN={req.login_token}; DF_TOKEN={req.api_token}",
+                    "X-Login-Token": req.login_token,
+                    "Origin": "https://fm.xarvio.com",
+                    "Referer": "https://fm.xarvio.com/",
+                    "User-Agent": "xhf-app/1.0",
+                }
+                etag_resp = await client.get(url, headers=get_headers)
+                if_match = etag_resp.headers.get("ETag")
+        except httpx.RequestError:
+            if_match = None
+    if not if_match:
+        if_match = "*"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/merge-patch+json",
+        "If-Match": if_match,
+        "Cookie": f"LOGIN_TOKEN={req.login_token}; DF_TOKEN={req.api_token}",
+        "X-Login-Token": req.login_token,
+        "Origin": "https://fm.xarvio.com",
+        "Referer": "https://fm.xarvio.com/",
+        "User-Agent": "xhf-app/1.0",
+    }
+    payload = {
+        "plannedDate": req.plannedDate,
+        "executionDate": req.executionDate,
+    }
+
+    resp: httpx.Response | None = None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.patch(url, headers=headers, json=payload)
+            if resp.status_code == 405:
+                resp = await client.put(url, headers=headers, json=payload)
+    except httpx.RequestError as exc:
+        raise HTTPException(502, {"reason": "xarvio request error", "detail": str(exc)})
+
+    if resp is None:
+        raise HTTPException(502, {"reason": "xarvio request error", "detail": "no response"})
+
+    out: Dict[str, Any] = {
+        "ok": resp.status_code < 400,
+        "status": resp.status_code,
+        "reason": resp.reason_phrase,
+        "request": {
+            "url": str(resp.request.url) if resp.request else url,
+            "headers": {**headers, "Cookie": "MASKED"},
+            "payload": payload,
+        },
+    }
+
+    try:
+        out["response"] = resp.json()
+    except Exception:
+        out["response_text"] = (resp.text or "")[:4000]
+
+    if not req.includeTokens:
+        if out.get("request", {}).get("headers", {}).get("Cookie"):
+            out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
+
+    if resp.status_code >= 400:
+        raise HTTPException(resp.status_code, out)
+
+    return JSONResponse(out)
+
+@api_app.post("/biomass-ndvi")
+async def biomass_ndvi(req: BiomassNdviReq):
+    """
+    複数の CropSeason UUID に対し、NDVI値を取得して返す。
+    """
+    # 毎回同じ日の終わりを `till` に設定することで、キャッシュキーを安定させる
+    JST = timezone(timedelta(hours=9))
+    now_jst = datetime.now(JST)
+    till_dt_utc = now_jst.replace(hour=23, minute=59, second=59, microsecond=999000) - timedelta(hours=9)
+    till_date = till_dt_utc.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+    variables = {
+        "uuids": req.crop_season_uuids,
+        "from": req.from_date,
+        "till": till_date
+    }
+    payload = make_payload("Biomass", BIOMASS_NDVI, variables)
+
+    # 1. まずキャッシュを確認
+    cached_response = get_by_operation("Biomass", payload)
+    if cached_response:
+        cached_response["source"] = "cache"
+        print(f"✅ [CACHE] Used cache for operation: Biomass")
+        return JSONResponse(cached_response)
+
+    # 2. キャッシュがなければAPIを呼び出す
+    out = await call_graphql(payload, req.login_token, req.api_token)
+
+    out["source"] = "api" # Explicitly set source for new API calls
+    if not req.includeTokens:
+        out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
+
+    # 3. 最終的なレスポンスをキャッシュに保存
+    save_response("Biomass", payload, out)
+    print(f"💾 [CACHE] Saved response for operation: Biomass")
+    return JSONResponse(out)
+
+@api_app.post("/biomass-lai")
+async def biomass_lai(req: BiomassLaiReq):
+    """
+    複数の CropSeason UUID に対し、LAI値を取得して返す。(REST のみ)
+    """
+    operation_name = "BiomassLaiRest"
+    variables = {
+        "uuids": req.crop_season_uuids,
+        "from": req.from_date,
+        "till": req.till_date,
+    }
+    payload = make_payload(operation_name, "", variables)
+
+    cached_response = get_by_operation(operation_name, payload)
+    if cached_response:
+        cached = dict(cached_response)
+        cached.setdefault("source", "cache")
+        return JSONResponse(cached)
+
+    return await _biomass_lai_rest_proxy(req, payload, operation_name)
+
+
+async def _biomass_lai_rest_proxy(req: BiomassLaiReq, payload: Dict[str, Any], operation_name: str = "BiomassLai"):
+    """
+    GraphQL が利用できない際のフォールバック（従来の REST エンドポイント）。
+    レスポンス形式は GraphQL プロキシと同等に整形する。
+    """
+    rest_endpoint = "https://fm-api.xarvio.com/api/agronomic-index-analysis/biomass-analysis"
+    headers = {
+        "Accept": "application/json",
+        "Cookie": f"LOGIN_TOKEN={req.login_token}; DF_TOKEN={req.api_token}",
+    }
+    params = {
+        "cropSeasonUuid": ",".join(req.crop_season_uuids),
+        "fromDate": req.from_date,
+        "tillDate": req.till_date,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(rest_endpoint, headers=headers, params=params)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=f"Xarvio API error: {exc.response.text}")
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Request to Xarvio API failed: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {exc}")
+
+    text = response.text or ""
+    data = response.json() if text else []
+    _sanitize_biomass_entries(data)
+
+    cookie_for_response = "MASKED" if req.includeTokens else "LOGIN_TOKEN=***; DF_TOKEN=***"
+
+    graph_like = {
+        "ok": True,
+        "status": response.status_code,
+        "reason": response.reason_phrase,
+        "source": "rest",
+        "request": {
+            "url": str(response.request.url),
+            "headers": {"Cookie": cookie_for_response},
+            "payload": payload,
+            "method": "GET",
+        },
+        "response_meta": {
+            "content_type": response.headers.get("content-type"),
+            "url": str(response.url),
+        },
+        "response": {
+            "data": {
+                "biomassAnalysis": data or [],
+            }
+        },
+    }
+    save_response(operation_name, payload, graph_like)
+    print(f"💾 [CACHE] Saved response for operation: {operation_name} (REST)")
+    return JSONResponse(graph_like)
+
+
+def _sanitize_biomass_entries(entries: Any) -> None:
+    """
+    Remove properties we do not want to expose to the frontend (e.g., dynamicZones).
+    Works in-place for list[dict] payloads.
+    """
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if isinstance(entry, dict):
+            entry.pop("dynamicZones", None)
+@api_app.post("/field-notes")
+async def field_notes(req: FieldNotesReq):
+    """
+    複数の Farm UUID に基づいて、圃場のノート情報を取得する。
+    """
+    variables = {"farmUuids": req.farm_uuids}
+    operation_name = "FieldNotesByFarms"
+    payload = make_payload(operation_name, FIELD_NOTES_BY_FARMS, variables)
+
+    # キャッシュは利用せず、常に最新の情報を取得
+    out = await call_graphql(payload, req.login_token, req.api_token)
+
+    out["source"] = "api"
+    if not req.includeTokens:
+        # レスポンスにトークンが含まれている場合、マスクする
+        if out.get("request", {}).get("headers", {}).get("Cookie"):
+            out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
+
+    return JSONResponse(out)
+
+
+@api_app.post("/attachments/zip")
+async def attachments_zip(req: AttachmentsZipReq):
+    attachments = [att for att in req.attachments if att.url]
+    if not attachments:
+        raise HTTPException(400, {"reason": "no_attachments", "message": "添付ファイルがありません。"})
+
+    zip_name = _sanitize_zip_name(req.zipName)
+
+    async def fetch_one(idx: int, att: AttachmentDownload, client: httpx.AsyncClient, sem: asyncio.Semaphore):
+        name = att.fileName or _filename_from_url(att.url) or f"attachment_{idx}"
+        async with sem:
+            if not att.url:
+                raise ValueError("empty url")
+            resp = await client.get(att.url)
+            resp.raise_for_status()
+            return name, resp.content
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            sem = asyncio.Semaphore(12)
+            results = await asyncio.gather(
+                *(fetch_one(idx, att, client, sem) for idx, att in enumerate(attachments, 1)),
+                return_exceptions=True,
+            )
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[attachments_zip] failed before gather: {exc}")
+        raise HTTPException(502, {"reason": "download_failed", "detail": str(exc)})
+
+    name_counts: Dict[str, int] = {}
+
+    def unique_name(folder: str, name: str) -> str:
+        """
+        同一フォルダ内での重複を検知し、_2, _3 ... と小さい連番でリネームする。
+        """
+        base_path = f"{folder}/{name}"
+        if base_path not in name_counts:
+            name_counts[base_path] = 1
+            return base_path
+
+        stem, dot, ext = name.partition(".")
+        count = name_counts[base_path]
+        while True:
+            count += 1
+            candidate_name = f"{stem}_{count}{dot}{ext}" if dot else f"{stem}_{count}"
+            candidate_path = f"{folder}/{candidate_name}"
+            if candidate_path not in name_counts:
+                name_counts[base_path] = count
+                name_counts[candidate_path] = 1
+                return candidate_path
+
+    for res in results:
+        if isinstance(res, Exception):
+            print(f"[attachments_zip] download error: {res}")
+            raise HTTPException(502, {"reason": "download_failed", "detail": str(res)})
+
+    buf = io.BytesIO()
+    zf = zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED)
+    name_counts.clear()
+    try:
+        for idx, att in enumerate(attachments, 1):
+            name = att.fileName or _filename_from_url(att.url) or f"attachment_{idx}"
+            folder = att.farmName or att.farmUuid or "farm"
+            path = unique_name(folder, name)
+            res = results[idx - 1]
+            if isinstance(res, Exception):
+                raise res
+            _, content = res
+            zf.writestr(path, content)
+    except Exception as exc:  # pylint: disable=broad-except
+        zf.close()
+        print(f"[attachments_zip] zip write error: {exc}")
+        raise HTTPException(500, {"reason": "zip_write_failed", "detail": str(exc)})
+
+    zf.close()
+    data = buf.getvalue()
+    headers = {
+        "Content-Disposition": _content_disposition(zip_name),
+        "Content-Length": str(len(data)),
+    }
+    return Response(content=data, media_type="application/zip", headers=headers)
+
+
+@api_app.post("/weather-by-field")
+async def weather_by_field(req: WeatherByFieldReq):
+    """
+    指定された Field UUID に基づいて、各種の天気情報を取得する。
+    """
+    if req.from_date and req.till_date:
+        from_date = req.from_date
+        till_date = req.till_date
+    else:
+        # 日付範囲を今日から10日先に設定（従来の挙動）
+        JST = timezone(timedelta(hours=9))
+        now_jst = datetime.now(JST)
+        from_dt_utc = now_jst.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=9)
+        till_dt_utc = (now_jst + timedelta(days=10)).replace(hour=23, minute=59, second=59, microsecond=999000) - timedelta(hours=9)
+        from_date = from_dt_utc.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+        till_date = till_dt_utc.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+    variables = {
+        "fieldUuid": req.field_uuid,
+        "fromDate": from_date,
+        "tillDate": till_date,
+    }
+
+    # 各クエリのペイロードを作成
+    payloads = {
+        "daily": make_payload("WeatherHistoricForecastDaily", WEATHER_HISTORIC_FORECAST_DAILY, variables),
+        "climatology": make_payload("WeatherClimatologyDaily", WEATHER_CLIMATOLOGY_DAILY, variables),
+        "spray": make_payload("SprayWeather", SPRAY_WEATHER, variables),
+        "hourly": make_payload("WeatherHistoricForecastHourly", WEATHER_HISTORIC_FORECAST_HOURLY, variables),
+    }
+
+    # APIを並列で呼び出す
+    tasks = {key: call_graphql(payload, req.login_token, req.api_token) for key, payload in payloads.items()}
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+    # エラーチェック
+    errors = [res for res in results if isinstance(res, Exception) or res.get("ok") is False]
+    if errors:
+        first_error = errors[0]
+        if isinstance(first_error, Exception):
+            raise HTTPException(status_code=500, detail=str(first_error))
+        else:
+            return JSONResponse(status_code=first_error.get("status", 500), content=first_error)
+
+    # 結果をマージ
+    daily_res, climatology_res, spray_res, hourly_res = results
+    merged_data = {
+        **daily_res['response']['data']['fieldV2'],
+        **climatology_res['response']['data']['fieldV2'],
+        **spray_res['response']['data']['fieldV2'],
+        **hourly_res['response']['data']['fieldV2'],
+    }
+
+    # フロントエンドに返す最終的なレスポンスを構築
+    out = {
+        "ok": True,
+        "status": 200,
+        "source": "api",
+        "request": {
+            "url": daily_res["request"]["url"],
+            "headers": daily_res["request"]["headers"],
+            "payload": payloads["daily"], # 代表としてdailyのペイロードを格納
+        },
+        "response": {
+            "data": {
+                "fieldV2": merged_data
+            }
+        },
+    }
+
+    if not req.includeTokens:
+        out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
+
+    return JSONResponse(out)
+
+
+@api_app.post("/masterdata/crops")
+async def masterdata_crops(req: MasterdataCropsReq):
+    headers = {
+        "Accept": "application/json",
+        "Cookie": f"LOGIN_TOKEN={req.login_token}; DF_TOKEN={req.api_token}",
+        "X-Login-Token": req.login_token,
+        "Origin": "https://fm.xarvio.com",
+        "Referer": "https://fm.xarvio.com/",
+    }
+    url = "https://fm-api.xarvio.com/api/md2/crops"
+
+    async def fetch(locale: Optional[str], client: httpx.AsyncClient) -> httpx.Response:
+        params = {}
+        if locale:
+            params["locale"] = locale
+        return await client.get(url, headers=headers, params=params)
+
+    primary_locale = req.locale or "EN-GB"
+    fallbacks = build_locale_candidates(primary_locale)
+    last_resp: Optional[httpx.Response] = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        for locale in fallbacks:
+            try:
+                resp = await fetch(locale, client)
+            except httpx.HTTPError as exc:
+                raise HTTPException(502, {"reason": "xarvio request error", "detail": str(exc)})
+
+            last_resp = resp
+            if resp.status_code == 200:
+                break
+            if locale and resp.status_code == 400 and "locale" in resp.text.lower():
+                # 試した locale が不正な場合は次の候補へ
+                continue
+            # それ以外のステータスはループを抜ける
+            break
+
+    if not last_resp:
+        raise HTTPException(502, {"reason": "xarvio request error", "detail": "no response"})
+
+    if last_resp.status_code >= 400:
+        raise HTTPException(
+            last_resp.status_code,
+            {
+                "reason": "xarvio http error",
+                "status": last_resp.status_code,
+                "url": url,
+                "text": last_resp.text[:500],
+            },
+        )
+
+    try:
+        data = last_resp.json()
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            {
+                "reason": "invalid xarvio json",
+                "detail": str(exc),
+                "url": url,
+                "raw": last_resp.text[:200],
+            },
+        )
+
+    return JSONResponse({"ok": True, "items": data})
+
+
+@api_app.post("/cross-farm-dashboard/_search")
+async def cross_farm_dashboard_search(req: CrossFarmDashboardSearchReq):
+    """
+    Cross-Farm Dashboard の OpenSearch エンドポイントへプロキシする。
+    """
+    url = "https://fm-api.xarvio.com/api/cross-farm-dashboard/_search"
+    params: Dict[str, Any] = {}
+    if req.includeClosedCropSeasons:
+        params["includeClosedCropSeasons"] = "true"
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Cookie": f"LOGIN_TOKEN={req.login_token}; DF_TOKEN={req.api_token}",
+        "X-Login-Token": req.login_token,
+        "Origin": "https://fm.xarvio.com",
+        "Referer": "https://fm.xarvio.com/",
+        "User-Agent": "xhf-app/1.0",
+    }
+
+    try:
+        timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.post(url, params=params, headers=headers, json=req.body)
+    except httpx.RequestError as exc:
+        raise HTTPException(502, {"reason": "crossfarm request error", "detail": str(exc)})
+
+    out: Dict[str, Any] = {
+        "ok": resp.status_code < 400,
+        "status": resp.status_code,
+        "reason": resp.reason_phrase,
+        "request": {
+            "url": str(resp.request.url) if resp and resp.request else url,
+            "headers": {**headers, "Cookie": "MASKED"},
+            "payload": req.body,
+            "params": params,
+        },
+    }
+
+    try:
+        out["response"] = resp.json()
+    except Exception:
+        out["response_text"] = resp.text[:4000]
+
+    if not req.includeTokens:
+        if out.get("request", {}).get("headers", {}).get("Cookie"):
+            out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
+
+    if resp.status_code >= 400:
+        raise HTTPException(resp.status_code, out)
+
+    return JSONResponse(out)
+
+
+@api_app.post("/masterdata/varieties")
+async def masterdata_varieties(req: MasterdataVarietiesReq):
+    headers = {
+        "Accept": "application/json",
+        "Cookie": f"LOGIN_TOKEN={req.login_token}; DF_TOKEN={req.api_token}",
+        "Origin": "https://fm.xarvio.com",
+        "Referer": "https://fm.xarvio.com/",
+    }
+    url = "https://fm-api.xarvio.com/api/md2/varieties"
+
+    country_code = (req.countryCode or "").strip().upper()
+
+    async def fetch(locale: Optional[str], client: httpx.AsyncClient) -> httpx.Response:
+        params = {
+            "cropUuid": req.cropUuid,
+        }
+        if country_code:
+            params["countryCode"] = country_code
+        if locale:
+            params["locale"] = locale
+        return await client.get(url, headers=headers, params=params)
+
+    primary_locale = req.locale or "EN-GB"
+    fallbacks = build_locale_candidates(primary_locale)
+    last_resp: Optional[httpx.Response] = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        for locale in fallbacks:
+            try:
+                resp = await fetch(locale, client)
+            except httpx.HTTPError as exc:
+                raise HTTPException(502, {"reason": "xarvio request error", "detail": str(exc)})
+
+            last_resp = resp
+            if resp.status_code == 200:
+                break
+            if locale and resp.status_code == 400 and "locale" in resp.text.lower():
+                continue
+            break
+
+    if not last_resp:
+        raise HTTPException(502, {"reason": "xarvio request error", "detail": "no response"})
+
+    if last_resp.status_code >= 400:
+        raise HTTPException(
+            last_resp.status_code,
+            {
+                "reason": "xarvio http error",
+                "status": last_resp.status_code,
+                "url": url,
+                "text": last_resp.text[:500],
+            },
+        )
+
+    try:
+        data = last_resp.json()
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            {
+                "reason": "invalid xarvio json",
+                "detail": str(exc),
+                "url": url,
+                "raw": last_resp.text[:200],
+            },
+        )
+
+    return JSONResponse({"ok": True, "items": data})
+
+
+@api_app.post("/masterdata/partner-tillages")
+async def masterdata_partner_tillages(req: MasterdataPartnerTillagesReq):
+    headers = {
+        "Accept": "application/json",
+        "Cookie": f"LOGIN_TOKEN={req.login_token}; DF_TOKEN={req.api_token}",
+        "Origin": "https://fm.xarvio.com",
+        "Referer": "https://fm.xarvio.com/",
+    }
+    url = "https://fm-api.xarvio.com/api/master-data/partners/tillages"
+
+    async def fetch(locale: Optional[str], client: httpx.AsyncClient) -> httpx.Response:
+        params = {}
+        if locale:
+            params["locale"] = locale
+        return await client.get(url, headers=headers, params=params)
+
+    fallbacks = build_locale_candidates(req.locale)
+    last_resp: Optional[httpx.Response] = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        for locale in fallbacks:
+            try:
+                resp = await fetch(locale, client)
+            except httpx.HTTPError as exc:
+                raise HTTPException(502, {"reason": "xarvio request error", "detail": str(exc)})
+
+            last_resp = resp
+            if resp.status_code == 200:
+                break
+            if locale and resp.status_code == 400 and "locale" in resp.text.lower():
+                continue
+            break
+
+    if not last_resp:
+        raise HTTPException(502, {"reason": "xarvio request error", "detail": "no response"})
+
+    if last_resp.status_code >= 400:
+        raise HTTPException(
+            last_resp.status_code,
+            {
+                "reason": "xarvio http error",
+                "status": last_resp.status_code,
+                "url": url,
+                "text": last_resp.text[:500],
+            },
+        )
+
+    try:
+        data = last_resp.json()
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            {
+                "reason": "invalid xarvio json",
+                "detail": str(exc),
+                "url": url,
+                "raw": last_resp.text[:200],
+            },
+        )
+
+    return JSONResponse({"ok": True, "items": data})
+
+
+@api_app.post("/masterdata/tillage-systems")
+async def masterdata_tillage_systems(req: MasterdataTillageSystemsReq):
+    headers = {
+        "Accept": "application/json",
+        "Cookie": f"LOGIN_TOKEN={req.login_token}; DF_TOKEN={req.api_token}",
+        "Origin": "https://fm.xarvio.com",
+        "Referer": "https://fm.xarvio.com/",
+    }
+    url = "https://fm-api.xarvio.com/api/md2/tillage-systems"
+
+    async def fetch(locale: Optional[str], client: httpx.AsyncClient) -> httpx.Response:
+        params = {}
+        if locale:
+            params["locale"] = locale
+        return await client.get(url, headers=headers, params=params)
+
+    fallbacks = build_locale_candidates(req.locale)
+    last_resp: Optional[httpx.Response] = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        for locale in fallbacks:
+            try:
+                resp = await fetch(locale, client)
+            except httpx.HTTPError as exc:
+                raise HTTPException(502, {"reason": "xarvio request error", "detail": str(exc)})
+
+            last_resp = resp
+            if resp.status_code == 200:
+                break
+            if locale and resp.status_code == 400 and "locale" in resp.text.lower():
+                continue
+            break
+
+    if not last_resp:
+        raise HTTPException(502, {"reason": "xarvio request error", "detail": "no response"})
+
+    if last_resp.status_code >= 400:
+        raise HTTPException(
+            last_resp.status_code,
+            {
+                "reason": "xarvio http error",
+                "status": last_resp.status_code,
+                "url": url,
+                "text": last_resp.text[:500],
+            },
+        )
+
+    try:
+        data = last_resp.json()
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            {
+                "reason": "invalid xarvio json",
+                "detail": str(exc),
+                "url": url,
+                "raw": last_resp.text[:200],
+            },
+        )
+
+    return JSONResponse({"ok": True, "items": data})
+
+
+@api_app.post("/crop-seasons")
+async def create_crop_seasons(req: CropSeasonCreateReq):
+    if not req.payloads:
+        return JSONResponse({"ok": True, "results": []})
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Cookie": f"LOGIN_TOKEN={req.login_token}; DF_TOKEN={req.api_token}",
+        "Authorization": f"Bearer {req.api_token}",
+        "X-Login-Token": req.login_token,
+        "Origin": "https://fm.xarvio.com",
+        "Referer": "https://fm.xarvio.com/",
+    }
+    url = "https://fm-api.xarvio.com/api/farms/v2/crop-seasons"
+
+    results: List[Dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=45) as client:
+        for payload in req.payloads:
+            body = payload.dict(exclude_none=True)
+            try:
+                resp = await client.post(url, headers=headers, json=body)
+            except httpx.HTTPError as exc:
+                raise HTTPException(502, {"reason": "xarvio request error", "detail": str(exc)})
+
+            if resp.status_code >= 400:
+                detail_text = resp.text[:500]
+                raise HTTPException(
+                    resp.status_code,
+                    {
+                        "reason": "xarvio http error",
+                        "status": resp.status_code,
+                        "url": url,
+                        "text": detail_text,
+                        "payload": body,
+                    },
+                )
+
+            try:
+                resp_json = resp.json()
+            except ValueError:
+                resp_json = {"raw": resp.text[:200]}
+
+            results.append({"status": resp.status_code, "body": resp_json})
+
+    return JSONResponse({"ok": True, "results": results})
+
+
+# ---------------------------
+#        Cache Endpoints
+# ---------------------------
+@api_app.get("/cache/graphql/last")
+async def cache_graphql_last():
+    """
+    直近に保存した GraphQL レスポンス（1件）を返す。
+    保存前なら {ok: False, message: "..."} を返す。
+    """
+    resp = get_last_response()
+    return resp or {"ok": False, "message": "no response cached yet"}
+
+@api_app.get("/cache/graphql/op/{operation_name}")
+async def cache_graphql_by_operation(operation_name: str = Path(..., min_length=1)):
+    """
+    operationName ごとの直近レスポンスを返す。
+    例: /cache/graphql/op/FarmsOverview
+    """
+    resp = get_by_operation(operation_name)
+    return resp or {"ok": False, "message": f"no cached response for operation '{operation_name}'"}
+
+@api_app.delete("/cache/graphql")
+@api_app.post("/cache/graphql/clear")  # POSTメソッドを追加
+async def cache_graphql_clear():
+    """
+    キャッシュ全消去
+    """
+    clear_cache()
+    return {"ok": True, "cleared": True}
+
+
+app = FastAPI()
+
+
+@app.get("/healthz")
+async def root_healthz():
+    return {"ok": True}
+
+
+app.mount("/api", api_app)

@@ -1,0 +1,17 @@
+#root {
+  min-height: 100vh;
+}
+
+.nav-link {
+  color: #ffffff;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.nav-link:hover {
+  color: #9a9eff;
+}
+
+.nav-link.active {
+  color: #646cff;
+}

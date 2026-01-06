@@ -1,0 +1,47 @@
+/* RiskPage.css */
+
+/* 現時点ではFarmsPage.cssのスタイルを共有するため、
+   このファイルは空ですが、将来的な拡張のために用意しています。 */
+
+.risk-pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin: 1rem 0;
+  color: #e0e0e0;
+}
+
+.risk-pagination select {
+  margin-left: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid #3a3a3f;
+  background-color: #252529;
+  color: #f0f0f0;
+}
+
+.risk-pagination button {
+  padding: 0.45rem 0.85rem;
+  border-radius: 6px;
+  border: none;
+  background-color: #646cff;
+  color: #ffffff;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.risk-pagination button:not(:disabled):hover {
+  background-color: #535bf2;
+}
+
+.risk-pagination button:disabled {
+  background-color: #3a3a3f;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.risk-pagination__page {
+  margin: 0 0.75rem;
+}
