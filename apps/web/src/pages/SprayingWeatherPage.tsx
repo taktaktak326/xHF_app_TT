@@ -47,11 +47,6 @@ type SprayWindow = {
   type: 'recommended' | 'possible';
 };
 
-type ActiveWindow = {
-  start: number;
-  type: 'recommended' | 'possible';
-};
-
 interface SprayWeather {
   fromDate: string;
   result: 'RECOMMENDED' | 'NOT_RECOMMENDED' | 'POSSIBLE' | 'moderate';
