@@ -49,7 +49,7 @@ type SprayWindow = {
 
 type ActiveWindow = {
   start: number;
-  type: SprayWindow['type'];
+  type: 'recommended' | 'possible';
 };
 
 interface SprayWeather {
