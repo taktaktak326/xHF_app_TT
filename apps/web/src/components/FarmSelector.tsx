@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useFarms } from '../context/FarmContext';
+import { useData } from '../context/DataContext';
 import { withApiBase } from '../utils/apiBase';
 import { useWarmup } from '../context/WarmupContext';
 import '../pages/FarmsPage.css'; // スタイルを再利用
+import LoadingSpinner from '../components/LoadingSpinner';
 
 // FarmsPage.tsxから型定義とAPIクライアントを移動またはインポート
 type LoginAndTokenResp = any;
@@ -36,6 +38,7 @@ function farmLabel(f: Farm) {
 export function FarmSelector() {
   const { auth } = useAuth();
   const { selectedFarms, setSelectedFarms, submitSelectedFarms } = useFarms();
+  const { combinedOut, combinedLoading, combinedInProgress } = useData();
   const { status: warmupStatus, startWarmup } = useWarmup();
 
   const [loading, setLoading] = useState(false);
@@ -67,6 +70,26 @@ export function FarmSelector() {
       farmLabel(farm).toLowerCase().includes(lowerCaseSearchTerm)
     );
   }, [farms, searchTerm, sortKey, collator]);
+
+  const selectedFarmNames = useMemo(() => {
+    const selectedSet = new Set(selectedFarms);
+    return farms
+      .filter(f => selectedSet.has(f.uuid))
+      .map(f => f.name ?? "(no name)");
+  }, [farms, selectedFarms]);
+
+  const tooltipText = useMemo(() => {
+    const formatList = (items: string[]) => {
+      const limit = 20;
+      if (items.length <= limit) return items.join('、');
+      const head = items.slice(0, limit).join('、');
+      return `${head}、ほか${items.length - limit}件`;
+    };
+    if (selectedFarmNames.length > 0) {
+      return `選択中の農場: ${formatList(selectedFarmNames)}`;
+    }
+    return '選択中の農場はありません';
+  }, [selectedFarmNames]);
 
   const loadFarms = useCallback(async () => {
     if (!auth) return;
@@ -108,8 +131,19 @@ export function FarmSelector() {
 
   return (
     <div className="farm-selection-container">
-      <div className="farm-selection-header" onClick={() => setDropdownOpen(!dropdownOpen)}>
+      <div
+        className="farm-selection-header"
+        onClick={() => setDropdownOpen(!dropdownOpen)}
+        title={tooltipText}
+        aria-label={tooltipText}
+      >
         <span>{selectedFarms.length} 件の農場を選択中</span>
+        {(combinedLoading || combinedInProgress) && (
+          <span className="farm-selection-loading" aria-live="polite">
+            <LoadingSpinner size={14} />
+            <span>読み込み中…</span>
+          </span>
+        )}
         <span style={{ color: '#9e9e9e', fontSize: '0.9em' }}>全 {farms.length} 件</span>
         <span className="farm-selection-header-toggle">
           <svg

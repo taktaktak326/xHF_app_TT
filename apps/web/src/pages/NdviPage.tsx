@@ -34,6 +34,7 @@ import { withApiBase } from '../utils/apiBase';
 import LoadingSpinner from '../components/LoadingSpinner';
 import LoadingOverlay from '../components/LoadingOverlay';
 import { formatCombinedLoadingMessage } from '../utils/loadingMessage';
+import { getSessionCache, setSessionCache } from '../utils/sessionCache';
 
 ChartJS.register(
   ArcElement,
@@ -91,6 +92,11 @@ const formatWindDirection = (deg: number | null): string => {
 };
 
 async function fetchBiomassNdviApi(params: { auth: LoginAndTokenResp; cropSeasonUuids: string[]; fromDate: string }): Promise<any> {
+    const cacheKey = `biomass-ndvi:${[...params.cropSeasonUuids].sort().join(',')}|${params.fromDate}`;
+    if (params.cropSeasonUuids.length > 0) {
+        const cached = getSessionCache<any>(cacheKey);
+        if (cached) return { ...cached, source: 'cache' };
+    }
     const requestBody = {
         login_token: params.auth.login.login_token,
         api_token: params.auth.api_token,
@@ -108,14 +114,22 @@ async function fetchBiomassNdviApi(params: { auth: LoginAndTokenResp; cropSeason
     const text = await res.text();
     if (!text) {
         // ボディが空の場合は、エラーを示すオブジェクトを返すか、nullを返す
-        const errorResponse = { ok: false, status: res.status, response_text: "Empty response from server" };
+        const errorResponse = { ok: false, status: res.status, response_text: "Empty response from server", source: 'api' };
         return errorResponse;
     }
     const j = JSON.parse(text);
-    return j;
+    if (j?.ok && params.cropSeasonUuids.length > 0) {
+        setSessionCache(cacheKey, { ...j, source: 'api' });
+    }
+    return { ...j, source: 'api' };
 }
 
 async function fetchBiomassLaiApi(params: { auth: LoginAndTokenResp; cropSeasonUuids: string[]; fromDate: string; tillDate: string }): Promise<any> {
+  const cacheKey = `biomass-lai:${[...params.cropSeasonUuids].sort().join(',')}|${params.fromDate}|${params.tillDate}`;
+  if (params.cropSeasonUuids.length > 0) {
+    const cached = getSessionCache<any>(cacheKey);
+    if (cached) return { ...cached, source: 'cache' };
+  }
   const requestBody = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
@@ -131,13 +145,16 @@ async function fetchBiomassLaiApi(params: { auth: LoginAndTokenResp; cropSeasonU
   });
   const text = await res.text();
   if (!text) {
-    const errorResponse = { ok: false, status: res.status, detail: "Empty response from server" };
+    const errorResponse = { ok: false, status: res.status, detail: "Empty response from server", source: 'api' };
     return errorResponse;
   }
 
   try {
     const json = JSON.parse(text);
-    return json;
+    if (json?.ok && params.cropSeasonUuids.length > 0) {
+      setSessionCache(cacheKey, { ...json, source: 'api' });
+    }
+    return { ...json, source: 'api' };
   } catch (error) {
     console.error("⚠️ [API Response] /biomass-lai (Invalid JSON)", { text, error });
     return { ok: false, status: res.status, detail: text };
@@ -145,6 +162,9 @@ async function fetchBiomassLaiApi(params: { auth: LoginAndTokenResp; cropSeasonU
 }
 
 async function fetchWeatherByFieldApi(params: { auth: LoginAndTokenResp; fieldUuid: string; fromDate: string; tillDate: string }): Promise<any> {
+  const cacheKey = `weather-by-field:${params.fieldUuid}|${params.fromDate}|${params.tillDate}`;
+  const cached = getSessionCache<any>(cacheKey);
+  if (cached) return { ...cached, source: 'cache' };
   const requestBody = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
@@ -161,13 +181,16 @@ async function fetchWeatherByFieldApi(params: { auth: LoginAndTokenResp; fieldUu
 
   const text = await res.text();
   if (!text) {
-    const emptyResponse = { ok: true, status: res.status, response: { data: { fieldV2: {} } } };
+    const emptyResponse = { ok: true, status: res.status, response: { data: { fieldV2: {} } }, source: 'api' };
     return emptyResponse;
   }
 
   try {
     const json = JSON.parse(text);
-    return json;
+    if (json?.ok) {
+      setSessionCache(cacheKey, { ...json, source: 'api' });
+    }
+    return { ...json, source: 'api' };
   } catch (error) {
     console.error("⚠️ [API Response] /weather-by-field (Invalid JSON)", { text, error });
     return { ok: false, status: res.status, detail: text };
@@ -1140,6 +1163,7 @@ export function NdviPage() {
           const method = seasonInfo?.season?.cropEstablishmentMethodCode;
           if (method === 'TRANSPLANTING') return '移植';
           if (method === 'DIRECT_SEEDING') return '直播';
+          if (method === 'MYKOS_DRY_DIRECT_SEEDING') return '節水型乾田直播';
           return 'N/A';
         })(),
         date: formattedDate,

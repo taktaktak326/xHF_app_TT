@@ -3,7 +3,9 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { FarmSelector } from './FarmSelector';
 import { useFarms } from '../context/FarmContext';
+import { useData } from '../context/DataContext';
 import { withApiBase } from '../utils/apiBase';
+import './Layout.css';
 
 const navClass = ({ isActive }: { isActive: boolean }) => (isActive ? 'nav-link active' : 'nav-link');
 
@@ -11,6 +13,7 @@ export function Layout() {
   const { setAuth } = useAuth();
   const navigate = useNavigate();
   const { clearSelectedFarms } = useFarms();
+  const { combinedLoading, combinedInProgress } = useData();
   const [clearCacheStatus, setClearCacheStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const handleLogout = () => {
@@ -35,6 +38,11 @@ export function Layout() {
 
   return (
     <div>
+      {(combinedLoading || combinedInProgress) && (
+        <div className="global-loading-bar" aria-hidden="true">
+          <div className="global-loading-bar__inner" />
+        </div>
+      )}
       <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 1rem', borderBottom: '1px solid #444', gap: '1rem', position: 'relative', zIndex: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '2rem' }}>
           <FarmSelector />
@@ -47,7 +55,7 @@ export function Layout() {
             <NavLink to="/field-memo" className={navClass}>圃場メモ</NavLink>
             <NavLink to="/risks" className={navClass}>リスク</NavLink>
             <NavLink to="/growth-stage-predictions" className={navClass}>生育ステージ予測</NavLink>
-            <NavLink to="/weather" className={navClass}>散布天気</NavLink>
+            <NavLink to="/weather" className={navClass}>天気</NavLink>
           </nav>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>

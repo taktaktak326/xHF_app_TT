@@ -43,7 +43,7 @@ query CombinedDataBase(
       uuid
       startDate
       lifecycleState
-      crop(languageCode: $languageCode) { name }
+      crop(languageCode: $languageCode) { uuid name }
       variety(languageCode: $languageCode) { name }
       activeGrowthStage { index gsOrder scale }
       cropEstablishmentDetails { seedBoxPerArea seedWeightPerSeedBox }
@@ -133,6 +133,38 @@ query WeatherHistoricForecastHourly($fieldUuid: UUID!, $fromDate: Date!, $tillDa
 }
 """
 
+CROP_PROTECTION_TASK_CREATION_PRODUCTS = """
+query CropProtectionTaskCreationProducts(
+  $farmUuids: [UUID]!,
+  $cropUuid: UUID!,
+  $countryUuid: UUID!,
+  $taskTypeCode: String
+) {
+  productsV2(
+    cropUuid: $cropUuid
+    countryUuid: $countryUuid
+    farmUuids: $farmUuids
+    taskTypeCode: $taskTypeCode
+  ) {
+    uuid
+    code
+    name
+    registrationNumber
+    formulationTypeGroupCode
+    organizations { uuid code name }
+    taskMethods { uuid taskTypeCode }
+    categories { uuid code name }
+    features { features vraMinRateSi }
+    productFeatures
+    minRateSi
+    maxRateSi
+    minWaterSi
+    maxWaterSi
+    isCustom
+  }
+}
+"""
+
 FIELD_DATA_LAYER_IMAGES = """
 query FieldDataLayerImages($fieldUuid: UUID!, $types: [FieldDataLayerType!]) {
   fieldV2(uuid: $fieldUuid) {
@@ -189,7 +221,7 @@ query CombinedFieldData(
       uuid
       startDate
       lifecycleState
-      crop(languageCode: $languageCode) { name }
+      crop(languageCode: $languageCode) { uuid name }
       variety(languageCode: $languageCode) { name }
       activeGrowthStage { index gsOrder scale }
       cropEstablishmentDetails { seedBoxPerArea seedWeightPerSeedBox }
@@ -283,6 +315,7 @@ query CombinedFieldData(
           applicationType
           creationFlowHint
           recipeV2 {
+            uuid
             name
             type
             totalApplication

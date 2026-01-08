@@ -29,6 +29,8 @@ from schemas import (
     BiomassLaiReq,
     FieldNotesReq,
     WeatherByFieldReq,
+    CropProtectionProductsReq,
+    CropProtectionProductsBulkReq,
     FieldDataLayersReq,
     FieldDataLayerImageReq,
     SprayingTaskUpdateReq,
@@ -58,6 +60,7 @@ from graphql.queries import (
     WEATHER_CLIMATOLOGY_DAILY,
     SPRAY_WEATHER,
     WEATHER_HISTORIC_FORECAST_HOURLY,
+    CROP_PROTECTION_TASK_CREATION_PRODUCTS,
     FIELD_DATA_LAYER_IMAGES,
 )
 from graphql.payloads import make_payload
@@ -973,15 +976,12 @@ async def combined_fields(req: CombinedFieldsReq):
         municipality = location.get("municipality")
         return bool(prefecture) and bool(municipality)
 
-    if all(_has_complete_location(field) for field in merged_fields):
-        payload_for_cache = (
-            request_configs.get("tasks", {}).get("payload")
-            or request_configs["base"]["payload"]
-        )
-        save_response(operation_name_for_cache, payload_for_cache, out)
-        print(f"💾 [CACHE] Saved response for operation: {operation_name_for_cache}")
-    else:
-        print(f"⚠️ [CACHE] Skipped cache save for {operation_name_for_cache} due to missing location info")
+    payload_for_cache = (
+        request_configs.get("tasks", {}).get("payload")
+        or request_configs["base"]["payload"]
+    )
+    save_response(operation_name_for_cache, payload_for_cache, out)
+    print(f"💾 [CACHE] Saved response for operation: {operation_name_for_cache}")
     return JSONResponse(out)
 
 @api_app.post("/combined-field-data-tasks")
@@ -1407,7 +1407,7 @@ async def weather_by_field(req: WeatherByFieldReq):
         "request": {
             "url": daily_res["request"]["url"],
             "headers": daily_res["request"]["headers"],
-            "payload": payloads["daily"], # 代表としてdailyのペイロードを格納
+            "payloads": payloads,
         },
         "response": {
             "data": {
@@ -1420,6 +1420,60 @@ async def weather_by_field(req: WeatherByFieldReq):
         out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
 
     return JSONResponse(out)
+
+
+@api_app.post("/crop-protection-products")
+async def crop_protection_products(req: CropProtectionProductsReq):
+    """
+    作物・国・農場に紐づく農薬マスターデータを取得する。
+    categories.name が HERBICIDE のものが除草剤。
+    """
+    variables = {
+        "farmUuids": req.farm_uuids,
+        "countryUuid": req.country_uuid,
+        "cropUuid": req.crop_uuid,
+        "taskTypeCode": req.task_type_code,
+    }
+    payload = make_payload("CropProtectionTaskCreationProducts", CROP_PROTECTION_TASK_CREATION_PRODUCTS, variables)
+    result = await call_graphql(payload, req.login_token, req.api_token)
+    if isinstance(result, Exception):
+        raise HTTPException(status_code=500, detail=str(result))
+    if result.get("ok") is False:
+        return JSONResponse(status_code=result.get("status", 500), content=result)
+    return JSONResponse(result)
+
+
+@api_app.post("/crop-protection-products/bulk")
+async def crop_protection_products_bulk(req: CropProtectionProductsBulkReq):
+    """
+    複数 cropUuid をまとめて農薬マスターデータを取得する。
+    categories.name が HERBICIDE のものが除草剤。
+    """
+    async def fetch_for_crop(crop_uuid: str):
+        variables = {
+            "farmUuids": req.farm_uuids,
+            "countryUuid": req.country_uuid,
+            "cropUuid": crop_uuid,
+            "taskTypeCode": req.task_type_code,
+        }
+        payload = make_payload("CropProtectionTaskCreationProducts", CROP_PROTECTION_TASK_CREATION_PRODUCTS, variables)
+        result = await call_graphql(payload, req.login_token, req.api_token)
+        return crop_uuid, result
+
+    tasks = [fetch_for_crop(crop_uuid) for crop_uuid in req.crop_uuids]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    out: Dict[str, Any] = {}
+    for crop_uuid, result in results:
+        if isinstance(result, Exception):
+            out[crop_uuid] = {"ok": False, "detail": str(result)}
+            continue
+        if result.get("ok") is False:
+            out[crop_uuid] = result
+            continue
+        out[crop_uuid] = result.get("response", {}).get("data", {}).get("productsV2", [])
+
+    return JSONResponse({"ok": True, "items": out})
 
 
 @api_app.post("/masterdata/crops")

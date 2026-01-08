@@ -48,7 +48,6 @@
 
 1. **バックエンド (Render Web Service)**
 
-   - リポジトリを接続して新しい Web Service を作成
    - Root Directory: `apps/api`
    - Environment: `Docker`
    - Environment Variables:
@@ -57,20 +56,21 @@
      - `XARVIO_TOKEN_API_URL=https://fm-api.xarvio.com/api/users/tokens`
      - `XARVIO_GRAPHQL_ENDPOINT=https://fm-api.xarvio.com/api/graphql/data`
      - `PREF_CITY_ENABLED=false` (pref/city データを使わない場合)
-   - Deploy して URL を控える (例: `https://xhf-api.onrender.com`)
+   - Deploy して URL を控える (例: `https://xhf-app-tt.onrender.com`)
 
-2. **フロントエンド (Cloudflare Pages)**
+2. **フロントエンド (Cloudflare Pages + Wrangler)**
 
-   - リポジトリを接続して新しい Pages を作成
-   - Build command: `npm run build --workspace=web`
-   - Build output directory: `apps/web/dist`
-   - Environment Variables:
-     - `VITE_API_BASE=https://xhf-api.onrender.com/api`
+   - ビルド時に API の向き先を指定してデプロイする
+   ```bash
+   cd /Users/takuya/Desktop/xhf-app
+   VITE_API_BASE=https://xhf-app-tt.onrender.com/api npm run build --workspace=web
+   npx wrangler pages deploy apps/web/dist --project-name xhf-app-tt
+   ```
 
 デプロイ後の動作確認:
 
-1. `curl https://xhf-api.onrender.com/api/healthz` で `{ "ok": true }` が返ることを確認。
-2. Cloudflare Pages の URL でログインし、`/api/*` の機能が正常に動くか確認。
+1. `curl https://xhf-app-tt.onrender.com/api/healthz` で `{ "ok": true }` が返ることを確認。
+2. `https://xhf-app-tt.pages.dev` でログインし、`/api/*` の機能が正常に動くか確認。
 
 キャッシュの削除
-curl -X POST https://xhf-api.onrender.com/api/cache/graphql/clear
+curl -X POST https://xhf-app-tt.onrender.com/api/cache/graphql/clear

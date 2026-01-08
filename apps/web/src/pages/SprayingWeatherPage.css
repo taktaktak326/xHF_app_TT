@@ -78,6 +78,136 @@
   gap: 2rem;
 }
 
+.weather-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid #3a3a3f;
+  padding-bottom: 0.5rem;
+}
+
+.weather-tab {
+  padding: 0.45rem 1rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: #202024;
+  color: #cfcfe2;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+}
+
+.weather-tab.active {
+  border-color: #646cff;
+  background: rgba(100, 108, 255, 0.2);
+  color: #ffffff;
+}
+
+.weather-history-note {
+  margin: 0;
+  color: #b5b5c7;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.weather-history-months {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.weather-history-month {
+  background: #252529;
+  border: 1px solid #3a3a3f;
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #e0e0f0;
+}
+
+.weather-history-table {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.weather-history-chart {
+  margin-top: 1rem;
+}
+
+.weather-history-chart h4 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+  color: #d7dbf5;
+}
+
+.weather-history-chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.4rem;
+}
+
+.weather-history-back {
+  background: transparent;
+  border: 1px solid #3a3a3f;
+  color: #cfcfe2;
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.weather-history-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.5rem 0 1rem;
+  color: #d7dbf5;
+}
+
+.weather-history-controls select {
+  background: #1f1f24;
+  border: 1px solid #3a3a3f;
+  color: #eef1ff;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+}
+
+.weather-history-row--highlight {
+  border-color: #6cc17a;
+  background: rgba(108, 193, 122, 0.15);
+  box-shadow: 0 0 0 1px rgba(108, 193, 122, 0.2);
+}
+
+.weather-history-row {
+  display: grid;
+  grid-template-columns: 80px repeat(3, minmax(80px, 1fr));
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  background: #252529;
+  border: 1px solid #3a3a3f;
+  color: #dfe3ff;
+  font-size: 0.9rem;
+}
+
+.weather-history-row--wide {
+  grid-template-columns: 190px repeat(4, minmax(90px, 1fr));
+}
+
+.weather-history-row--header {
+  font-weight: 600;
+  background: #1d1d22;
+  color: #eef1ff;
+}
+
+.weather-history-empty {
+  color: #a3a3b5;
+  margin: 0;
+}
+
 .weather-section h3 {
   margin-bottom: 1rem;
   border-bottom: 1px solid #4a4a4f;
@@ -187,6 +317,42 @@
 .daily-summary-header p {
   margin: 0;
   color: #aaa;
+}
+
+.daily-summary-metrics {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.35rem;
+}
+
+.soil-status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+}
+
+.soil-status-badge--dry {
+  background: rgba(255, 152, 0, 0.15);
+  color: #ffd08a;
+  border-color: rgba(255, 152, 0, 0.4);
+}
+
+.soil-status-badge--ok {
+  background: rgba(76, 175, 80, 0.18);
+  color: #b8f5c0;
+  border-color: rgba(76, 175, 80, 0.4);
+}
+
+.soil-status-badge--wet {
+  background: rgba(33, 150, 243, 0.18);
+  color: #b3dbff;
+  border-color: rgba(33, 150, 243, 0.45);
 }
 
 .hourly-forecast-list {

@@ -3,12 +3,14 @@ import type { FC } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useData } from '../context/DataContext';
+import { useFarms } from '../context/FarmContext';
 import type { LoginAndTokenResp, Field, BaseTask, CountryCropGrowthStagePrediction } from '../types/farm';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceArea } from 'recharts';
+import { LineChart, Line, BarChart, Bar, ComposedChart, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceArea } from 'recharts';
 import './FarmsPage.css'; // Reuse common styles
 import './SprayingWeatherPage.css';
 import { withApiBase } from '../utils/apiBase';
 import LoadingOverlay from '../components/LoadingOverlay';
+import { getSessionCache, setSessionCache } from '../utils/sessionCache';
 
 // =============================================================================
 // Type Definitions
@@ -18,8 +20,12 @@ interface DailyWeather {
   date: string;
   airTempCMin: number;
   airTempCMax: number;
+  airTempCAvg?: number;
+  sunshineDurationH?: number;
   precipitationBestMm: number;
   windSpeedMSAvg: number;
+  windDirectionDeg?: number;
+  relativeHumidityPctAvg?: number;
 }
 
 interface ClimatologyWeather {
@@ -195,6 +201,33 @@ const getJstDateKeyFromDate = (date: Date): string => {
     .replace(/\//g, '-');
 };
 
+const getJstMonthKeyFromDate = (date: Date): string => {
+  return date
+    .toLocaleDateString('ja-JP', {
+      year: 'numeric',
+      month: '2-digit',
+      timeZone: 'Asia/Tokyo',
+    })
+    .replace(/\//g, '-');
+};
+
+const getJstDateParts = (date: Date): { year: number; month: number; day: number } => {
+  const parts = date
+    .toLocaleDateString('ja-JP', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      timeZone: 'Asia/Tokyo',
+    })
+    .split('/');
+  const [yearText, monthText, dayText] = parts;
+  return {
+    year: Number(yearText),
+    month: Number(monthText),
+    day: Number(dayText),
+  };
+};
+
 const getJstHour = (dateString: string): number => {
   const hourText = new Date(dateString).toLocaleString('ja-JP', {
     hour: '2-digit',
@@ -203,6 +236,76 @@ const getJstHour = (dateString: string): number => {
   });
   const parsed = Number.parseInt(hourText, 10);
   return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const toFiniteNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined) return null;
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const estimateSoilStatus = (days: DailyWeather[]): { label: string; tone: 'dry' | 'ok' | 'wet'; reason: string } | null => {
+  const validDays = days.filter(Boolean);
+  if (validDays.length === 0) return null;
+  let precipSum = 0;
+  let humiditySum = 0;
+  let tempSum = 0;
+  let windSum = 0;
+  let sunshineSum = 0;
+  let count = 0;
+  validDays.forEach((day) => {
+    const precip = toFiniteNumber(day.precipitationBestMm);
+    const humidity = toFiniteNumber(day.relativeHumidityPctAvg);
+    const temp = toFiniteNumber(day.airTempCAvg);
+    const wind = toFiniteNumber(day.windSpeedMSAvg);
+    const sunshine = toFiniteNumber(day.sunshineDurationH);
+    if (precip === null || humidity === null || temp === null || wind === null || sunshine === null) {
+      return;
+    }
+    precipSum += precip;
+    humiditySum += humidity;
+    tempSum += temp;
+    windSum += wind;
+    sunshineSum += sunshine;
+    count += 1;
+  });
+  if (count === 0) return null;
+  const avgPrecip = precipSum / count;
+  const avgHumidity = humiditySum / count;
+  const avgTemp = tempSum / count;
+  const avgWind = windSum / count;
+  const avgSunshine = sunshineSum / count;
+  const dryingIndex = Math.max(0, avgTemp * 0.3 + avgWind * 1.5 + avgSunshine * 0.8 - avgHumidity * 0.2);
+  const soilBalance = avgPrecip - dryingIndex;
+  const tone: 'dry' | 'ok' | 'wet' = soilBalance <= -2 ? 'dry' : soilBalance >= 2 ? 'wet' : 'ok';
+  const label = tone === 'dry' ? '乾燥ぎみ' : tone === 'wet' ? '湿りすぎ' : '適度';
+  const rainNote = avgPrecip <= 1 ? '雨が少ない' : avgPrecip <= 5 ? '雨は少なめ' : '雨が多い';
+  const sunNote = avgSunshine >= 5 ? '日照が多い' : avgSunshine >= 3 ? '日照は普通' : '日照が少ない';
+  const humidityNote = avgHumidity >= 80 ? '湿度が高い' : avgHumidity <= 60 ? '湿度が低い' : '湿度は普通';
+  const reason = `直近${count}日: ${rainNote}・${sunNote}・${humidityNote}ため、${label}と判断。`;
+  return { label, tone, reason };
+};
+
+const toJstBoundaryIso = (year: number, month: number, day: number, endOfDay: boolean): string => {
+  const utcMs = Date.UTC(
+    year,
+    month - 1,
+    day,
+    endOfDay ? 23 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 999 : 0
+  ) - 9 * 60 * 60 * 1000;
+  return new Date(utcMs).toISOString().replace('.000Z', 'Z');
+};
+
+const buildHistoryRange = (): { fromDate: string; tillDate: string } | null => {
+  const now = new Date();
+  const { year, month, day } = getJstDateParts(now);
+  if (!year || !month || !day) return null;
+  const fromDate = toJstBoundaryIso(year - 5, month, day, false);
+  const tillDate = toJstBoundaryIso(year, month, day, true);
+  return { fromDate, tillDate };
 };
 
 type PlannedTaskBadge = {
@@ -216,6 +319,9 @@ type PlannedTaskBadge = {
 // =============================================================================
 
 async function fetchWeatherByFieldApi(params: { auth: LoginAndTokenResp; fieldUuid: string }): Promise<any> {
+  const cacheKey = `weather-by-field:${params.fieldUuid}:default`;
+  const cached = getSessionCache<any>(cacheKey);
+  if (cached) return { ...cached, source: 'cache' };
   const requestBody = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
@@ -227,7 +333,40 @@ async function fetchWeatherByFieldApi(params: { auth: LoginAndTokenResp; fieldUu
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(requestBody),
   });
-  return res.json();
+  const out = await res.json();
+  if (out?.ok) {
+    setSessionCache(cacheKey, { ...out, source: 'api' });
+  }
+  return { ...out, source: 'api' };
+}
+
+async function fetchWeatherByFieldApiWithRange(params: {
+  auth: LoginAndTokenResp;
+  fieldUuid: string;
+  fromDate?: string;
+  tillDate?: string;
+}): Promise<any> {
+  const cacheKey = `weather-by-field:${params.fieldUuid}:${params.fromDate ?? 'default'}:${params.tillDate ?? 'default'}`;
+  const cached = getSessionCache<any>(cacheKey);
+  if (cached) return { ...cached, source: 'cache' };
+  const requestBody: Record<string, string> = {
+    login_token: params.auth.login.login_token,
+    api_token: params.auth.api_token,
+    field_uuid: params.fieldUuid,
+  };
+  if (params.fromDate) requestBody.from_date = params.fromDate;
+  if (params.tillDate) requestBody.till_date = params.tillDate;
+
+  const res = await fetch(withApiBase('/weather-by-field'), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(requestBody),
+  });
+  const out = await res.json();
+  if (out?.ok) {
+    setSessionCache(cacheKey, { ...out, source: 'api' });
+  }
+  return { ...out, source: 'api' };
 }
 
 export function SprayingWeatherPage() {
@@ -238,8 +377,12 @@ export function SprayingWeatherPage() {
   const { combinedOut } = useData();
 
   const [weatherData, setWeatherData] = useState<WeatherData | null>(null);
+  const [historyWeatherData, setHistoryWeatherData] = useState<WeatherData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'spray' | 'history'>('spray');
 
   const clusterState = location.state as {
     clusterId?: string;
@@ -300,8 +443,29 @@ export function SprayingWeatherPage() {
   }, [combinedOut]);
 
   useEffect(() => {
+    setWeatherData(null);
+    setHistoryWeatherData(null);
+    setError(null);
+    setHistoryError(null);
+  }, [fieldUuid]);
+
+  const historyRange = useMemo(() => buildHistoryRange(), []);
+
+  useEffect(() => {
+    setHistoryWeatherData(null);
+    setHistoryError(null);
+  }, [historyRange?.fromDate, historyRange?.tillDate]);
+
+  useEffect(() => {
     if (!fieldUuid) {
       navigate('/weather'); // Redirect if no field is selected
+      return;
+    }
+
+    if (activeTab !== 'spray') {
+      return;
+    }
+    if (weatherData) {
       return;
     }
 
@@ -323,7 +487,38 @@ export function SprayingWeatherPage() {
     };
 
     fetchWeather();
-  }, [auth, fieldUuid, navigate]);
+  }, [activeTab, auth, fieldUuid, navigate, weatherData]);
+
+  useEffect(() => {
+    if (!fieldUuid) return;
+    if (activeTab !== 'history') return;
+    if (historyWeatherData) return;
+    if (!historyRange) return;
+
+    const fetchHistory = async () => {
+      if (!auth) return;
+      setHistoryLoading(true);
+      setHistoryError(null);
+      try {
+        const result = await fetchWeatherByFieldApiWithRange({
+          auth,
+          fieldUuid,
+          fromDate: historyRange.fromDate,
+          tillDate: historyRange.tillDate,
+        });
+        if (!result.ok) {
+          throw new Error(result.detail || 'Failed to fetch weather data');
+        }
+        setHistoryWeatherData(result.response.data.fieldV2);
+      } catch (e: any) {
+        setHistoryError(e.message);
+      } finally {
+        setHistoryLoading(false);
+      }
+    };
+
+    fetchHistory();
+  }, [activeTab, auth, fieldUuid, historyRange, historyWeatherData]);
 
   if (!fieldUuid) {
     return null; // Should be redirected
@@ -332,6 +527,7 @@ export function SprayingWeatherPage() {
   return (
     <div className="weather-page-container">
       {loading && <LoadingOverlay message="天気情報を取得しています..." />}
+      {historyLoading && activeTab === 'history' && <LoadingOverlay message="過去の天気情報を取得しています..." />}
       <h2>
         <button onClick={() => navigate('/weather')} className="back-button">
           &larr;
@@ -351,14 +547,39 @@ export function SprayingWeatherPage() {
       )}
 
       {error && <p style={{ color: 'crimson' }}>エラー: {error}</p>}
+      {historyError && activeTab === 'history' && <p style={{ color: 'crimson' }}>エラー: {historyError}</p>}
 
-      {weatherData && (
+      <div className="weather-tabs" role="tablist" aria-label="天気タブ">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'spray'}
+          className={`weather-tab ${activeTab === 'spray' ? 'active' : ''}`}
+          onClick={() => setActiveTab('spray')}
+        >
+          散布天気
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'history'}
+          className={`weather-tab ${activeTab === 'history' ? 'active' : ''}`}
+          onClick={() => setActiveTab('history')}
+        >
+          過去の天気
+        </button>
+      </div>
+
+      {weatherData && activeTab === 'spray' && (
         <WeatherDisplay
           weatherData={weatherData}
           plannedTasksByDate={plannedTasksByDate.badges}
           plannedTasksDetail={plannedTasksByDate.tasks}
           bbchBySeason={bbchBySeason}
         />
+      )}
+      {activeTab === 'history' && (
+        <PastWeatherPanel weatherData={historyWeatherData} plannedTasksDetail={plannedTasksByDate.tasks} />
       )}
     </div>
   );
@@ -380,6 +601,434 @@ type CandidateDay = {
   windows: SprayWindow[];
   dayTone: 'recommended' | 'possible' | 'bad';
   factorSummary: Record<SprayFactor['factor'], { good: number; moderate: number; bad: number; label: string; tone: string }>;
+};
+
+const PastWeatherPanel: FC<{
+  weatherData: WeatherData | null;
+  plannedTasksDetail: Record<string, PlannedTaskEntry[]>;
+}> = ({ weatherData, plannedTasksDetail }) => {
+  const plannedMonths = useMemo(() => {
+    const monthMap = new Map<string, number>();
+    Object.entries(plannedTasksDetail).forEach(([dateKey, tasks]) => {
+      if (!dateKey || tasks.length === 0) return;
+      const [year, month] = dateKey.split('-');
+      if (!year || !month) return;
+      const key = `${year}-${month}`;
+      monthMap.set(key, (monthMap.get(key) ?? 0) + tasks.length);
+    });
+    return Array.from(monthMap.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [plannedTasksDetail]);
+  const fallbackMonthKey = useMemo(() => getJstMonthKeyFromDate(new Date()), []);
+  const hasPlannedMonths = plannedMonths.length > 0;
+
+  const historyTargets = useMemo(() => {
+    const sourceMonths = hasPlannedMonths ? plannedMonths.map(([monthKey]) => ({ monthKey, label: monthKey })) : [{
+      monthKey: fallbackMonthKey,
+      label: `${fallbackMonthKey} (当月)`,
+    }];
+    return sourceMonths
+      .map(({ monthKey, label }) => {
+        const [yearText, monthText] = monthKey.split('-');
+        const year = Number(yearText);
+        const month = Number(monthText);
+        if (!year || !month) return null;
+        const previousYear = `${year - 1}-${String(month).padStart(2, '0')}`;
+        const twoYearsAgo = `${year - 2}-${String(month).padStart(2, '0')}`;
+        return {
+          plannedMonth: label,
+          historyMonths: [previousYear, twoYearsAgo],
+        };
+      })
+      .filter((entry): entry is { plannedMonth: string; historyMonths: string[] } => Boolean(entry));
+  }, [fallbackMonthKey, hasPlannedMonths, plannedMonths]);
+
+  const historyDailyByMonth = useMemo(() => {
+    const data = weatherData?.weatherHistoricForecastDaily ?? [];
+    const monthMap = new Map<string, DailyWeather[]>();
+    data.forEach((entry) => {
+      const dateKey = getJstDateKey(entry.date);
+      const [year, month] = dateKey.split('-');
+      if (!year || !month) return;
+      const key = `${year}-${month}`;
+      if (!monthMap.has(key)) monthMap.set(key, []);
+      monthMap.get(key)?.push(entry);
+    });
+    monthMap.forEach((entries, key) => {
+      monthMap.set(
+        key,
+        entries.sort((a, b) => getJstDateKey(a.date).localeCompare(getJstDateKey(b.date)))
+      );
+    });
+    return monthMap;
+  }, [weatherData]);
+
+  const historyDailyMonths = useMemo(() => Array.from(historyDailyByMonth.keys()).sort(), [historyDailyByMonth]);
+  const historyMonthLabels = useMemo(() => {
+    const months = new Set<string>();
+    historyDailyMonths.forEach((key) => {
+      const [, month] = key.split('-');
+      if (month) months.add(month);
+    });
+    return Array.from(months).sort();
+  }, [historyDailyMonths]);
+  const [selectedHistoryMonthLabel, setSelectedHistoryMonthLabel] = useState<string | null>(null);
+  const [historyChartMode, setHistoryChartMode] = useState<'monthly' | 'daily'>('monthly');
+
+  useEffect(() => {
+    if (historyMonthLabels.length === 0) {
+      setSelectedHistoryMonthLabel(null);
+      return;
+    }
+    if (selectedHistoryMonthLabel && historyMonthLabels.includes(selectedHistoryMonthLabel)) return;
+    setSelectedHistoryMonthLabel(historyMonthLabels[0]);
+  }, [historyMonthLabels, selectedHistoryMonthLabel]);
+
+  useEffect(() => {
+    if (historyChartMode === 'daily' && !selectedHistoryMonthLabel && historyMonthLabels.length > 0) {
+      setSelectedHistoryMonthLabel(historyMonthLabels[0]);
+    }
+  }, [historyChartMode, historyMonthLabels, selectedHistoryMonthLabel]);
+
+  const historySummaryByMonth = useMemo(() => {
+    const data = weatherData?.weatherHistoricForecastDaily ?? [];
+    const monthMap = new Map<string, DailyWeather[]>();
+    data.forEach((entry) => {
+      const dateKey = getJstDateKey(entry.date);
+      const [year, month] = dateKey.split('-');
+      if (!year || !month) return;
+      const key = `${year}-${month}`;
+      if (!monthMap.has(key)) monthMap.set(key, []);
+      monthMap.get(key)?.push(entry);
+    });
+
+    const toFiniteNumber = (value: unknown): number | null => {
+      if (value === null || value === undefined) return null;
+      const num = typeof value === 'number' ? value : Number(value);
+      return Number.isFinite(num) ? num : null;
+    };
+
+    const summarize = (days: DailyWeather[]) => {
+      if (!days.length) return null;
+      const acc = {
+        minSum: 0,
+        minCount: 0,
+        maxSum: 0,
+        maxCount: 0,
+        avgSum: 0,
+        avgCount: 0,
+        precipSum: 0,
+        sunshineSum: 0,
+        humiditySum: 0,
+        humidityCount: 0,
+        windSum: 0,
+        windCount: 0,
+      };
+      days.forEach((day) => {
+        const minTemp = toFiniteNumber(day.airTempCMin);
+        if (minTemp !== null) {
+          acc.minSum += minTemp;
+          acc.minCount += 1;
+        }
+        const maxTemp = toFiniteNumber(day.airTempCMax);
+        if (maxTemp !== null) {
+          acc.maxSum += maxTemp;
+          acc.maxCount += 1;
+        }
+        const avgTemp = toFiniteNumber(day.airTempCAvg);
+        if (avgTemp !== null) {
+          acc.avgSum += avgTemp;
+          acc.avgCount += 1;
+        }
+        const precipitation = toFiniteNumber(day.precipitationBestMm);
+        if (precipitation !== null) {
+          acc.precipSum += precipitation;
+        }
+        const sunshine = toFiniteNumber(day.sunshineDurationH);
+        if (sunshine !== null) {
+          acc.sunshineSum += sunshine;
+        }
+        const humidity = toFiniteNumber(day.relativeHumidityPctAvg);
+        if (humidity !== null) {
+          acc.humiditySum += humidity;
+          acc.humidityCount += 1;
+        }
+        const windSpeed = toFiniteNumber(day.windSpeedMSAvg);
+        if (windSpeed !== null) {
+          acc.windSum += windSpeed;
+          acc.windCount += 1;
+        }
+      });
+      const round = (value: number) => Math.round(value * 10) / 10;
+      return {
+        avgMin: acc.minCount ? round(acc.minSum / acc.minCount) : null,
+        avgAvg: acc.avgCount ? round(acc.avgSum / acc.avgCount) : null,
+        avgMax: acc.maxCount ? round(acc.maxSum / acc.maxCount) : null,
+        totalPrecip: round(acc.precipSum),
+        totalSunshine: round(acc.sunshineSum),
+        avgHumidity: acc.humidityCount ? round(acc.humiditySum / acc.humidityCount) : null,
+        avgWind: acc.windCount ? round(acc.windSum / acc.windCount) : null,
+      };
+    };
+
+    const summaryMap = new Map<string, ReturnType<typeof summarize>>();
+    monthMap.forEach((entries, key) => {
+      summaryMap.set(key, summarize(entries));
+    });
+    return summaryMap;
+  }, [weatherData]);
+
+  const formatMetric = (value: number | null, unit: string, digits = 1): string => {
+    if (value === null || !Number.isFinite(value)) return '-';
+    return `${value.toFixed(digits)}${unit}`;
+  };
+
+  const toNumeric = (value: unknown): number | null => {
+    if (value === null || value === undefined) return null;
+    const num = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(num) ? num : null;
+  };
+
+  const computeDrySunny = (day: DailyWeather) => {
+    const sunshine = toNumeric(day.sunshineDurationH);
+    const precip = toNumeric(day.precipitationBestMm);
+    const humidity = toNumeric(day.relativeHumidityPctAvg);
+    const isSunny = sunshine !== null && sunshine >= 5;
+    const isDry = precip !== null && precip <= 1;
+    const isMoist = humidity !== null && humidity >= 55 && humidity <= 85;
+    return { isSunny, isDry, isMoist };
+  };
+
+  const historyYearKeys = useMemo(() => {
+    const now = new Date();
+    const { year } = getJstDateParts(now);
+    if (!year) return [];
+    const targetYears = [year - 4, year - 3, year - 2, year - 1, year].map(String);
+    const years = new Set<string>();
+    historySummaryByMonth.forEach((_summary, key) => {
+      const [keyYear] = key.split('-');
+      if (keyYear) years.add(keyYear);
+    });
+    return targetYears.filter((target) => years.has(target));
+  }, [historySummaryByMonth]);
+
+  const selectedDailyChartData = useMemo(() => {
+    if (!selectedHistoryMonthLabel) return [];
+    const dayMap = new Map<string, Record<string, number | string | boolean | null>>();
+    historyYearKeys.forEach((year) => {
+      const key = `${year}-${selectedHistoryMonthLabel}`;
+      const entries = historyDailyByMonth.get(key) ?? [];
+      const goodWindowDays = new Set<string>();
+      entries.forEach((day, index) => {
+        const current = computeDrySunny(day);
+        const prev = index > 0 ? computeDrySunny(entries[index - 1]) : null;
+        if (prev && current.isSunny && current.isDry && current.isMoist && prev.isSunny && prev.isDry && prev.isMoist) {
+          const dateKey = getJstDateKey(day.date);
+          const dayLabel = dateKey.split('-')[2] ?? dateKey;
+          goodWindowDays.add(dayLabel);
+        }
+      });
+
+      entries.forEach((day) => {
+        const dateKey = getJstDateKey(day.date);
+        const dayLabel = dateKey.split('-')[2] ?? dateKey;
+        if (!dayMap.has(dayLabel)) dayMap.set(dayLabel, { label: dayLabel });
+        const row = dayMap.get(dayLabel)!;
+        row[`precip_${year}`] = toNumeric(day.precipitationBestMm);
+        row[`temp_${year}`] = toNumeric(day.airTempCAvg);
+        row[`good_${year}`] = goodWindowDays.has(dayLabel);
+      });
+    });
+
+    return Array.from(dayMap.values()).sort((a, b) => Number(a.label) - Number(b.label));
+  }, [historyDailyByMonth, historyYearKeys, selectedHistoryMonthLabel]);
+
+  type HistorySummary = NonNullable<ReturnType<typeof historySummaryByMonth.get>>;
+  const historyChartData = useMemo(() => {
+    const monthData = new Map<string, Record<string, HistorySummary>>();
+    historySummaryByMonth.forEach((summary, key) => {
+      if (!summary) return;
+      const [, month] = key.split('-');
+      const year = key.split('-')[0];
+      if (!month || !year) return;
+      if (!monthData.has(month)) monthData.set(month, {});
+      monthData.get(month)![year] = summary;
+    });
+    const months = Array.from(monthData.keys()).sort();
+    return months.map((month) => {
+      const row: Record<string, number | null | string> = { month };
+      historyYearKeys.forEach((year) => {
+        const summary = monthData.get(month)?.[year];
+        row[`precip_${year}`] = summary?.totalPrecip ?? null;
+        row[`temp_${year}`] = summary?.avgAvg ?? null;
+      });
+      return row;
+    });
+  }, [historySummaryByMonth, historyYearKeys]);
+
+  return (
+    <div className="weather-content">
+      <div className="weather-section">
+        <h3>過去の天気（前年・2年前の実績）</h3>
+        <p className="weather-history-note">
+          今日から過去5年分のデータを取得し、散布タスクの予定月に合わせて表示します。
+          {!hasPlannedMonths && ' 散布予定がないため、当月を基準に表示しています。'}
+        </p>
+      </div>
+
+      <div className="weather-section">
+        <h3>散布タスクの予定月</h3>
+        {plannedMonths.length === 0 ? (
+          <p className="weather-history-empty">散布タスクの予定月が見つかりません。</p>
+        ) : (
+          <div className="weather-history-months">
+            {plannedMonths.map(([monthKey, count]) => (
+              <div key={monthKey} className="weather-history-month">
+                <span>{monthKey}</span>
+                <span>{count} 件</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="weather-section">
+        <h3>月別の年比較グラフ（今年を含めて5年分）</h3>
+        {historyChartData.length === 0 || historyYearKeys.length === 0 ? (
+          <p className="weather-history-empty">グラフを表示できるデータがありません。</p>
+        ) : (
+          <div className="weather-history-chart">
+            <div className="weather-history-chart-header">
+              <h4>
+                {historyChartMode === 'monthly'
+                  ? '降水量（棒）＋平均気温（線）'
+                  : `${selectedHistoryMonthLabel ?? ''}月 日別天気（複数年）`}
+              </h4>
+              {historyChartMode === 'daily' && (
+                <button type="button" className="weather-history-back" onClick={() => setHistoryChartMode('monthly')}>
+                  月別に戻る
+                </button>
+              )}
+            </div>
+            {historyChartMode === 'monthly' ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <ComposedChart
+                  data={historyChartData}
+                  margin={{ top: 10, right: 20, left: 0, bottom: 0 }}
+                  onClick={(event) => {
+                    const label = (event as { activeLabel?: string })?.activeLabel;
+                    if (!label) return;
+                    setSelectedHistoryMonthLabel(label);
+                    setHistoryChartMode('daily');
+                  }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#4a4a4f" />
+                  <XAxis dataKey="month" unit="月" stroke="#9e9e9e" />
+                  <YAxis yAxisId="left" stroke="#82ca9d" />
+                  <YAxis yAxisId="right" orientation="right" stroke="#ffb74d" />
+                  <Tooltip />
+                  <Legend />
+                  {historyYearKeys.map((year, index) => (
+                    <Bar
+                      key={`precip-${year}`}
+                      yAxisId="left"
+                      dataKey={`precip_${year}`}
+                      name={`${year}年 降水`}
+                      fill={index % 2 === 0 ? '#5aa9ff' : '#8ad1ff'}
+                    />
+                  ))}
+                  {historyYearKeys.map((year, index) => (
+                    <Line
+                      key={`temp-${year}`}
+                      yAxisId="right"
+                      type="monotone"
+                      dataKey={`temp_${year}`}
+                      name={`${year}年 気温`}
+                      stroke={index % 2 === 0 ? '#ffb74d' : '#ffd59a'}
+                      dot={false}
+                    />
+                  ))}
+                </ComposedChart>
+              </ResponsiveContainer>
+            ) : (
+              <ResponsiveContainer width="100%" height={320}>
+                <ComposedChart data={selectedDailyChartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#4a4a4f" />
+                  <XAxis dataKey="label" stroke="#9e9e9e" />
+                  <YAxis yAxisId="left" stroke="#82ca9d" />
+                  <YAxis yAxisId="right" orientation="right" stroke="#ffb74d" />
+                  <Tooltip />
+                  <Legend />
+                  {historyYearKeys.map((year, index) => (
+                    <Bar
+                      key={`daily-precip-${year}`}
+                      yAxisId="left"
+                      dataKey={`precip_${year}`}
+                      name={`${year}年 降水`}
+                      fill={index % 2 === 0 ? '#5aa9ff' : '#8ad1ff'}
+                    >
+                      {selectedDailyChartData.map((entry, idx) => (
+                        <Cell
+                          key={`cell-${year}-${entry.label}-${idx}`}
+                          fill={
+                            entry[`good_${year}`]
+                              ? '#6cc17a'
+                              : index % 2 === 0
+                                ? '#5aa9ff'
+                                : '#8ad1ff'
+                          }
+                        />
+                      ))}
+                    </Bar>
+                  ))}
+                  {historyYearKeys.map((year, index) => (
+                    <Line
+                      key={`daily-temp-${year}`}
+                      yAxisId="right"
+                      type="monotone"
+                      dataKey={`temp_${year}`}
+                      name={`${year}年 気温`}
+                      stroke={index % 2 === 0 ? '#ffb74d' : '#ffd59a'}
+                      dot={false}
+                    />
+                  ))}
+                </ComposedChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        )}
+      </div>
+
+      {historyChartMode === 'daily' && (
+        <div className="weather-section">
+          <h3>月別ドリルダウン（2日連続の晴天目安）</h3>
+          {historyDailyMonths.length === 0 ? (
+            <p className="weather-history-empty">日別データがありません。</p>
+          ) : (
+            <>
+              <div className="weather-history-controls">
+                <label htmlFor="history-month-select">対象月</label>
+                <select
+                  id="history-month-select"
+                  value={selectedHistoryMonthLabel ?? ''}
+                  onChange={(event) => setSelectedHistoryMonthLabel(event.target.value)}
+                >
+                  {historyMonthLabels.map((monthKey) => (
+                    <option key={monthKey} value={monthKey}>
+                      {monthKey}月
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="weather-history-note">
+                目安: 日照 5h 以上・降水 1mm 以下・湿度 55-85% が2日連続した場合をハイライト。
+              </p>
+            </>
+          )}
+        </div>
+      )}
+
+    </div>
+  );
 };
 
 const WeatherDisplay: FC<{
@@ -476,19 +1125,25 @@ const WeatherDisplay: FC<{
 
   return (
     <div className="weather-content">
-      {groupedData.map(([date, dayData]) => (
-        <DailyWeatherSummaryCard
-          key={date}
-          date={date}
-          dayData={dayData}
-          plannedTasks={plannedTasksByDate[date] ?? []}
-          onOpenAdjustModal={() => {
-            const tasks = plannedTasksDetail[date] ?? [];
-            if (tasks.length === 0) return;
-            setModalState({ dateKey: date, dayData, tasks, candidateDays });
-          }}
-        />
-      ))}
+      {groupedData.map(([date, dayData], index) => {
+        const prev1 = groupedData[index - 1]?.[1]?.daily;
+        const prev2 = groupedData[index - 2]?.[1]?.daily;
+        const soilStatus = estimateSoilStatus([dayData.daily, prev1, prev2].filter(Boolean) as DailyWeather[]);
+        return (
+          <DailyWeatherSummaryCard
+            key={date}
+            date={date}
+            dayData={dayData}
+            plannedTasks={plannedTasksByDate[date] ?? []}
+            soilStatus={soilStatus}
+            onOpenAdjustModal={() => {
+              const tasks = plannedTasksDetail[date] ?? [];
+              if (tasks.length === 0) return;
+              setModalState({ dateKey: date, dayData, tasks, candidateDays });
+            }}
+          />
+        );
+      })}
       {modalState && (
         <AdjustPlannedDateModal
           dateKey={modalState.dateKey}
@@ -508,8 +1163,9 @@ const DailyWeatherSummaryCard: FC<{
   date: string;
   dayData: GroupedWeatherData[string];
   plannedTasks: PlannedTaskBadge[];
+  soilStatus: { label: string; tone: 'dry' | 'ok' | 'wet'; reason: string } | null;
   onOpenAdjustModal?: () => void;
-}> = ({ date, dayData, plannedTasks, onOpenAdjustModal }) => {
+}> = ({ date, dayData, plannedTasks, soilStatus, onOpenAdjustModal }) => {
   const chartData = useMemo(() => dayData.hourly.map(h => ({
     time: getJstHour(h.startDatetime),
     '気温 (°C)': Number(h.airTempCAvg).toFixed(1),
@@ -534,7 +1190,6 @@ const DailyWeatherSummaryCard: FC<{
     const extra = unique.length - visible.length;
     return { visible, extra };
   }, [plannedTasks]);
-
   const sprayStatusText = {
     RECOMMENDED: '高推奨', // 変更
     NOT_RECOMMENDED: '範囲外',
@@ -565,11 +1220,21 @@ const DailyWeatherSummaryCard: FC<{
           )}
         </div>
         {dayData.daily && (
-          <p>
-            気温: {dayData.daily.airTempCMin}°C / {dayData.daily.airTempCMax}°C
-            <span style={{ margin: '0 1em' }}>|</span>
-            降水: {dayData.daily.precipitationBestMm} mm
-          </p>
+          <div className="daily-summary-metrics">
+            <p>
+              気温: {dayData.daily.airTempCMin}°C / {dayData.daily.airTempCMax}°C
+              <span style={{ margin: '0 1em' }}>|</span>
+              降水: {dayData.daily.precipitationBestMm} mm
+            </p>
+            {soilStatus && (
+              <span
+                className={`soil-status-badge soil-status-badge--${soilStatus.tone}`}
+                title={`土壌推定（目安）: ${soilStatus.reason}`}
+              >
+                土壌: {soilStatus.label}
+              </span>
+            )}
+          </div>
         )}
       </div>
 
@@ -669,6 +1334,7 @@ const AdjustPlannedDateModal: FC<{
   auth: LoginAndTokenResp | null;
   onClose: () => void;
 }> = ({ dateKey, dayData, tasks, candidateDays, bbchBySeason, auth, onClose }) => {
+  const { clearCombinedCache, fetchCombinedDataIfNeeded } = useFarms();
   const [selectedTaskIds, setSelectedTaskIds] = useState(() => new Set(tasks.map(t => t.uuid)));
   const [selectedDateKey, setSelectedDateKey] = useState(dateKey);
   const [selectedWindow, setSelectedWindow] = useState<number | null>(0);
@@ -741,6 +1407,8 @@ const AdjustPlannedDateModal: FC<{
           throw new Error(detail);
         }
       }
+      clearCombinedCache();
+      fetchCombinedDataIfNeeded({ includeTasks: true, force: true });
       onClose();
     } catch (err) {
       const message = err instanceof Error ? err.message : '更新に失敗しました。';

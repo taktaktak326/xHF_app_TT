@@ -135,10 +135,13 @@ export function WeatherSelectionPage() {
           const displayName = cluster.fields.length > 1
             ? `${primary.name} ほか ${cluster.fields.length - 1} 圃場`
             : primary.name;
+          const tooltip = cluster.fields.map(field => field.name).join('、');
           return (
             <div
               key={cluster.id}
               className="farm-card cluster-card"
+              title={tooltip}
+              aria-label={tooltip}
               onClick={() =>
                 navigate(`/weather/${primary.uuid}`, {
                   state: {

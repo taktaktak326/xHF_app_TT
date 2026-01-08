@@ -39,6 +39,25 @@ class WeatherByFieldReq(BaseModel):
     till_date: Optional[str] = None
     includeTokens: bool = False
 
+# ---- /crop-protection-products ----
+class CropProtectionProductsReq(BaseModel):
+    login_token: str
+    api_token: str
+    farm_uuids: List[str]
+    country_uuid: str
+    crop_uuid: str
+    task_type_code: Optional[str] = "FIELDTREATMENT"
+    includeTokens: bool = False
+
+class CropProtectionProductsBulkReq(BaseModel):
+    login_token: str
+    api_token: str
+    farm_uuids: List[str]
+    country_uuid: str
+    crop_uuids: List[str]
+    task_type_code: Optional[str] = "FIELDTREATMENT"
+    includeTokens: bool = False
+
 class FieldDataLayersReq(BaseModel):
     login_token: str
     api_token: str

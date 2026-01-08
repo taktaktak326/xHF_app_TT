@@ -28,6 +28,7 @@ export const formatCropEstablishmentMethod = (season: CropSeason | null): string
   if (!method) return 'N/A';
   if (method === 'TRANSPLANTING') return '移植';
   if (method === 'DIRECT_SEEDING') return '直播';
+  if (method === 'MYKOS_DRY_DIRECT_SEEDING') return '節水型乾田直播';
   return method;
 };
 
@@ -122,10 +123,13 @@ export const formatRiskAlert = (season: CropSeason | null): StatusDisplay => {
       return {
         ...risk,
         name: stressInfo?.stressV2.name || 'Unknown Risk',
+        groupKey: `${risk.stressV2.uuid}-${normalizeStatus(risk.status)}`,
       };
     });
 
-  const sorted = flattened.sort((a, b) => {
+  const grouped = groupConsecutiveItems(flattened, 'groupKey');
+
+  const sorted = grouped.sort((a, b) => {
     const sev = statusSeverity(a.status) - statusSeverity(b.status);
     if (sev !== 0) return sev;
     return new Date(a.startDate).getTime() - new Date(b.startDate).getTime();

@@ -8,6 +8,7 @@ import './FarmsPage.css'; // FarmsPageのスタイルを再利用
 import './FieldMemoPage.css';
 import { withApiBase } from '../utils/apiBase';
 import { createDownloadUrl } from '../utils/apiUtils';
+import { getSessionCache, setSessionCache } from '../utils/sessionCache';
 import LoadingOverlay from '../components/LoadingOverlay';
 import LoadingSpinner from '../components/LoadingSpinner';
 
@@ -27,7 +28,15 @@ type AggregatedNote = FieldNote & {
 // API Client
 // =============================================================================
 
+const getFieldNotesCacheKey = (farmUuids: string[]) =>
+  `field-notes:${[...farmUuids].sort().join(',')}`;
+
 async function fetchFieldNotesApi(params: { auth: LoginAndTokenResp; farmUuids: string[] }): Promise<any> {
+  const cacheKey = getFieldNotesCacheKey(params.farmUuids);
+  if (params.farmUuids.length > 0) {
+    const cached = getSessionCache<any>(cacheKey);
+    if (cached) return { ...cached, source: 'cache' };
+  }
   const requestBody = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
@@ -39,7 +48,11 @@ async function fetchFieldNotesApi(params: { auth: LoginAndTokenResp; farmUuids: 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(requestBody),
   });
-  return res.json();
+  const out = await res.json();
+  if (res.ok && params.farmUuids.length > 0) {
+    setSessionCache(cacheKey, { ...out, source: 'api' });
+  }
+  return { ...out, source: 'api' };
 }
 
 // =============================================================================

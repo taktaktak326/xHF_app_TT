@@ -10,6 +10,7 @@ export type LoginAndTokenResp = {
 };
 
 export type Crop = {
+  uuid?: string;
   name: string;
 };
 
@@ -234,6 +235,7 @@ export type AggregatedTask = (
   fieldName: string;
   fieldUuid: string;
   cropName: string;
+  cropUuid?: string | null;
   seasonStartDate: string;
   seasonUuid?: string | null;
   fieldArea: number;

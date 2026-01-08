@@ -14,7 +14,23 @@ import type {
   SubstanceApplicationRate,
   CountryCropGrowthStagePrediction,
 } from '../types/farm';
-import { format, startOfDay, subDays, differenceInCalendarDays, addDays } from 'date-fns';
+import {
+  format,
+  startOfDay,
+  subDays,
+  differenceInCalendarDays,
+  addDays,
+  startOfMonth,
+  endOfMonth,
+  startOfWeek,
+  endOfWeek,
+  eachDayOfInterval,
+  addMonths,
+  subMonths,
+  subYears,
+  isSameMonth,
+  isSameDay,
+} from 'date-fns';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -30,6 +46,7 @@ import zoomPlugin from 'chartjs-plugin-zoom';
 import ChartDataLabels from 'chartjs-plugin-datalabels';
 import './TasksPage.css';
 import LoadingOverlay from '../components/LoadingOverlay';
+import LoadingSpinner from '../components/LoadingSpinner';
 import { formatCombinedLoadingMessage } from '../utils/loadingMessage';
 import { withApiBase } from '../utils/apiBase';
 
@@ -72,6 +89,12 @@ type SprayingChartKey =
   | 'Spraying_WEED_MANAGEMENT'
   | 'Spraying_OTHER';
 
+type CropProtectionProduct = {
+  uuid?: string;
+  name?: string | null;
+  categories?: Array<{ name?: string | null }> | null;
+};
+
 const SPRAYING_LABELS: Record<SprayingChartKey, string> = {
   Spraying_CROP_PROTECTION: '散布（防除）',
   Spraying_NUTRITION: '散布（施肥）',
@@ -101,6 +124,9 @@ const TASK_STATE_LABELS: Record<string, string> = {
   SKIPPED: 'スキップ',
   MISSED: '未実施',
 };
+
+const COUNTRY_UUID_JP = '0f59ff55-c86b-4b7b-4eaa-eb003d47dcd3';
+const HERBICIDE_CATEGORY_NAME = 'HERBICIDE';
 
 const STATUS_TOKEN_LABELS: Record<string, string> = {
   AUTO: '自動',
@@ -233,6 +259,10 @@ function getTaskLabel(task: AggregatedTask): string {
   return TASK_TYPE_MAP[task.type] ?? task.type;
 }
 
+function normalizeProductUuid(value?: string | null): string {
+  return (value ?? '').trim().toLowerCase();
+}
+
 function getJstDateInputValue(rawDate?: string | null): string {
   if (!rawDate) return '';
   const date = new Date(rawDate);
@@ -267,6 +297,21 @@ function getJstDateInputValueFromDate(date: Date): string {
     .replace(/\//g, '-');
 }
 
+function toJstBoundaryIsoFromDate(date: Date, endOfDay: boolean): string {
+  const dateInput = getJstDateInputValueFromDate(date);
+  const [y, m, d] = dateInput.split('-').map(Number);
+  const utcMs = Date.UTC(
+    y,
+    m - 1,
+    d,
+    endOfDay ? 23 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 999 : 0
+  ) - 9 * 60 * 60 * 1000;
+  return new Date(utcMs).toISOString().replace('.000Z', 'Z');
+}
+
 function getBbchRangeLabel(prediction: CountryCropGrowthStagePrediction): string {
   const start = getLocalDateString(prediction.startDate);
   if (!start) return '';
@@ -284,6 +329,22 @@ function normalizeBbchIndex(index?: string | null): string {
   if (!index) return '';
   const trimmed = String(index).trim();
   return trimmed.toUpperCase().startsWith('BBCH') ? trimmed.slice(4) : trimmed;
+}
+
+function getBbchBadgeStyle(index: string): { background: string; borderColor: string; color: string } {
+  const numeric = Number.parseInt(index, 10);
+  if (!Number.isFinite(numeric)) {
+    return { background: 'rgba(160, 160, 170, 0.2)', borderColor: 'rgba(160, 160, 170, 0.5)', color: '#dfe3ff' };
+  }
+  const clamp = (value: number) => Math.min(99, Math.max(0, value));
+  const value = clamp(numeric);
+  const startHue = 210; // blue
+  const endHue = 10; // red
+  const hue = startHue + ((endHue - startHue) * (value / 99));
+  const background = `hsla(${hue}, 85%, 65%, 0.2)`;
+  const borderColor = `hsla(${hue}, 85%, 65%, 0.6)`;
+  const color = `hsl(${hue}, 90%, 85%)`;
+  return { background, borderColor, color };
 }
 
 function findBbchIndexForDate(
@@ -500,6 +561,7 @@ const useAggregatedTasks = (): AggregatedTask[] => {
           fieldUuid: field.uuid,
           fieldName: field.name,
           cropName: season.crop.name,
+          cropUuid: season.crop.uuid ?? null,
           seasonStartDate: season.startDate,
           seasonUuid: season.uuid,
           fieldArea,
@@ -554,7 +616,7 @@ export function TasksPage() {
     combinedRetryCountdown,
   } = useData();
   const { auth } = useAuth();
-  const { submittedFarms, fetchCombinedDataIfNeeded } = useFarms(); // fetchCombinedDataIfNeeded を useFarms から取得
+  const { submittedFarms, fetchCombinedDataIfNeeded, clearCombinedCache } = useFarms(); // fetchCombinedDataIfNeeded を useFarms から取得
   const navigate = useNavigate();
   const baseTasks = useAggregatedTasks();
   const [plannedDateOverrides, setPlannedDateOverrides] = useState<Record<string, string | null>>({});
@@ -570,6 +632,9 @@ export function TasksPage() {
       return { ...task, plannedDate: override };
     });
   }, [baseTasks, plannedDateOverrides]);
+  const [herbicideProductUuidsByCrop, setHerbicideProductUuidsByCrop] = useState<Map<string, Set<string>>>(new Map());
+  const herbicideFetchInFlight = useRef<Set<string>>(new Set());
+  const herbicideCacheKeyRef = useRef<string>('');
   const bbchBySeason = useMemo(() => {
     const fields = selectFieldsFromCombinedOut(combinedOut);
     const map = new Map<string, CountryCropGrowthStagePrediction[]>();
@@ -581,6 +646,175 @@ export function TasksPage() {
     });
     return map;
   }, [combinedOut]);
+  useEffect(() => {
+    if (!auth) return;
+    const sprayingTasks = allTasks.filter(task => task.type === 'Spraying' && task.cropUuid);
+    const cropUuids = Array.from(new Set(sprayingTasks.map(task => task.cropUuid).filter(Boolean))) as string[];
+    if (cropUuids.length === 0) return;
+    const farmUuids = submittedFarms.length > 0
+      ? submittedFarms
+      : Array.from(new Set(sprayingTasks.map(task => task.farmUuid).filter(Boolean))) as string[];
+    if (farmUuids.length === 0) return;
+    const cacheKey = `${farmUuids.slice().sort().join(',')}|${cropUuids.slice().sort().join(',')}`;
+    if (herbicideCacheKeyRef.current === cacheKey) return;
+    if (herbicideFetchInFlight.current.has(cacheKey)) return;
+    herbicideFetchInFlight.current.add(cacheKey);
+
+    let cancelled = false;
+    const fetchProducts = async () => {
+      let items: Record<string, CropProtectionProduct[] | { ok?: boolean }> = {};
+      try {
+        const res = await fetch(withApiBase('/crop-protection-products/bulk'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            login_token: auth.login.login_token,
+            api_token: auth.api_token,
+            farm_uuids: farmUuids,
+            country_uuid: COUNTRY_UUID_JP,
+            crop_uuids: cropUuids,
+            task_type_code: 'FIELDTREATMENT',
+          }),
+        });
+        const json = await res.json();
+        if (!res.ok || !json?.ok) return;
+        items = json.items ?? {};
+        if (cancelled) return;
+        setHerbicideProductUuidsByCrop(prev => {
+          const next = new Map(prev);
+          Object.entries(items).forEach(([cropUuid, productList]) => {
+            if (!Array.isArray(productList)) return;
+            const herbicideUuids = new Set<string>();
+            productList.forEach((product) => {
+              if (!product?.categories?.some((category) => category?.name === HERBICIDE_CATEGORY_NAME)) return;
+              const normalized = normalizeProductUuid(product?.uuid);
+              if (normalized) herbicideUuids.add(normalized);
+            });
+            next.set(cropUuid, herbicideUuids);
+          });
+          herbicideCacheKeyRef.current = cacheKey;
+          return next;
+        });
+      } finally {
+        herbicideFetchInFlight.current.delete(cacheKey);
+      }
+    };
+
+    fetchProducts();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth, allTasks, herbicideProductUuidsByCrop, submittedFarms]);
+  const fieldOptions = useMemo(() => {
+    const fields = selectFieldsFromCombinedOut(combinedOut);
+    return fields
+      .filter(field => field?.uuid)
+      .map(field => ({ uuid: field.uuid, name: field.name ?? '(no name)', seasons: field.cropSeasonsV2 ?? [] }));
+  }, [combinedOut]);
+  const herbicideOrdersByTask = useMemo(() => {
+    const orders = new Map<string, number>();
+    const grouped: Record<string, AggregatedTask[]> = {};
+    const isHerbicideTask = (task: AggregatedTask): boolean => {
+      if (task.type !== 'Spraying') return false;
+      const recipe = task.dosedMap?.recipeV2 ?? [];
+      const entries = Array.isArray(recipe) ? recipe : [recipe];
+      if (task.cropUuid) {
+        const herbicideUuids = herbicideProductUuidsByCrop.get(task.cropUuid);
+        if (herbicideUuids && herbicideUuids.size > 0) {
+          return entries.some((entry) => {
+            const normalized = normalizeProductUuid(entry?.uuid);
+            return normalized ? herbicideUuids.has(normalized) : false;
+          });
+        }
+      }
+      const hint = (task.creationFlowHint || '').toUpperCase();
+      return hint === 'WEED_MANAGEMENT';
+    };
+
+    const byGroup = allTasks.reduce((acc, task) => {
+      if (!isHerbicideTask(task)) return acc;
+      const groupKey = `${task.fieldUuid}:${task.seasonUuid ?? 'none'}`;
+      if (!acc[groupKey]) acc[groupKey] = [];
+      acc[groupKey].push(task);
+      return acc;
+    }, {} as Record<string, AggregatedTask[]>);
+
+    Object.values(byGroup).forEach((tasks) => {
+      const sorted = [...tasks].sort((a, b) => {
+        const dateA = a.executionDate || a.plannedDate;
+        const dateB = b.executionDate || b.plannedDate;
+        if (!dateA) return 1;
+        if (!dateB) return -1;
+        return new Date(dateA).getTime() - new Date(dateB).getTime();
+      });
+      sorted.forEach((task, index) => {
+        orders.set(task.uuid, index + 1);
+      });
+    });
+
+    return orders;
+  }, [allTasks, herbicideProductUuidsByCrop]);
+  const herbicideIntervalAlertsByTask = useMemo(() => {
+    const alerts = new Map<string, boolean>();
+    const grouped: Record<string, AggregatedTask[]> = {};
+    const isHerbicideTask = (task: AggregatedTask): boolean => {
+      if (task.type !== 'Spraying') return false;
+      const recipe = task.dosedMap?.recipeV2 ?? [];
+      const entries = Array.isArray(recipe) ? recipe : [recipe];
+      if (task.cropUuid) {
+        const herbicideUuids = herbicideProductUuidsByCrop.get(task.cropUuid);
+        if (herbicideUuids && herbicideUuids.size > 0) {
+          return entries.some((entry) => {
+            const normalized = normalizeProductUuid(entry?.uuid);
+            return normalized ? herbicideUuids.has(normalized) : false;
+          });
+        }
+      }
+      const hint = (task.creationFlowHint || '').toUpperCase();
+      return hint === 'WEED_MANAGEMENT';
+    };
+
+    const byGroup = allTasks.reduce((acc, task) => {
+      if (!isHerbicideTask(task)) return acc;
+      const groupKey = `${task.fieldUuid}:${task.seasonUuid ?? 'none'}`;
+      if (!acc[groupKey]) acc[groupKey] = [];
+      acc[groupKey].push(task);
+      return acc;
+    }, {} as Record<string, AggregatedTask[]>);
+
+    Object.values(byGroup).forEach((tasks) => {
+      const sorted = [...tasks].sort((a, b) => {
+        const dateA = a.executionDate || a.plannedDate;
+        const dateB = b.executionDate || b.plannedDate;
+        if (!dateA) return 1;
+        if (!dateB) return -1;
+        return new Date(dateA).getTime() - new Date(dateB).getTime();
+      });
+      sorted.forEach((task, index) => {
+        if (index === 0) return;
+        const prev = sorted[index - 1];
+        const currentDate = task.executionDate || task.plannedDate;
+        const prevDate = prev.executionDate || prev.plannedDate;
+        if (!currentDate || !prevDate) return;
+        const diff = differenceInCalendarDays(new Date(currentDate), new Date(prevDate));
+        if (diff < 20) {
+          alerts.set(task.uuid, true);
+        }
+      });
+    });
+
+    return alerts;
+  }, [allTasks, herbicideProductUuidsByCrop]);
+  const bbchPredictionsByField = useMemo(() => {
+    const map = new Map<string, CountryCropGrowthStagePrediction[]>();
+    fieldOptions.forEach(field => {
+      const seasons = field.seasons ?? [];
+      const active = seasons.find(season => season.activeGrowthStage) ?? seasons[0] ?? null;
+      if (!active?.uuid) return;
+      map.set(field.uuid, bbchBySeason.get(active.uuid) ?? []);
+    });
+    return map;
+  }, [bbchBySeason, fieldOptions]);
   const weatherClusterByField = useMemo(() => {
     const fields = selectFieldsFromCombinedOut(combinedOut);
     const withLocation: FieldEntry[] = [];
@@ -614,6 +848,8 @@ export function TasksPage() {
   const [planDateFrom, setPlanDateFrom] = useState<string>('');
   const [planDateTo, setPlanDateTo] = useState<string>('');
   const [noteFilter, setNoteFilter] = useState<string>('all');
+  const [viewMode, setViewMode] = useState<'list' | 'calendar'>('list');
+  const [calendarMonth, setCalendarMonth] = useState<Date>(() => startOfMonth(new Date()));
   const planDateBounds = useMemo(() => {
     let min: Date | null = null;
     let max: Date | null = null;
@@ -771,6 +1007,27 @@ export function TasksPage() {
       return matchesFarm && matchesType && matchesStatus && matchesNote && matchesBbch;
     });
   }, [allTasks, range, farmFilter, typeFilter, statusFilter, planDateFrom, planDateTo, noteFilter, bbchFilter, bbchBySeason]);
+
+  const tasksById = useMemo(() => {
+    const map = new Map<string, AggregatedTask>();
+    filteredTasks.forEach(task => {
+      if (!task.uuid) return;
+      map.set(task.uuid, task);
+    });
+    return map;
+  }, [filteredTasks]);
+
+  const tasksByDate = useMemo(() => {
+    const map: Record<string, AggregatedTask[]> = {};
+    filteredTasks.forEach(task => {
+      const rawDate = task.plannedDate || task.executionDate;
+      if (!rawDate) return;
+      const dateKey = format(startOfDay(new Date(rawDate)), 'yyyy-MM-dd');
+      if (!map[dateKey]) map[dateKey] = [];
+      map[dateKey].push(task);
+    });
+    return map;
+  }, [filteredTasks]);
   const selectedTasks = useMemo(
     () => filteredTasks.filter(task => selectedTaskUuids.has(task.uuid) && task.type === 'Spraying'),
     [filteredTasks, selectedTaskUuids]
@@ -843,7 +1100,7 @@ export function TasksPage() {
   }, [isWeatherEnabled, weatherClusterByField, navigate]);
 
   const updateSprayingPlannedDate = useCallback(
-    async (task: AggregatedTask, nextDateInput: string) => {
+    async (task: AggregatedTask, nextDateInput: string, opts?: { skipInvalidate?: boolean }) => {
       if (task.type !== 'Spraying') return;
       if (!auth) {
         throw new Error('ログイン情報がありません。再ログインしてください。');
@@ -877,13 +1134,17 @@ export function TasksPage() {
         }
         setPlannedDateOverrides(prev => ({ ...prev, [task.uuid]: plannedDate }));
         setUpdateStateByTask(prev => ({ ...prev, [task.uuid]: { loading: false } }));
+        if (!opts?.skipInvalidate) {
+          clearCombinedCache();
+          fetchCombinedDataIfNeeded({ includeTasks: true, force: true });
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : '更新に失敗しました。';
         setUpdateStateByTask(prev => ({ ...prev, [task.uuid]: { loading: false, error: message } }));
         throw err;
       }
     },
-    [auth]
+    [auth, clearCombinedCache, fetchCombinedDataIfNeeded]
   );
   const canEditPlannedDate = Boolean(auth);
 
@@ -893,13 +1154,15 @@ export function TasksPage() {
       setIsBulkSaving(true);
       try {
         for (const entry of updates) {
-          await updateSprayingPlannedDate(entry.task, entry.dateInput);
+          await updateSprayingPlannedDate(entry.task, entry.dateInput, { skipInvalidate: true });
         }
+        clearCombinedCache();
+        fetchCombinedDataIfNeeded({ includeTasks: true, force: true });
       } finally {
         setIsBulkSaving(false);
       }
     },
-    [updateSprayingPlannedDate]
+    [clearCombinedCache, fetchCombinedDataIfNeeded, updateSprayingPlannedDate]
   );
 
   // ===========================================================================
@@ -962,118 +1225,159 @@ export function TasksPage() {
         )}
       </p>
 
-      <div className="tasks-filter-bar">
-        <div className="filter-control">
-          <label htmlFor="task-farm-filter">農場</label>
-          <select
-            id="task-farm-filter"
-            value={farmFilter}
-            onChange={(e) => setFarmFilter(e.target.value)}
-          >
-            {farmFilterOptions.map(opt => (
-              <option key={opt.key} value={opt.key}>{opt.label}</option>
-            ))}
-          </select>
-        </div>
-        <div className="filter-control">
-          <label htmlFor="task-type-filter">タスク種別</label>
-          <select
-            id="task-type-filter"
-            value={typeFilter}
-            onChange={(e) => setTypeFilter(e.target.value)}
-          >
-            {TASK_TYPE_FILTER_OPTIONS.map(opt => (
-              <option key={opt.key} value={opt.key}>{opt.label}</option>
-            ))}
-          </select>
-        </div>
-        <div className="filter-control">
-          <label htmlFor="task-status-filter">ステータス</label>
-          <select
-            id="task-status-filter"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-          >
-            {statusFilterOptions.map(opt => (
-              <option key={opt.key} value={opt.key}>{opt.label}</option>
-            ))}
-          </select>
-        </div>
-        <div className="filter-control">
-          <label htmlFor="task-bbch-filter">BBCH</label>
-          <select
-            id="task-bbch-filter"
-            value={bbchFilter}
-            onChange={(e) => setBbchFilter(e.target.value)}
-          >
-            {bbchFilterOptions.map(opt => (
-              <option key={opt.key} value={opt.key}>{opt.label}</option>
-            ))}
-          </select>
-        </div>
-        <div className="filter-control">
-          <label htmlFor="task-plan-from">計画日 (開始)</label>
-          <input
-            id="task-plan-from"
-            type="date"
-            value={planDateFrom}
-            onChange={(e) => setPlanDateFrom(e.target.value)}
-          />
-        </div>
-        <div className="filter-control">
-          <label htmlFor="task-plan-to">計画日 (終了)</label>
-          <input
-            id="task-plan-to"
-            type="date"
-            value={planDateTo}
-            onChange={(e) => setPlanDateTo(e.target.value)}
-          />
-        </div>
-        <div className="filter-control">
-          <label htmlFor="task-note-filter">メモ</label>
-          <select
-            id="task-note-filter"
-            value={noteFilter}
-            onChange={(e) => setNoteFilter(e.target.value)}
-          >
-            {noteFilterOptions.map(opt => (
-              <option key={opt.key} value={opt.key}>{opt.label}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      <TasksChart tasks={filteredTasks} range={range} onRangeChange={setRange} />
-      <div className="tasks-bulk-actions">
-        <div className="tasks-bulk-summary">
-          選択中の散布タスク: {selectedTaskCount} 件
-        </div>
+      <div className="tasks-view-tabs" role="tablist" aria-label="タスク表示切り替え">
         <button
           type="button"
-          onClick={() => setIsBulkModalOpen(true)}
-          disabled={!canEditPlannedDate || selectedTaskCount === 0 || isBulkSaving}
+          role="tab"
+          aria-selected={viewMode === 'list'}
+          className={`tasks-view-tab ${viewMode === 'list' ? 'active' : ''}`}
+          onClick={() => setViewMode('list')}
         >
-          まとめて計画日を変更
+          一覧
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={viewMode === 'calendar'}
+          className={`tasks-view-tab ${viewMode === 'calendar' ? 'active' : ''}`}
+          onClick={() => setViewMode('calendar')}
+        >
+          カレンダー
         </button>
       </div>
-      <TasksTable
-        tasks={filteredTasks}
-        canEditPlannedDate={canEditPlannedDate}
-        onUpdatePlannedDate={updateSprayingPlannedDate}
-        updateStateByTask={updateStateByTask}
-        selectedTaskUuids={selectedTaskUuids}
-        onToggleSelect={toggleTaskSelection}
-        onToggleSelectAll={toggleAllSelections}
-        onOpenWeather={handleOpenWeather}
-        isWeatherEnabled={isWeatherEnabled}
-      />
-      {isBulkModalOpen && (
-        <BulkPlannedDateModal
-          tasks={selectedTasks}
-          bbchBySeason={bbchBySeason}
-          isSaving={isBulkSaving}
-          onClose={() => setIsBulkModalOpen(false)}
-          onApply={applyBulkPlannedDates}
+
+      {viewMode === 'list' && (
+        <div className="tasks-filter-bar">
+          <div className="filter-control">
+            <label htmlFor="task-farm-filter">農場</label>
+            <select
+              id="task-farm-filter"
+              value={farmFilter}
+              onChange={(e) => setFarmFilter(e.target.value)}
+            >
+              {farmFilterOptions.map(opt => (
+                <option key={opt.key} value={opt.key}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="filter-control">
+            <label htmlFor="task-type-filter">タスク種別</label>
+            <select
+              id="task-type-filter"
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+            >
+              {TASK_TYPE_FILTER_OPTIONS.map(opt => (
+                <option key={opt.key} value={opt.key}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="filter-control">
+            <label htmlFor="task-status-filter">ステータス</label>
+            <select
+              id="task-status-filter"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+            >
+              {statusFilterOptions.map(opt => (
+                <option key={opt.key} value={opt.key}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="filter-control">
+            <label htmlFor="task-bbch-filter">BBCH</label>
+            <select
+              id="task-bbch-filter"
+              value={bbchFilter}
+              onChange={(e) => setBbchFilter(e.target.value)}
+            >
+              {bbchFilterOptions.map(opt => (
+                <option key={opt.key} value={opt.key}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="filter-control">
+            <label htmlFor="task-plan-from">計画日 (開始)</label>
+            <input
+              id="task-plan-from"
+              type="date"
+              value={planDateFrom}
+              onChange={(e) => setPlanDateFrom(e.target.value)}
+            />
+          </div>
+          <div className="filter-control">
+            <label htmlFor="task-plan-to">計画日 (終了)</label>
+            <input
+              id="task-plan-to"
+              type="date"
+              value={planDateTo}
+              onChange={(e) => setPlanDateTo(e.target.value)}
+            />
+          </div>
+          <div className="filter-control">
+            <label htmlFor="task-note-filter">メモ</label>
+            <select
+              id="task-note-filter"
+              value={noteFilter}
+              onChange={(e) => setNoteFilter(e.target.value)}
+            >
+              {noteFilterOptions.map(opt => (
+                <option key={opt.key} value={opt.key}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
+
+      {viewMode === 'list' && (
+        <>
+          <TasksChart tasks={filteredTasks} range={range} onRangeChange={setRange} />
+          <div className="tasks-bulk-actions">
+            <div className="tasks-bulk-summary">
+              選択中の散布タスク: {selectedTaskCount} 件
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsBulkModalOpen(true)}
+              disabled={!canEditPlannedDate || selectedTaskCount === 0 || isBulkSaving}
+            >
+              まとめて計画日を変更
+            </button>
+          </div>
+          <TasksTable
+            tasks={filteredTasks}
+            canEditPlannedDate={canEditPlannedDate}
+            onUpdatePlannedDate={updateSprayingPlannedDate}
+            updateStateByTask={updateStateByTask}
+            selectedTaskUuids={selectedTaskUuids}
+            onToggleSelect={toggleTaskSelection}
+            onToggleSelectAll={toggleAllSelections}
+            onOpenWeather={handleOpenWeather}
+            isWeatherEnabled={isWeatherEnabled}
+          />
+          {isBulkModalOpen && (
+            <BulkPlannedDateModal
+              tasks={selectedTasks}
+              bbchBySeason={bbchBySeason}
+              isSaving={isBulkSaving}
+              onClose={() => setIsBulkModalOpen(false)}
+              onApply={applyBulkPlannedDates}
+            />
+          )}
+        </>
+      )}
+
+      {viewMode === 'calendar' && (
+        <TasksCalendar
+          tasksByDate={tasksByDate}
+          tasksById={tasksById}
+          currentMonth={calendarMonth}
+          onChangeMonth={setCalendarMonth}
+          onMoveTask={updateSprayingPlannedDate}
+          fieldOptions={fieldOptions.map(({ uuid, name }) => ({ uuid, name }))}
+          bbchPredictionsByField={bbchPredictionsByField}
+          herbicideOrdersByTask={herbicideOrdersByTask}
+          herbicideIntervalAlertsByTask={herbicideIntervalAlertsByTask}
         />
       )}
     </div>
@@ -1104,6 +1408,571 @@ function filterTasksByRange(tasks: AggregatedTask[], range: RangeKey): Aggregate
     if (endBoundary && taskDate > endBoundary) return false;
     return true;
   });
+}
+
+function TasksCalendar({
+  tasksByDate,
+  tasksById,
+  currentMonth,
+  onChangeMonth,
+  onMoveTask,
+  fieldOptions,
+  bbchPredictionsByField,
+  herbicideOrdersByTask,
+  herbicideIntervalAlertsByTask,
+}: {
+  tasksByDate: Record<string, AggregatedTask[]>;
+  tasksById: Map<string, AggregatedTask>;
+  currentMonth: Date;
+  onChangeMonth: (next: Date) => void;
+  onMoveTask: (task: AggregatedTask, nextDateInput: string) => Promise<void> | void;
+  fieldOptions: Array<{ uuid: string; name: string }>;
+  bbchPredictionsByField: Map<string, CountryCropGrowthStagePrediction[]>;
+  herbicideOrdersByTask: Map<string, number>;
+  herbicideIntervalAlertsByTask: Map<string, boolean>;
+}) {
+  const monthStart = startOfMonth(currentMonth);
+  const monthEnd = endOfMonth(monthStart);
+  const gridStart = startOfWeek(monthStart);
+  const gridEnd = endOfWeek(monthEnd);
+  const days = eachDayOfInterval({ start: gridStart, end: gridEnd });
+  const today = new Date();
+  const monthLabel = format(monthStart, 'yyyy年M月');
+  const weekdayLabels = ['日', '月', '火', '水', '木', '金', '土'];
+  const tasksLimit = 3;
+  const [hoverDateKey, setHoverDateKey] = useState<string | null>(null);
+  const [movingTaskId, setMovingTaskId] = useState<string | null>(null);
+  const [movingDateKey, setMovingDateKey] = useState<string | null>(null);
+  const [selectedTask, setSelectedTask] = useState<AggregatedTask | null>(null);
+  const [selectedDateInput, setSelectedDateInput] = useState<string>('');
+  const [selectedFieldUuid, setSelectedFieldUuid] = useState<string>('');
+  const [selectedDateTasks, setSelectedDateTasks] = useState<{ dateKey: string; tasks: AggregatedTask[] } | null>(null);
+  const [inlineEditTaskId, setInlineEditTaskId] = useState<string | null>(null);
+  const [inlineEditDateInput, setInlineEditDateInput] = useState<string>('');
+  const [weatherByDate, setWeatherByDate] = useState<Record<string, {
+    precipAvg: number;
+    humidityAvg: number | null;
+    tempAvg: number | null;
+    windAvg: number | null;
+    sunshineAvg: number | null;
+    tone: 'good' | 'ok' | 'bad';
+    years: number;
+    soil: 'dry' | 'ok' | 'wet';
+    soilBalance: number | null;
+    dryingIndex: number | null;
+  }>>({});
+  const weatherCacheRef = useRef<Map<string, Record<string, {
+    precipAvg: number;
+    humidityAvg: number | null;
+    tempAvg: number | null;
+    windAvg: number | null;
+    sunshineAvg: number | null;
+    tone: 'good' | 'ok' | 'bad';
+    years: number;
+    soil: 'dry' | 'ok' | 'wet';
+    soilBalance: number | null;
+    dryingIndex: number | null;
+  }>>>(new Map());
+  const weatherFetchInFlight = useRef<Set<string>>(new Set());
+  const { auth } = useAuth();
+
+  useEffect(() => {
+    if (selectedFieldUuid) return;
+    if (fieldOptions.length === 0) return;
+    setSelectedFieldUuid(fieldOptions[0].uuid);
+  }, [fieldOptions, selectedFieldUuid]);
+
+  useEffect(() => {
+    if (!auth || !selectedFieldUuid) return;
+    const cacheKey = `${selectedFieldUuid}:${format(currentMonth, 'yyyy')}`;
+    const cached = weatherCacheRef.current.get(cacheKey);
+    if (cached) {
+      setWeatherByDate(cached);
+      return;
+    }
+    if (weatherFetchInFlight.current.has(cacheKey)) return;
+    weatherFetchInFlight.current.add(cacheKey);
+    let cancelled = false;
+    const fetchWeather = async () => {
+      const yearStart = new Date(currentMonth.getFullYear(), 0, 1);
+      const yearEnd = new Date(currentMonth.getFullYear(), 11, 31);
+      const fromDate = toJstBoundaryIsoFromDate(new Date(currentMonth.getFullYear() - 4, 0, 1), false);
+      const tillDate = toJstBoundaryIsoFromDate(yearEnd, true);
+      try {
+        const res = await fetch(withApiBase('/weather-by-field'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            login_token: auth.login.login_token,
+            api_token: auth.api_token,
+            field_uuid: selectedFieldUuid,
+            from_date: fromDate,
+            till_date: tillDate,
+          }),
+        });
+        const json = await res.json();
+        if (!res.ok || !json?.ok) return;
+        const daily = json?.response?.data?.fieldV2?.weatherHistoricForecastDaily ?? [];
+        const monthDayStats = new Map<string, {
+          precipSum: number;
+          humiditySum: number;
+          tempSum: number;
+          windSum: number;
+          sunshineSum: number;
+          count: number;
+        }>();
+        daily.forEach((entry: any) => {
+          const dateKey = getLocalDateString(entry?.date ?? '').replace(/\//g, '-');
+          const parts = dateKey.split('-');
+          if (parts.length !== 3) return;
+          const monthDay = `${parts[1]}-${parts[2]}`;
+          const precipRaw = entry?.precipitationBestMm;
+          const humidityRaw = entry?.relativeHumidityPctAvg;
+          const tempRaw = entry?.airTempCAvg;
+          const windRaw = entry?.windSpeedMSAvg;
+          const sunshineRaw = entry?.sunshineDurationH;
+          const precip = typeof precipRaw === 'number' ? precipRaw : Number(precipRaw);
+          const humidity = typeof humidityRaw === 'number' ? humidityRaw : Number(humidityRaw);
+          const temp = typeof tempRaw === 'number' ? tempRaw : Number(tempRaw);
+          const wind = typeof windRaw === 'number' ? windRaw : Number(windRaw);
+          const sunshine = typeof sunshineRaw === 'number' ? sunshineRaw : Number(sunshineRaw);
+          if (!Number.isFinite(precip)) return;
+          const prev = monthDayStats.get(monthDay);
+          if (prev) {
+            prev.precipSum += precip;
+            if (Number.isFinite(humidity)) prev.humiditySum += humidity;
+            if (Number.isFinite(temp)) prev.tempSum += temp;
+            if (Number.isFinite(wind)) prev.windSum += wind;
+            if (Number.isFinite(sunshine)) prev.sunshineSum += sunshine;
+            prev.count += 1;
+          } else {
+            monthDayStats.set(monthDay, {
+              precipSum: precip,
+              humiditySum: Number.isFinite(humidity) ? humidity : 0,
+              tempSum: Number.isFinite(temp) ? temp : 0,
+              windSum: Number.isFinite(wind) ? wind : 0,
+              sunshineSum: Number.isFinite(sunshine) ? sunshine : 0,
+              count: 1,
+            });
+          }
+        });
+        const map: Record<string, {
+          precipAvg: number;
+          humidityAvg: number | null;
+          tempAvg: number | null;
+          windAvg: number | null;
+          sunshineAvg: number | null;
+          tone: 'good' | 'ok' | 'bad';
+          years: number;
+          soil: 'dry' | 'ok' | 'wet';
+          soilBalance: number | null;
+          dryingIndex: number | null;
+        }> = {};
+        const targetDays = eachDayOfInterval({ start: yearStart, end: yearEnd });
+        targetDays.forEach((day) => {
+          const dateKey = format(day, 'yyyy-MM-dd');
+          const monthDay = format(day, 'MM-dd');
+          const stats = monthDayStats.get(monthDay);
+          if (!stats || stats.count === 0) return;
+          const precipAvg = stats.precipSum / stats.count;
+          const humidityAvg = stats.humiditySum ? stats.humiditySum / stats.count : null;
+          const tempAvg = stats.tempSum ? stats.tempSum / stats.count : null;
+          const windAvg = stats.windSum ? stats.windSum / stats.count : null;
+          const sunshineAvg = stats.sunshineSum ? stats.sunshineSum / stats.count : null;
+          const tone = precipAvg <= 1 ? 'good' : precipAvg <= 5 ? 'ok' : 'bad';
+          const dryingIndex = (() => {
+            if (tempAvg === null || humidityAvg === null || windAvg === null || sunshineAvg === null) return null;
+            return Math.max(0, tempAvg * 0.3 + windAvg * 1.5 + sunshineAvg * 0.8 - humidityAvg * 0.2);
+          })();
+          const soilBalance = dryingIndex === null ? null : precipAvg - dryingIndex;
+          const soil = soilBalance === null
+            ? 'ok'
+            : soilBalance <= -2
+              ? 'dry'
+              : soilBalance >= 2
+                ? 'wet'
+                : 'ok';
+          map[dateKey] = {
+            precipAvg,
+            humidityAvg,
+            tempAvg,
+            windAvg,
+            sunshineAvg,
+            tone,
+            years: stats.count,
+            soil,
+            soilBalance,
+            dryingIndex,
+          };
+        });
+        if (!cancelled) {
+          weatherCacheRef.current.set(cacheKey, map);
+          setWeatherByDate(map);
+        }
+      } catch {
+        if (!cancelled) setWeatherByDate({});
+      } finally {
+        weatherFetchInFlight.current.delete(cacheKey);
+      }
+    };
+    fetchWeather();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth, currentMonth, selectedFieldUuid]);
+
+  const handleDrop = useCallback(
+    async (event: React.DragEvent<HTMLDivElement>, dateKey: string) => {
+      event.preventDefault();
+      setHoverDateKey(null);
+      const payload = event.dataTransfer.getData('application/x-task');
+      if (!payload) return;
+      try {
+        const data = JSON.parse(payload) as { uuid?: string };
+        if (!data.uuid) return;
+        const task = tasksById.get(data.uuid);
+        if (!task || task.type !== 'Spraying') return;
+        const currentKey = format(startOfDay(new Date(task.plannedDate || task.executionDate || '')), 'yyyy-MM-dd');
+        if (currentKey === dateKey) return;
+        setMovingTaskId(task.uuid);
+        setMovingDateKey(dateKey);
+        await onMoveTask(task, dateKey);
+      } catch {
+        // ignore malformed payload
+      } finally {
+        setMovingTaskId(null);
+        setMovingDateKey(null);
+      }
+    },
+    [onMoveTask, tasksById]
+  );
+
+  const openDatePicker = useCallback((task: AggregatedTask) => {
+    if (task.type !== 'Spraying') return;
+    const current = getJstDateInputValue(task.plannedDate || task.executionDate);
+    setSelectedTask(task);
+    setSelectedDateInput(current);
+  }, []);
+
+  const closeDatePicker = useCallback(() => {
+    setSelectedTask(null);
+    setSelectedDateInput('');
+  }, []);
+
+  const handleApplyDate = useCallback(async () => {
+    if (!selectedTask || !selectedDateInput) return;
+    setMovingTaskId(selectedTask.uuid);
+    setMovingDateKey(selectedDateInput);
+    try {
+      await onMoveTask(selectedTask, selectedDateInput);
+    } finally {
+      setMovingTaskId(null);
+      setMovingDateKey(null);
+      closeDatePicker();
+    }
+  }, [closeDatePicker, onMoveTask, selectedDateInput, selectedTask]);
+
+  return (
+    <div className="tasks-calendar">
+      <div className="tasks-calendar-header">
+        <button type="button" onClick={() => onChangeMonth(subMonths(monthStart, 1))}>
+          前月
+        </button>
+        <h3>{monthLabel}</h3>
+        <button type="button" onClick={() => onChangeMonth(addMonths(monthStart, 1))}>
+          次月
+        </button>
+        <button type="button" onClick={() => onChangeMonth(startOfMonth(new Date()))}>
+          今日
+        </button>
+        <div className="tasks-calendar-field">
+          <label htmlFor="tasks-calendar-field-select">圃場</label>
+          <select
+            id="tasks-calendar-field-select"
+            value={selectedFieldUuid}
+            onChange={(event) => setSelectedFieldUuid(event.target.value)}
+          >
+            {fieldOptions.length === 0 && <option value="">圃場なし</option>}
+            {fieldOptions.map(option => (
+              <option key={option.uuid} value={option.uuid}>
+                {option.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div className="tasks-calendar-weekdays">
+        {weekdayLabels.map(label => (
+          <div key={label} className="tasks-calendar-weekday">
+            {label}
+          </div>
+        ))}
+      </div>
+      <div className="tasks-calendar-grid">
+        {days.map(day => {
+          const dateKey = format(day, 'yyyy-MM-dd');
+          const tasks = tasksByDate[dateKey] ?? [];
+          const visible = tasks.slice(0, tasksLimit);
+          const extra = tasks.length - visible.length;
+          const bbchPredictions = selectedFieldUuid ? bbchPredictionsByField.get(selectedFieldUuid) ?? [] : [];
+          const bbchIndex = selectedFieldUuid ? findBbchIndexForDate(bbchPredictions, dateKey) : '';
+          const bbchStyle = bbchIndex ? getBbchBadgeStyle(bbchIndex) : null;
+          const weatherInfo = weatherByDate[dateKey];
+          const weatherLabel = weatherInfo
+            ? weatherInfo.tone === 'good'
+              ? '降雨: 低'
+              : weatherInfo.tone === 'ok'
+                ? '降雨: 中'
+                : '降雨: 高'
+            : null;
+          const soilLabel = weatherInfo
+            ? weatherInfo.soil === 'dry'
+              ? '土壌: 乾燥'
+              : weatherInfo.soil === 'ok'
+                ? '土壌: 適湿'
+                : '土壌: 湿潤'
+            : null;
+          return (
+            <div
+              key={dateKey}
+              className={[
+                'tasks-calendar-cell',
+                isSameMonth(day, monthStart) ? 'is-current' : 'is-outside',
+                isSameDay(day, today) ? 'is-today' : '',
+                hoverDateKey === dateKey ? 'is-drop-target' : '',
+                movingDateKey === dateKey ? 'is-loading' : '',
+              ].join(' ')}
+              onClick={() => {
+                if (!isSameMonth(day, monthStart)) {
+                  onChangeMonth(startOfMonth(day));
+                }
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setHoverDateKey(dateKey);
+              }}
+              onDragLeave={() => setHoverDateKey((prev) => (prev === dateKey ? null : prev))}
+              onDrop={(event) => handleDrop(event, dateKey)}
+            >
+              <div className="tasks-calendar-date">{format(day, 'd')}</div>
+              {weatherInfo && weatherLabel && (
+                <div
+                  className={`tasks-calendar-weather tasks-calendar-weather--${weatherInfo.tone}`}
+                  title={`過去${weatherInfo.years}年平均の降水量 ${weatherInfo.precipAvg.toFixed(1)} mm。判定ルール: <=1mm 低 / <=5mm 中 / >5mm 高`}
+                >
+                  {weatherLabel}
+                </div>
+              )}
+              {weatherInfo && soilLabel && (
+                <div
+                  className={`tasks-calendar-soil tasks-calendar-soil--${weatherInfo.soil}`}
+                  title={`過去${weatherInfo.years}年平均: 降水 ${weatherInfo.precipAvg.toFixed(1)} mm、湿度 ${weatherInfo.humidityAvg !== null ? weatherInfo.humidityAvg.toFixed(0) : '-'}%、気温 ${weatherInfo.tempAvg !== null ? weatherInfo.tempAvg.toFixed(1) : '-'}°C、風速 ${weatherInfo.windAvg !== null ? weatherInfo.windAvg.toFixed(1) : '-'} m/s、日照 ${weatherInfo.sunshineAvg !== null ? weatherInfo.sunshineAvg.toFixed(1) : '-'} h。乾燥指数=気温*0.3+風*1.5+日照*0.8-湿度*0.2。土壌バランス=降水-乾燥指数。<-2乾燥 / 2以上湿潤`}
+                >
+                  {soilLabel}
+                </div>
+              )}
+              {bbchIndex && (
+                <div
+                  className="tasks-calendar-bbch"
+                  title={`BBCH ${bbchIndex}`}
+                  style={bbchStyle ?? undefined}
+                >
+                  BBCH {bbchIndex}
+                </div>
+              )}
+              <div className="tasks-calendar-items">
+                {visible.map(task => {
+                  const typeKey = getChartTypeKey(task);
+                  const color = TASK_COLOR_MAP[typeKey] ?? '#9e9e9e';
+                  const herbicideOrder = herbicideOrdersByTask.get(task.uuid);
+                  const intervalAlert = herbicideIntervalAlertsByTask.get(task.uuid);
+                  const baseLabel = getTaskLabel(task);
+                  const badgeText = herbicideOrder ? `（除草${herbicideOrder}回目）` : '';
+                  const title = `${baseLabel}${badgeText} / ${task.fieldName}`;
+                  const canDrag = task.type === 'Spraying';
+                  const isMoving = movingTaskId === task.uuid;
+                  return (
+                    <div
+                      key={task.uuid}
+                      className={`tasks-calendar-item ${canDrag ? 'is-draggable' : 'is-locked'} ${isMoving ? 'is-moving' : ''}`}
+                      title={canDrag ? `${title}（ドラッグで日付変更）` : `${title}（変更不可）`}
+                      draggable={canDrag}
+                      onClick={() => canDrag && openDatePicker(task)}
+                      onDragStart={(event) => {
+                        if (!canDrag) {
+                          event.preventDefault();
+                          return;
+                        }
+                        event.dataTransfer.setData('application/x-task', JSON.stringify({ uuid: task.uuid }));
+                        event.dataTransfer.effectAllowed = 'move';
+                      }}
+                    >
+                      <span className="tasks-calendar-dot" style={{ backgroundColor: color }} />
+                      <span className="tasks-calendar-item__text">
+                        <span className="tasks-calendar-item__label">
+                          {baseLabel}
+                          {herbicideOrder && (
+                            <span className="tasks-calendar-badge tasks-calendar-badge--herbicide">
+                              除草{herbicideOrder}回目
+                            </span>
+                          )}
+                          {intervalAlert && (
+                            <span className="tasks-calendar-badge tasks-calendar-badge--alert">
+                              20日未満
+                            </span>
+                          )}
+                        </span>
+                        <span className="tasks-calendar-item__field">{task.fieldName}</span>
+                        {isMoving && (
+                          <span className="tasks-calendar-item__loading">
+                            <LoadingSpinner size={12} />
+                            更新中...
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+                {extra > 0 && (
+                  <button
+                    type="button"
+                    className="tasks-calendar-more"
+                    onClick={() => setSelectedDateTasks({ dateKey, tasks })}
+                  >
+                    +{extra} 件
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {selectedTask && (
+        <div className="tasks-calendar-modal-backdrop" onClick={closeDatePicker}>
+          <div className="tasks-calendar-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="tasks-calendar-modal-header">
+              <h4>散布タスクの予定日を変更</h4>
+              <button type="button" onClick={closeDatePicker}>閉じる</button>
+            </div>
+            <div className="tasks-calendar-modal-body">
+              <p className="tasks-calendar-modal-title">
+                {getTaskLabel(selectedTask)} / {selectedTask.fieldName}
+              </p>
+              <label>
+                新しい日付
+                <input
+                  type="date"
+                  value={selectedDateInput}
+                  onChange={(event) => setSelectedDateInput(event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="tasks-calendar-modal-footer">
+              <button
+                type="button"
+                onClick={handleApplyDate}
+                disabled={!selectedDateInput || Boolean(movingTaskId)}
+              >
+                変更を保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {selectedDateTasks && (
+        <div
+          className="tasks-calendar-modal-backdrop"
+          onClick={() => setSelectedDateTasks(null)}
+        >
+          <div className="tasks-calendar-modal tasks-calendar-modal--wide" onClick={(event) => event.stopPropagation()}>
+            <div className="tasks-calendar-modal-header">
+              <h4>{format(new Date(selectedDateTasks.dateKey), 'yyyy/MM/dd')} のタスク</h4>
+              <button type="button" onClick={() => setSelectedDateTasks(null)}>閉じる</button>
+            </div>
+            <div className="tasks-calendar-modal-body">
+              <div className="tasks-calendar-task-list">
+                {selectedDateTasks.tasks.map(task => {
+                  const herbicideOrder = herbicideOrdersByTask.get(task.uuid);
+                  const intervalAlert = herbicideIntervalAlertsByTask.get(task.uuid);
+                  const baseLabel = getTaskLabel(task);
+                  return (
+                    <div key={task.uuid} className="tasks-calendar-task-row">
+                      <span className="tasks-calendar-task-type">
+                        {baseLabel}
+                        {herbicideOrder && (
+                          <span className="tasks-calendar-badge tasks-calendar-badge--herbicide">
+                            除草{herbicideOrder}回目
+                          </span>
+                        )}
+                        {intervalAlert && (
+                          <span className="tasks-calendar-badge tasks-calendar-badge--alert">
+                            20日未満
+                          </span>
+                        )}
+                      </span>
+                      <span className="tasks-calendar-task-field">{task.fieldName}</span>
+                      <span className="tasks-calendar-task-crop">{task.cropName}</span>
+                      {task.type === 'Spraying' && (
+                        <div className="tasks-calendar-task-actions">
+                          {inlineEditTaskId === task.uuid ? (
+                            <>
+                              <input
+                                type="date"
+                                value={inlineEditDateInput}
+                                onChange={(event) => setInlineEditDateInput(event.target.value)}
+                              />
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  if (!inlineEditDateInput) return;
+                                  setMovingTaskId(task.uuid);
+                                  setMovingDateKey(inlineEditDateInput);
+                                  try {
+                                    await onMoveTask(task, inlineEditDateInput);
+                                    setInlineEditTaskId(null);
+                                    setInlineEditDateInput('');
+                                  } finally {
+                                    setMovingTaskId(null);
+                                    setMovingDateKey(null);
+                                  }
+                                }}
+                                disabled={!inlineEditDateInput || Boolean(movingTaskId)}
+                              >
+                                保存
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setInlineEditTaskId(null);
+                                  setInlineEditDateInput('');
+                                }}
+                              >
+                                キャンセル
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setInlineEditTaskId(task.uuid);
+                                setInlineEditDateInput(getJstDateInputValue(task.plannedDate || task.executionDate));
+                              }}
+                            >
+                              日付変更
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function TasksChart({

@@ -2201,6 +2201,7 @@ const parseCombinedFields = (fields: CombinedFieldResponse[]) => {
   const methodMap: Record<string, string> = {
     TRANSPLANTING: '移植',
     DIRECT_SEEDING: '直播',
+    MYKOS_DRY_DIRECT_SEEDING: '節水型乾田直播',
   };
 
   const initialRegistrations: FormData[] = [];

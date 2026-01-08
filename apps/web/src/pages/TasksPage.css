@@ -4,6 +4,467 @@
   color: #e0e0e0;
 }
 
+.tasks-view-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid #3a3a3f;
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.tasks-view-tab {
+  padding: 0.45rem 1rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: #202024;
+  color: #cfcfe2;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+}
+
+.tasks-view-tab.active {
+  border-color: #646cff;
+  background: rgba(100, 108, 255, 0.2);
+  color: #ffffff;
+}
+
+.tasks-calendar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.tasks-calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.tasks-calendar-header h3 {
+  margin: 0;
+  font-size: 1.2rem;
+  color: #f0f0f0;
+}
+
+.tasks-calendar-header button {
+  padding: 0.35rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid #4a4a4f;
+  background: #1f2025;
+  color: #e0e0e0;
+  cursor: pointer;
+}
+
+.tasks-calendar-header button:hover {
+  border-color: #7d7df5;
+}
+
+.tasks-calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: #9ea0b5;
+}
+
+.tasks-calendar-weekday {
+  text-align: center;
+}
+
+.tasks-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(140px, 1fr));
+  gap: 0.5rem;
+}
+
+.tasks-calendar-cell {
+  min-height: 120px;
+  padding: 0.5rem;
+  border-radius: 10px;
+  border: 1px solid #2f3035;
+  background: #1f2025;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.tasks-calendar-cell.is-outside {
+  opacity: 0.4;
+}
+
+.tasks-calendar-cell.is-today {
+  border-color: #646cff;
+  box-shadow: 0 0 0 1px rgba(100, 108, 255, 0.4);
+}
+
+.tasks-calendar-cell.is-drop-target {
+  border-color: #7d7df5;
+  box-shadow: 0 0 0 2px rgba(125, 125, 245, 0.35);
+}
+
+.tasks-calendar-cell.is-loading {
+  border-color: #5c6cff;
+  box-shadow: 0 0 0 2px rgba(92, 108, 255, 0.25);
+}
+
+.tasks-calendar-date {
+  font-weight: 600;
+  color: #e6e6f0;
+}
+
+.tasks-calendar-weather {
+  margin-top: 0.2rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.tasks-calendar-weather--good {
+  background: rgba(46, 125, 50, 0.2);
+  color: #8fe29a;
+  border: 1px solid rgba(46, 125, 50, 0.4);
+}
+
+.tasks-calendar-weather--ok {
+  background: rgba(255, 193, 7, 0.2);
+  color: #ffd56b;
+  border: 1px solid rgba(255, 193, 7, 0.4);
+}
+
+.tasks-calendar-weather--bad {
+  background: rgba(229, 57, 53, 0.2);
+  color: #ffb0aa;
+  border: 1px solid rgba(229, 57, 53, 0.45);
+}
+
+.tasks-calendar-soil {
+  margin-top: 0.2rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.tasks-calendar-soil--dry {
+  background: rgba(255, 152, 0, 0.2);
+  color: #ffd08a;
+  border: 1px solid rgba(255, 152, 0, 0.45);
+}
+
+.tasks-calendar-soil--ok {
+  background: rgba(76, 175, 80, 0.2);
+  color: #8fe29a;
+  border: 1px solid rgba(76, 175, 80, 0.4);
+}
+
+.tasks-calendar-soil--wet {
+  background: rgba(33, 150, 243, 0.2);
+  color: #9fd3ff;
+  border: 1px solid rgba(33, 150, 243, 0.45);
+}
+
+
+.tasks-calendar-bbch {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(129, 214, 250, 0.2);
+  border: 1px solid rgba(129, 214, 250, 0.5);
+  color: #cfefff;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.tasks-calendar-field {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.tasks-calendar-field label {
+  font-size: 0.85rem;
+  color: #b8b8c8;
+}
+
+.tasks-calendar-field select {
+  background-color: #1f2025;
+  border: 1px solid #3a3a3f;
+  color: #e0e0e0;
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+}
+
+.tasks-calendar-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.tasks-calendar-item {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 0.35rem;
+  align-items: center;
+  font-size: 0.8rem;
+  color: #d8d8e8;
+}
+
+.tasks-calendar-item.is-draggable {
+  cursor: grab;
+}
+
+.tasks-calendar-item.is-draggable:active {
+  cursor: grabbing;
+}
+
+.tasks-calendar-item.is-locked {
+  opacity: 0.6;
+}
+
+.tasks-calendar-item.is-moving {
+  opacity: 0.8;
+}
+
+.tasks-calendar-item__loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  color: #cdd0ff;
+}
+
+.tasks-calendar-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 10, 12, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2600;
+}
+
+.tasks-calendar-modal {
+  width: min(420px, 90vw);
+  background: #202024;
+  border: 1px solid #3a3a3f;
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.tasks-calendar-modal--wide {
+  width: min(600px, 95vw);
+}
+
+.tasks-calendar-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.tasks-calendar-modal-header h4 {
+  margin: 0;
+}
+
+.tasks-calendar-modal-header button {
+  border: none;
+  background: transparent;
+  color: #cfcfe2;
+  cursor: pointer;
+}
+
+.tasks-calendar-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.tasks-calendar-modal-title {
+  margin: 0;
+  color: #e0e0f0;
+  font-weight: 600;
+}
+
+.tasks-calendar-modal-body label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: #c8c8d0;
+  font-size: 0.9rem;
+}
+
+.tasks-calendar-modal-body input {
+  background: #1f2025;
+  border: 1px solid #3a3a3f;
+  color: #e0e0e0;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+}
+
+.tasks-calendar-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.tasks-calendar-modal-footer button {
+  padding: 0.45rem 1rem;
+  border-radius: 8px;
+  border: 1px solid #4a4a4f;
+  background: #646cff;
+  color: #fff;
+  cursor: pointer;
+}
+
+.tasks-calendar-modal-footer button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.tasks-calendar-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.tasks-calendar-task-row {
+  display: grid;
+  grid-template-columns: 140px 1fr 1fr auto;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid #3a3a3f;
+  background: #1f2025;
+  color: #e0e0f0;
+  font-size: 0.9rem;
+}
+
+.tasks-calendar-task-type {
+  font-weight: 600;
+  color: #dfe3ff;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.tasks-calendar-task-field {
+  color: #c8c8d0;
+}
+
+.tasks-calendar-task-crop {
+  color: #9ea0b5;
+}
+
+.tasks-calendar-task-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
+.tasks-calendar-task-actions input {
+  background: #1f2025;
+  border: 1px solid #3a3a3f;
+  color: #e0e0e0;
+  border-radius: 8px;
+  padding: 0.3rem 0.5rem;
+}
+
+.tasks-calendar-task-actions button {
+  padding: 0.3rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid #4a4a4f;
+  background: #2a2a33;
+  color: #e0e0e0;
+  cursor: pointer;
+}
+
+.tasks-calendar-task-actions button:hover {
+  border-color: #7d7df5;
+}
+
+.tasks-calendar-more {
+  margin-top: 0.25rem;
+  border: none;
+  background: transparent;
+  color: #9ea0b5;
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+}
+
+.tasks-calendar-more:hover {
+  color: #dfe3ff;
+}
+
+.tasks-calendar-item__text {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.tasks-calendar-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.tasks-calendar-item__label {
+  font-weight: 600;
+  margin-right: 0.35rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.tasks-calendar-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.tasks-calendar-badge--herbicide {
+  background: rgba(76, 175, 80, 0.2);
+  color: #86e38b;
+  border: 1px solid rgba(76, 175, 80, 0.4);
+}
+
+.tasks-calendar-badge--alert {
+  background: rgba(255, 87, 34, 0.2);
+  color: #ffb49a;
+  border: 1px solid rgba(255, 87, 34, 0.5);
+}
+
+.tasks-calendar-item__field {
+  margin-left: 0.35rem;
+  color: #b8b8c8;
+}
+
+.tasks-calendar-more {
+  font-size: 0.75rem;
+  color: #9ea0b5;
+}
+
 .tasks-chart-card {
   background-color: #202024;
   border: 1px solid #3a3a3f;

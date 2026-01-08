@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { Ref, UIEvent } from 'react';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -28,6 +29,7 @@ import './FarmsPage.css';
 import LoadingOverlay from '../components/LoadingOverlay';
 import { formatCombinedLoadingMessage } from '../utils/loadingMessage';
 import { withApiBase } from '../utils/apiBase';
+import { getSessionCache, setSessionCache } from '../utils/sessionCache';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend, zoomPlugin, ChartDataLabels);
 
@@ -100,7 +102,15 @@ const buildNoteImageItems = (notes: FieldNote[] | null | undefined): NoteImageIt
   return items.sort((a, b) => new Date(b.noteDate).getTime() - new Date(a.noteDate).getTime());
 };
 
+const getFieldNotesCacheKey = (farmUuids: string[]) =>
+  `field-notes:${[...farmUuids].sort().join(',')}`;
+
 async function fetchFieldNotesApi(params: { auth: { login: { login_token: string }; api_token: string }; farmUuids: string[] }) {
+  const cacheKey = getFieldNotesCacheKey(params.farmUuids);
+  if (params.farmUuids.length > 0) {
+    const cached = getSessionCache<any>(cacheKey);
+    if (cached) return { ...cached, source: 'cache' };
+  }
   const requestBody = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
@@ -111,7 +121,11 @@ async function fetchFieldNotesApi(params: { auth: { login: { login_token: string
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(requestBody),
   });
-  return res.json();
+  const out = await res.json();
+  if (res.ok && params.farmUuids.length > 0) {
+    setSessionCache(cacheKey, { ...out, source: 'api' });
+  }
+  return { ...out, source: 'api' };
 }
 
 // =============================================================================
@@ -208,6 +222,7 @@ function FieldsTable({
   noteImageStateByField,
   noteImageErrorByField,
   onOpenNoteList,
+  tableRef,
 }: {
   fieldSeasonPairs: FieldSeasonPair[];
   requestSort: (key: string) => void;
@@ -221,9 +236,10 @@ function FieldsTable({
   noteImageStateByField: Record<string, NoteImageState>;
   noteImageErrorByField: Record<string, string>;
   onOpenNoteList: (field: Field) => void;
+  tableRef?: Ref<HTMLTableElement>;
 }) {
   return (
-    <table className="fields-table">
+    <table className="fields-table" ref={tableRef}>
       <FieldsTableHeader
         requestSort={requestSort}
         sortConfig={sortConfig}
@@ -343,6 +359,7 @@ export function FarmsPage() {
   const [noteImageStateByField, setNoteImageStateByField] = useState<Record<string, NoteImageState>>({});
   const [noteImageErrorByField, setNoteImageErrorByField] = useState<Record<string, string>>({});
   const notesCacheRef = useRef<Map<string, Record<string, FieldNote[]>>>(new Map());
+  const notesInFlightRef = useRef<Map<string, Promise<Record<string, FieldNote[]>>>>(new Map());
   const autoNoteFetchRef = useRef<Set<string>>(new Set());
   const [noteModalField, setNoteModalField] = useState<Field | null>(null);
   const [noteModalState, setNoteModalState] = useState<NoteImageState>('idle');
@@ -351,6 +368,12 @@ export function FarmsPage() {
   const [noteModalLimit, setNoteModalLimit] = useState<number>(10);
   const [noteModalFrom, setNoteModalFrom] = useState('');
   const [noteModalTo, setNoteModalTo] = useState('');
+  const tableContainerRef = useRef<HTMLDivElement | null>(null);
+  const tableRef = useRef<HTMLTableElement | null>(null);
+  const tableScrollbarRef = useRef<HTMLDivElement | null>(null);
+  const [tableScrollbarWidth, setTableScrollbarWidth] = useState(0);
+  const [showTableScrollbar, setShowTableScrollbar] = useState(false);
+  const isSyncingScrollRef = useRef(false);
 
   const {
     paginatedFieldSeasonPairs,
@@ -375,17 +398,29 @@ export function FarmsPage() {
   const fetchFieldNotesMap = async (farmUuid: string, authInfo: { login: { login_token: string }; api_token: string }) => {
     const cached = notesCacheRef.current.get(farmUuid);
     if (cached) return cached;
-    const out = await fetchFieldNotesApi({ auth: authInfo, farmUuids: [farmUuid] });
-    const fields = out?.response?.data?.fieldsV2;
-    if (!Array.isArray(fields)) {
-      throw new Error('fieldNotes response missing');
+    const pending = notesInFlightRef.current.get(farmUuid);
+    if (pending) return pending;
+
+    const request = (async () => {
+      const out = await fetchFieldNotesApi({ auth: authInfo, farmUuids: [farmUuid] });
+      const fields = out?.response?.data?.fieldsV2;
+      if (!Array.isArray(fields)) {
+        throw new Error('fieldNotes response missing');
+      }
+      const map: Record<string, FieldNote[]> = {};
+      fields.forEach((f: { uuid: string; fieldNotes?: FieldNote[] | null }) => {
+        map[f.uuid] = f.fieldNotes ?? [];
+      });
+      notesCacheRef.current.set(farmUuid, map);
+      return map;
+    })();
+
+    notesInFlightRef.current.set(farmUuid, request);
+    try {
+      return await request;
+    } finally {
+      notesInFlightRef.current.delete(farmUuid);
     }
-    const map: Record<string, FieldNote[]> = {};
-    fields.forEach((f: { uuid: string; fieldNotes?: FieldNote[] | null }) => {
-      map[f.uuid] = f.fieldNotes ?? [];
-    });
-    notesCacheRef.current.set(farmUuid, map);
-    return map;
   };
 
   const handleFetchLatestNoteImage = async (field: Field) => {
@@ -478,6 +513,43 @@ export function FarmsPage() {
       handleFetchLatestNoteImage(field);
     });
   }, [auth, paginatedFieldSeasonPairs, noteImageByField, noteImageStateByField]);
+
+  useEffect(() => {
+    const updateScrollbar = () => {
+      const tableEl = tableRef.current;
+      const containerEl = tableContainerRef.current;
+      if (!tableEl || !containerEl) return;
+      const scrollWidth = tableEl.scrollWidth;
+      setTableScrollbarWidth(scrollWidth);
+      setShowTableScrollbar(scrollWidth > containerEl.clientWidth + 1);
+    };
+
+    updateScrollbar();
+    window.addEventListener('resize', updateScrollbar);
+    return () => window.removeEventListener('resize', updateScrollbar);
+  }, [paginatedFieldSeasonPairs, rowsPerPage]);
+
+  const handleTableScroll = (event: UIEvent<HTMLDivElement>) => {
+    if (isSyncingScrollRef.current) return;
+    isSyncingScrollRef.current = true;
+    if (tableScrollbarRef.current) {
+      tableScrollbarRef.current.scrollLeft = event.currentTarget.scrollLeft;
+    }
+    requestAnimationFrame(() => {
+      isSyncingScrollRef.current = false;
+    });
+  };
+
+  const handleScrollbarScroll = (event: UIEvent<HTMLDivElement>) => {
+    if (isSyncingScrollRef.current) return;
+    isSyncingScrollRef.current = true;
+    if (tableContainerRef.current) {
+      tableContainerRef.current.scrollLeft = event.currentTarget.scrollLeft;
+    }
+    requestAnimationFrame(() => {
+      isSyncingScrollRef.current = false;
+    });
+  };
 
   const filteredNoteModalItems = useMemo(() => {
     let items = noteModalItems;
@@ -857,7 +929,7 @@ export function FarmsPage() {
     const fieldsAtRisk = new Set<string>();
 
     sortedFieldSeasonPairs.forEach(({ field, season }) => {
-      const alerts = getCombinedAlerts(season, 14);
+      const alerts = getAlertsForSeason(season, 14);
       alerts.forEach((alert) => {
         const status = (alert?.status ?? '').toUpperCase();
         const statusClass = getStatusBadgeClass(status);
@@ -886,7 +958,7 @@ export function FarmsPage() {
     sortedFieldSeasonPairs.forEach(({ field, season }) => {
       const farmName = field.farmV2?.name ?? field.farm?.name ?? '農場情報なし';
       const items = farmMap.get(farmName) ?? { farmName, items: [] };
-      const alerts = getCombinedAlerts(season, 14);
+      const alerts = getAlertsForSeason(season, 14);
       alerts.forEach((alert) => {
         const statusRaw = (alert?.status ?? '').toUpperCase();
         const statusClass = getStatusBadgeClass(statusRaw);
@@ -896,9 +968,7 @@ export function FarmsPage() {
         else if (statusClass === 'medium') tier = 'medium';
         else if (statusClass === 'medium-low' || statusClass === 'low') tier = 'low';
         const alertName = alert.alertName || 'アラート';
-        const range = alert.startDate && alert.endDate
-          ? `${getLocalDateString(alert.startDate)} - ${formatInclusiveEndDate(alert.endDate)}`
-          : (alert.startDate ? getLocalDateString(alert.startDate) : '');
+        const range = alert.range || 'N/A';
         const existing = items.items.find(item =>
           item.alertName === alertName && item.status === statusLabel && item.range === range
         );
@@ -1131,7 +1201,7 @@ export function FarmsPage() {
           </div>
         )}
         {paginatedFieldSeasonPairs.length > 0 && (
-          <div className="table-container">
+          <div className="table-container" ref={tableContainerRef} onScroll={handleTableScroll}>
             <FieldsTable
               fieldSeasonPairs={paginatedFieldSeasonPairs}
               requestSort={requestSort}
@@ -1145,7 +1215,13 @@ export function FarmsPage() {
               noteImageStateByField={noteImageStateByField}
               noteImageErrorByField={noteImageErrorByField}
               onOpenNoteList={handleOpenNoteList}
+              tableRef={tableRef}
             />
+          </div>
+        )}
+        {paginatedFieldSeasonPairs.length > 0 && showTableScrollbar && (
+          <div className="table-scrollbar" ref={tableScrollbarRef} onScroll={handleScrollbarScroll}>
+            <div className="table-scrollbar__content" style={{ width: tableScrollbarWidth }} />
           </div>
         )}
         {sortedFieldSeasonPairs.length > 0 && (
@@ -1478,6 +1554,104 @@ const cropSeasonStatusLabel = (value?: string | null) => {
   return value;
 };
 
+const RISK_STATUS_PRIORITY = ['HIGH', 'MEDIUM_HIGH', 'MEDIUM', 'MEDIUM_LOW', 'LOW', 'PROTECTED'];
+const normalizeRiskStatus = (status?: string | null) => (status ?? '').toUpperCase();
+
+const buildRiskAlerts = (season: CropSeason | null) => {
+  if (!season?.risks || season.risks.length === 0) return [];
+  const flattened = season.risks
+    .filter(risk => risk?.status)
+    .map(risk => {
+      const stressInfo = season.timingStressesInfo?.find(info => info.stressV2.uuid === risk.stressV2.uuid);
+      const status = normalizeRiskStatus(risk.status);
+      return {
+        ...risk,
+        status,
+        name: stressInfo?.stressV2.name || 'Unknown Risk',
+        groupKey: `${risk.stressV2.uuid}-${status}`,
+      };
+    });
+
+  const grouped = Array.from(
+    flattened.reduce((map, item) => {
+      const list = map.get(item.groupKey) ?? [];
+      list.push(item);
+      map.set(item.groupKey, list);
+      return map;
+    }, new Map<string, typeof flattened>() as Map<string, typeof flattened>).values()
+  ).flatMap(list => groupConsecutiveItems(list, 'groupKey'));
+  const sorted = grouped.sort((a, b) => {
+    const sev = RISK_STATUS_PRIORITY.indexOf(a.status) - RISK_STATUS_PRIORITY.indexOf(b.status);
+    if (sev !== 0) return sev;
+    return new Date(a.startDate).getTime() - new Date(b.startDate).getTime();
+  });
+
+  const windowGroups = new Map<string, { status: string; startDate: string; endDate: string; names: string[]; order: number }>();
+  sorted.forEach((item, index) => {
+    if (!item.startDate || !item.endDate) return;
+    const key = `${item.status}__${item.startDate}__${item.endDate}`;
+    const existing = windowGroups.get(key);
+    if (existing) {
+      if (!existing.names.includes(item.name)) existing.names.push(item.name);
+      return;
+    }
+    windowGroups.set(key, {
+      status: item.status,
+      startDate: item.startDate,
+      endDate: item.endDate,
+      names: [item.name],
+      order: index,
+    });
+  });
+
+  const windowItems = Array.from(windowGroups.values())
+    .sort((a, b) => a.order - b.order)
+    .map(item => {
+      const names = item.names.filter(Boolean).sort();
+      return {
+        startDate: item.startDate,
+        endDate: item.endDate,
+        status: item.status,
+        names,
+        namesKey: names.join('、'),
+      };
+    });
+
+  const merged = groupConsecutiveItems(windowItems, 'namesKey');
+
+  return merged.map(item => {
+    const range = item.startDate && item.endDate
+      ? `${getLocalDateString(item.startDate)} - ${formatInclusiveEndDate(item.endDate)}`
+      : (item.startDate ? getLocalDateString(item.startDate) : '');
+    return {
+      names: item.names,
+      status: item.status,
+      startDate: item.startDate,
+      endDate: item.endDate,
+      range,
+    };
+  });
+};
+
+function getAlertsForSeason(season: CropSeason | null, days: number) {
+  const combined = getCombinedAlerts(season, days);
+  if (combined.length > 0) {
+    return combined.map(alert => ({
+      alertName: alert.alertName || 'アラート',
+      status: alert.status ?? '',
+      range: alert.startDate && alert.endDate
+        ? `${getLocalDateString(alert.startDate)} - ${formatInclusiveEndDate(alert.endDate)}`
+        : (alert.startDate ? getLocalDateString(alert.startDate) : ''),
+    }));
+  }
+
+  return buildRiskAlerts(season).map(item => ({
+    alertName: item.names.filter(Boolean).join('、') || 'リスク',
+    status: item.status,
+    range: item.range,
+  }));
+}
+
 const getUpcomingActionWindows = (season: CropSeason | null, days: number) => {
   if (!season?.actionWindows || season.actionWindows.length === 0) return [];
   const today = startOfDay(new Date());
@@ -1555,19 +1729,38 @@ const NutritionRecCell = ({ season }: CellProps) => {
 
 const RiskAlertCell = ({ season }: CellProps) => {
   const alerts = getCombinedAlerts(season, 14);
-  if (alerts.length === 0) return <>N/A</>;
-  const target = alerts[0];
-  const statusRaw = (target.status ?? '').toUpperCase();
-  const status = actionStatusLabel(target.status ?? '') || statusRaw;
-  const statusClass = getStatusBadgeClass(statusRaw);
-  const range = target.startDate && target.endDate
-    ? `${getLocalDateString(target.startDate)} - ${formatInclusiveEndDate(target.endDate)}`
-    : '';
+  if (alerts.length > 0) {
+    const target = alerts[0];
+    const statusRaw = (target.status ?? '').toUpperCase();
+    const status = actionStatusLabel(target.status ?? '') || statusRaw;
+    const statusClass = getStatusBadgeClass(statusRaw);
+    const range = target.startDate && target.endDate
+      ? `${getLocalDateString(target.startDate)} - ${formatInclusiveEndDate(target.endDate)}`
+      : '';
+    return (
+      <>
+        {target.alertName ? `${target.alertName} ` : ''}
+        <span className={`status-badge ${statusClass}`}>{status}</span>
+        {range ? ` ${range}` : ''}
+      </>
+    );
+  }
+
+  const riskAlerts = buildRiskAlerts(season);
+  if (riskAlerts.length === 0) return <>N/A</>;
   return (
     <>
-      {target.alertName ? `${target.alertName} ` : ''}
-      <span className={`status-badge ${statusClass}`}>{status}</span>
-      {range ? ` ${range}` : ''}
+      {riskAlerts.map((item, index) => {
+        const statusClass = getStatusBadgeClass(item.status);
+        const nameText = item.names.filter(Boolean).join('、');
+        return (
+          <div key={`${item.status}-${item.range || 'range'}-${index}`}>
+            {nameText ? `${nameText} ` : ''}
+            <span className={`status-badge ${statusClass}`}>{item.status}</span>
+            {item.range ? ` ${item.range}` : ''}
+          </div>
+        );
+      })}
     </>
   );
 };

@@ -162,6 +162,7 @@ interface FarmContextType {
   submittedFarms: string[];
   submitSelectedFarms: () => void;
   clearSelectedFarms: () => void;
+  clearCombinedCache: () => void;
   // データ取得ロジックを追加
   fetchCombinedDataIfNeeded: (opts?: { force?: boolean; includeTasks?: boolean }) => void;
 }
@@ -208,6 +209,11 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
     setCombinedFetchMaxAttempts(1);
     setCombinedRetryCountdown(null);
   };
+  const clearCombinedCache = () => {
+    if (typeof window === 'undefined') return;
+    sessionStorage.removeItem(STORAGE_KEY);
+    lastRefreshRef.current = 0;
+  };
 
   // セッションストレージから復元（F5でも即表示）
   useEffect(() => {
@@ -252,6 +258,15 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
       request: combinedOut.request,
       warmup: (combinedOut as any).warmup,
     };
+    const subs = (combinedOut as any)?._sub_responses || {};
+    const tasksSub = subs?.tasks;
+    const sprayingsSub = subs?.tasks_sprayings;
+    if (tasksSub || sprayingsSub) {
+      slim._sub_responses = {
+        ...(tasksSub ? { tasks: tasksSub } : {}),
+        ...(sprayingsSub ? { tasks_sprayings: sprayingsSub } : {}),
+      };
+    }
     try {
       sessionStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
     } catch (err) {
@@ -308,20 +323,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
       return false;
     };
 
-    const needsLocationRefresh = () => {
-      const current = combinedOutRef.current?.response?.data?.fieldsV2;
-      if (!Array.isArray(current)) return true;
-      const hasMissing = current.some((f: any) => {
-        const loc = f?.location || {};
-        return !loc.prefecture || !loc.municipality || loc.latitude === undefined || loc.longitude === undefined;
-      });
-      return hasMissing;
-    };
-
-    const now = Date.now();
-    const recentlyRefreshed = now - lastRefreshRef.current < 5 * 60 * 1000; // 5分
-
-    if (!force && isDataMatching() && recentlyRefreshed && !needsLocationRefresh() && (!includeTasks || hasTasksData(combinedOutRef.current))) {
+    if (!force && isDataMatching() && (!includeTasks || hasTasksData(combinedOutRef.current))) {
       if (combinedOutRef.current && combinedOutRef.current.source !== 'cache') {
         setCombinedOut({ ...combinedOutRef.current, source: 'cache' });
       }
@@ -586,7 +588,15 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
   }, [warmupStatus, auth, submittedFarms, combinedLoading, combinedErr, fetchCombinedDataIfNeeded]);
 
   return (
-    <FarmContext.Provider value={{ selectedFarms, setSelectedFarms, submittedFarms, submitSelectedFarms, clearSelectedFarms, fetchCombinedDataIfNeeded }}>
+    <FarmContext.Provider value={{
+      selectedFarms,
+      setSelectedFarms,
+      submittedFarms,
+      submitSelectedFarms,
+      clearSelectedFarms,
+      clearCombinedCache,
+      fetchCombinedDataIfNeeded,
+    }}>
       {children}
     </FarmContext.Provider>
   );

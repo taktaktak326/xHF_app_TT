@@ -1,0 +1,29 @@
+.global-loading-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 3px;
+  width: 100%;
+  background: rgba(100, 108, 255, 0.2);
+  z-index: 3000;
+  overflow: hidden;
+}
+
+.global-loading-bar__inner {
+  height: 100%;
+  width: 40%;
+  background: linear-gradient(90deg, rgba(100, 108, 255, 0.4), rgba(100, 108, 255, 0.95));
+  animation: global-loading-bar-slide 1s ease-in-out infinite;
+}
+
+@keyframes global-loading-bar-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(60%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}

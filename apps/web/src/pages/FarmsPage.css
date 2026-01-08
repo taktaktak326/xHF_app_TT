@@ -64,6 +64,14 @@
   transition: border-color 0.25s;
 }
 
+.farm-selection-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8em;
+  color: #cdd0ff;
+}
+
 .farm-selection-header-toggle {
   display: flex;
   align-items: center;
@@ -221,9 +229,25 @@
 /* --- Table Styles --- */
 .table-container {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
   background-color: #252529;
   border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2); /* 影を追加して立体感を出す */
+}
+
+.table-scrollbar {
+  position: sticky;
+  bottom: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  height: 14px;
+  background-color: #252529;
+  border-radius: 0 0 8px 8px;
+  margin-top: 6px;
+}
+
+.table-scrollbar__content {
+  height: 1px;
 }
 
 .tasks-chart-card {
@@ -368,7 +392,8 @@
 }
 
 .fields-table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 0.9em;
   color: #e0e0e0; /* テーブル全体のテキストカラー */
