@@ -27,7 +27,6 @@ import {
   eachDayOfInterval,
   addMonths,
   subMonths,
-  subYears,
   isSameMonth,
   isSameDay,
 } from 'date-fns';
@@ -713,7 +712,6 @@ export function TasksPage() {
   }, [combinedOut]);
   const herbicideOrdersByTask = useMemo(() => {
     const orders = new Map<string, number>();
-    const grouped: Record<string, AggregatedTask[]> = {};
     const isHerbicideTask = (task: AggregatedTask): boolean => {
       if (task.type !== 'Spraying') return false;
       const recipe = task.dosedMap?.recipeV2 ?? [];
@@ -756,7 +754,6 @@ export function TasksPage() {
   }, [allTasks, herbicideProductUuidsByCrop]);
   const herbicideIntervalAlertsByTask = useMemo(() => {
     const alerts = new Map<string, boolean>();
-    const grouped: Record<string, AggregatedTask[]> = {};
     const isHerbicideTask = (task: AggregatedTask): boolean => {
       if (task.type !== 'Spraying') return false;
       const recipe = task.dosedMap?.recipeV2 ?? [];

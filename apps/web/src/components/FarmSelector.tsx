@@ -38,7 +38,7 @@ function farmLabel(f: Farm) {
 export function FarmSelector() {
   const { auth } = useAuth();
   const { selectedFarms, setSelectedFarms, submitSelectedFarms } = useFarms();
-  const { combinedOut, combinedLoading, combinedInProgress } = useData();
+  const { combinedLoading, combinedInProgress } = useData();
   const { status: warmupStatus, startWarmup } = useWarmup();
 
   const [loading, setLoading] = useState(false);

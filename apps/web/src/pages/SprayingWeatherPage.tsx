@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { useData } from '../context/DataContext';
 import { useFarms } from '../context/FarmContext';
 import type { LoginAndTokenResp, Field, BaseTask, CountryCropGrowthStagePrediction } from '../types/farm';
-import { LineChart, Line, BarChart, Bar, ComposedChart, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceArea } from 'recharts';
+import { LineChart, Line, Bar, ComposedChart, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceArea } from 'recharts';
 import './FarmsPage.css'; // Reuse common styles
 import './SprayingWeatherPage.css';
 import { withApiBase } from '../utils/apiBase';
@@ -196,16 +196,6 @@ const getJstDateKeyFromDate = (date: Date): string => {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
-      timeZone: 'Asia/Tokyo',
-    })
-    .replace(/\//g, '-');
-};
-
-const getJstMonthKeyFromDate = (date: Date): string => {
-  return date
-    .toLocaleDateString('ja-JP', {
-      year: 'numeric',
-      month: '2-digit',
       timeZone: 'Asia/Tokyo',
     })
     .replace(/\//g, '-');
@@ -618,29 +608,7 @@ const PastWeatherPanel: FC<{
     });
     return Array.from(monthMap.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [plannedTasksDetail]);
-  const fallbackMonthKey = useMemo(() => getJstMonthKeyFromDate(new Date()), []);
   const hasPlannedMonths = plannedMonths.length > 0;
-
-  const historyTargets = useMemo(() => {
-    const sourceMonths = hasPlannedMonths ? plannedMonths.map(([monthKey]) => ({ monthKey, label: monthKey })) : [{
-      monthKey: fallbackMonthKey,
-      label: `${fallbackMonthKey} (当月)`,
-    }];
-    return sourceMonths
-      .map(({ monthKey, label }) => {
-        const [yearText, monthText] = monthKey.split('-');
-        const year = Number(yearText);
-        const month = Number(monthText);
-        if (!year || !month) return null;
-        const previousYear = `${year - 1}-${String(month).padStart(2, '0')}`;
-        const twoYearsAgo = `${year - 2}-${String(month).padStart(2, '0')}`;
-        return {
-          plannedMonth: label,
-          historyMonths: [previousYear, twoYearsAgo],
-        };
-      })
-      .filter((entry): entry is { plannedMonth: string; historyMonths: string[] } => Boolean(entry));
-  }, [fallbackMonthKey, hasPlannedMonths, plannedMonths]);
 
   const historyDailyByMonth = useMemo(() => {
     const data = weatherData?.weatherHistoricForecastDaily ?? [];
@@ -776,11 +744,6 @@ const PastWeatherPanel: FC<{
     });
     return summaryMap;
   }, [weatherData]);
-
-  const formatMetric = (value: number | null, unit: string, digits = 1): string => {
-    if (value === null || !Number.isFinite(value)) return '-';
-    return `${value.toFixed(digits)}${unit}`;
-  };
 
   const toNumeric = (value: unknown): number | null => {
     if (value === null || value === undefined) return null;
