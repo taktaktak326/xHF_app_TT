@@ -1031,6 +1031,101 @@ export function TasksPage() {
   );
   const selectedTaskCount = selectedTasks.length;
 
+  const handleDownloadTasksCsv = useCallback(() => {
+    if (filteredTasks.length === 0) return;
+
+    const csvEscape = (value: unknown) => {
+      const text = String(value ?? '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\n/g, ' ');
+      return `"${text.replace(/"/g, '""')}"`;
+    };
+    const buildCsvRow = (cells: unknown[]) => cells.map(csvEscape).join(',');
+
+    const getAssigneeName = (task: AggregatedTask) =>
+      task.assignee
+        ? `${task.assignee.lastName || ''} ${task.assignee.firstName || ''}`.trim() || '未割り当て'
+        : '未割り当て';
+
+    const getBbchIndex = (task: AggregatedTask) => {
+      const dateInput = getJstDateInputValue(task.plannedDate || task.executionDate);
+      const predictions = bbchBySeason.get(task.seasonUuid ?? '') ?? [];
+      return dateInput ? (findBbchIndexForDate(predictions, dateInput) || '') : '';
+    };
+
+    const buildRecipeText = (task: AggregatedTask) => {
+      const recipes = buildRecipeDisplay(task);
+      if (recipes.length === 0) return '';
+      return recipes
+        .map(entry => {
+          const parts = [
+            entry.name,
+            entry.formLabel ? `(${entry.formLabel})` : '',
+            entry.per10a ? entry.per10a : '',
+            entry.total ? `合計 ${entry.total}` : '',
+          ].filter(Boolean);
+          return parts.join(' ');
+        })
+        .join(' / ');
+    };
+
+    const headers = [
+      '農場',
+      '圃場',
+      '面積(ha)',
+      'タスク種別',
+      '作物',
+      '計画日',
+      '実行日',
+      'BBCH',
+      'ステータス',
+      '担当者',
+      '施肥混用',
+      'メモ',
+    ];
+
+    const sorted = [...filteredTasks].sort((a, b) => {
+      const dateA = a.plannedDate || a.executionDate || '';
+      const dateB = b.plannedDate || b.executionDate || '';
+      if (dateA !== dateB) return dateA.localeCompare(dateB);
+      const farmA = a.farmName || '';
+      const farmB = b.farmName || '';
+      if (farmA !== farmB) return farmA.localeCompare(farmB, 'ja');
+      return (a.fieldName || '').localeCompare(b.fieldName || '', 'ja');
+    });
+
+    const rows = sorted.map(task => {
+      const areaHa = task.fieldArea ? (task.fieldArea / 10000) : null;
+      return buildCsvRow([
+        task.farmName ?? '',
+        task.fieldName ?? '',
+        areaHa && Number.isFinite(areaHa) ? areaHa.toFixed(2) : '',
+        getTaskLabel(task),
+        task.cropName ?? '',
+        getLocalDateString(task.plannedDate) || '',
+        getLocalDateString(task.executionDate) || '',
+        getBbchIndex(task),
+        getStatusLabel(task.state),
+        getAssigneeName(task),
+        buildRecipeText(task),
+        (task.note ?? '').trim(),
+      ]);
+    });
+
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+    const csvContent = [buildCsvRow(headers), ...rows].join('\r\n');
+    const blob = new Blob([bom, csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `tasks_${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [bbchBySeason, filteredTasks]);
+
   useEffect(() => {
     const allowed = new Set(filteredTasks.filter(task => task.type === 'Spraying').map(task => task.uuid));
     setSelectedTaskUuids(prev => {
@@ -1333,13 +1428,18 @@ export function TasksPage() {
             <div className="tasks-bulk-summary">
               選択中の散布タスク: {selectedTaskCount} 件
             </div>
-            <button
-              type="button"
-              onClick={() => setIsBulkModalOpen(true)}
-              disabled={!canEditPlannedDate || selectedTaskCount === 0 || isBulkSaving}
-            >
-              まとめて計画日を変更
-            </button>
+            <div className="tasks-bulk-action-buttons">
+              <button type="button" onClick={handleDownloadTasksCsv} disabled={filteredTasks.length === 0}>
+                CSVダウンロード
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsBulkModalOpen(true)}
+                disabled={!canEditPlannedDate || selectedTaskCount === 0 || isBulkSaving}
+              >
+                まとめて計画日を変更
+              </button>
+            </div>
           </div>
           <TasksTable
             tasks={filteredTasks}
@@ -2090,6 +2190,13 @@ function TasksChart({
 
   const handleDownloadUsageCsv = () => {
     if (!usageCsvRows.length) return;
+    const csvEscape = (value: unknown) => {
+      const text = String(value ?? '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\n/g, ' ');
+      return `"${text.replace(/"/g, '""')}"`;
+    };
     const header = ['日付', '名称', '剤型', '合計', '単位'];
     const rows = usageCsvRows.map(item => [
       item.date,
@@ -2099,9 +2206,10 @@ function TasksChart({
       item.unitLabel,
     ]);
     const csv = [header, ...rows]
-      .map(cols => cols.map(col => `"${String(col).replace(/"/g, '""')}"`).join(','))
-      .join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      .map(cols => cols.map(csvEscape).join(','))
+      .join('\r\n');
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+    const blob = new Blob([bom, csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

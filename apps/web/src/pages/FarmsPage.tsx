@@ -994,6 +994,16 @@ export function FarmsPage() {
   }, [sortedFieldSeasonPairs]);
 
   const downloadAsCsv = () => {
+    const csvEscape = (value: unknown) => {
+      const text = String(value ?? '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\n/g, ' ');
+      return `"${text.replace(/"/g, '""')}"`;
+    };
+
+    const buildCsvRow = (cells: unknown[]) => cells.map(csvEscape).join(',');
+
     const headers = [
       '圃場', '都道府県', '市区町村', '緯度', '経度', '面積(a)', '作物', '品種', '作付日', '作付時の生育ステージ', '作付方法',
       '現在の生育ステージ', '次の生育ステージ', '施肥推奨', '水管理',
@@ -1003,7 +1013,7 @@ export function FarmsPage() {
     const rows = sortedFieldSeasonPairs.map(({ field, season, nextStage }) => {
       const latitude = field.location?.center?.latitude ?? null;
       const longitude = field.location?.center?.longitude ?? null;
-      return [
+      return buildCsvRow([
         field.name,
         formatPrefectureDisplay(field.location),
         formatMunicipalityDisplay(field.location),
@@ -1021,17 +1031,20 @@ export function FarmsPage() {
         formatRecommendations(season?.waterRecommendations ?? null),
         formatRecommendations(season?.weedManagementRecommendations ?? null),
         formatActionWindowSummary(season, 14),
-      ].map(cell => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(',');
+      ]);
     });
 
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows].join('\n');
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `farm_data_${new Date().toISOString().split('T')[0]}.csv`);
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+    const csvContent = [buildCsvRow(headers), ...rows].join('\r\n');
+    const blob = new Blob([bom, csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `farm_data_${new Date().toISOString().split('T')[0]}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   if (!auth) return <p>認証情報がありません。ログインしてください。</p>;
