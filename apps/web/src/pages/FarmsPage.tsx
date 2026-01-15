@@ -67,6 +67,31 @@ const getFieldCenter = (field: Field): FieldCenter | null => {
   return null;
 };
 
+const getFarmName = (field: Field): string => {
+  return field.farmV2?.name ?? field.farm?.name ?? '';
+};
+
+const getFarmOwnerName = (field: Field): string => {
+  const owner = (field as any)?.farmV2?.owner ?? (field as any)?.farm?.owner ?? null;
+  const name = owner ? `${owner.lastName ?? ''} ${owner.firstName ?? ''}`.trim() : '';
+  return name || owner?.email || '';
+};
+
+const getBbch89Date = (season: CropSeason | null): string => {
+  const preds = season?.countryCropGrowthStagePredictions ?? null;
+  if (!Array.isArray(preds) || preds.length === 0) return '';
+  const hit = preds.find((p) => String(p?.gsOrder ?? '') === '89' || String(p?.index ?? '') === '89');
+  if (!hit?.startDate) return '';
+  return getLocalDateString(hit.startDate);
+};
+
+const getTargetYieldLabel = (season: CropSeason | null): string => {
+  const raw = (season as any)?.yieldExpectation ?? (season as any)?.yield_expectation ?? null;
+  const num = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(num)) return '';
+  return `${num.toLocaleString('ja-JP', { maximumFractionDigits: 1 })} kg/10a`;
+};
+
 const isImageAttachment = (att: { mimeType?: string | null; contentType?: string | null; fileName?: string | null; url?: string }) => {
   const mime = (att.mimeType || att.contentType || '').toLowerCase();
   if (mime.startsWith('image/')) return true;
@@ -200,6 +225,8 @@ const FieldsTableHeader = ({
           />
         </th>
         {headerCell('field.name', '圃場')}
+        {headerCell('field.farmV2.name', '農場', false)}
+        {headerCell('field.farmV2.owner', 'ユーザー', false)}
         {headerCell('field.location.prefecture', '都道府県', false)}
         {headerCell('field.location.municipality', '市区町村', false)}
         {headerCell('field.location.center.latitude', '緯度', false)}
@@ -208,6 +235,8 @@ const FieldsTableHeader = ({
         {headerCell('season.crop.name', '作物')}
         {headerCell('season.variety.name', '品種')}
         {headerCell('season.startDate', '作付日')}
+        {headerCell('season.countryCropGrowthStagePredictions', 'BBCH89到達日', false)}
+        {headerCell('season.yieldExpectation', '目標収量', false)}
         {headerCell('season.cropEstablishmentGrowthStageIndex', '作付時の生育ステージ')}
         {headerCell('season.cropEstablishmentMethodCode', '作付方法', false)}
         {headerCell('season.activeGrowthStage.gsOrder', '現在の生育ステージ')}
@@ -275,6 +304,10 @@ function FieldsTable({
             ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
             : field.location;
           const center = getFieldCenter(field);
+          const farmName = getFarmName(field);
+          const ownerName = getFarmOwnerName(field);
+          const bbch89Date = getBbch89Date(season);
+          const targetYield = getTargetYieldLabel(season);
           return (
             <tr key={`${field.uuid}-${season?.uuid ?? index}`}>
               <td className="selection-cell">
@@ -323,6 +356,8 @@ function FieldsTable({
                   )}
                 </div>
               </td>
+              <td>{farmName || 'N/A'}</td>
+              <td>{ownerName || 'N/A'}</td>
               <td><LocationPrefectureCell location={effectiveLocation} /></td>
               <td><LocationMunicipalityCell location={effectiveLocation} /></td>
               <td><CoordinateCell value={center?.latitude ?? null} /></td>
@@ -333,6 +368,8 @@ function FieldsTable({
               <td>
                 {season?.startDate ? getLocalDateString(season.startDate) : 'N/A'}
               </td>
+              <td>{bbch89Date || 'N/A'}</td>
+              <td>{targetYield || 'N/A'}</td>
               <td>{formatCropEstablishmentStage(season)}</td>
               <td>{formatCropEstablishmentMethod(season)}</td>
               <td>{formatActiveGrowthStage(season)}</td>
@@ -1129,7 +1166,7 @@ export function FarmsPage() {
     const buildCsvRow = (cells: unknown[]) => cells.map(csvEscape).join(',');
 
     const headers = [
-      '圃場', '都道府県', '市区町村', '緯度', '経度', '面積(a)', '作物', '品種', '作付日', '作付時の生育ステージ', '作付方法',
+      '圃場', '農場', 'ユーザー', '都道府県', '市区町村', '緯度', '経度', '面積(a)', '作物', '品種', '作付日', 'BBCH89到達日', '目標収量(kg/10a)', '作付時の生育ステージ', '作付方法',
       '現在の生育ステージ', '次の生育ステージ', '施肥推奨', '水管理',
       '雑草管理', 'リスクアラート',
     ];
@@ -1142,8 +1179,14 @@ export function FarmsPage() {
       const center = getFieldCenter(field);
       const latitude = center?.latitude ?? null;
       const longitude = center?.longitude ?? null;
+      const farmName = getFarmName(field);
+      const ownerName = getFarmOwnerName(field);
+      const bbch89Date = getBbch89Date(season);
+      const targetYield = getTargetYieldLabel(season);
       return buildCsvRow([
         field.name,
+        farmName,
+        ownerName,
         formatPrefectureDisplay(effectiveLocation),
         formatMunicipalityDisplay(effectiveLocation),
         latitude !== null ? latitude.toFixed(6) : '',
@@ -1152,6 +1195,8 @@ export function FarmsPage() {
         season?.crop.name ?? '',
         season?.variety.name ?? '',
         season?.startDate ? getLocalDateString(season.startDate) : '',
+        bbch89Date,
+        targetYield,
         formatCropEstablishmentStage(season),
         formatCropEstablishmentMethod(season),
         formatActiveGrowthStage(season),
