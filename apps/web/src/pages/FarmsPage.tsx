@@ -52,6 +52,21 @@ type NoteImageItem = {
 
 type NoteImageState = 'idle' | 'loading' | 'error' | 'empty';
 
+type FieldCenter = {
+  latitude: number;
+  longitude: number;
+};
+
+const getFieldCenter = (field: Field): FieldCenter | null => {
+  const candidates = [field.location?.center, (field as any).center, (field as any).centroid];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate.latitude === 'number' && typeof candidate.longitude === 'number') {
+      return { latitude: candidate.latitude, longitude: candidate.longitude };
+    }
+  }
+  return null;
+};
+
 const isImageAttachment = (att: { mimeType?: string | null; contentType?: string | null; fileName?: string | null; url?: string }) => {
   const mime = (att.mimeType || att.contentType || '').toLowerCase();
   if (mime.startsWith('image/')) return true;
@@ -259,6 +274,7 @@ function FieldsTable({
           const effectiveLocation = locationOverride
             ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
             : field.location;
+          const center = getFieldCenter(field);
           return (
             <tr key={`${field.uuid}-${season?.uuid ?? index}`}>
               <td className="selection-cell">
@@ -309,8 +325,8 @@ function FieldsTable({
               </td>
               <td><LocationPrefectureCell location={effectiveLocation} /></td>
               <td><LocationMunicipalityCell location={effectiveLocation} /></td>
-              <td><CoordinateCell value={field.location?.center?.latitude} /></td>
-              <td><CoordinateCell value={field.location?.center?.longitude} /></td>
+              <td><CoordinateCell value={center?.latitude ?? null} /></td>
+              <td><CoordinateCell value={center?.longitude ?? null} /></td>
               <td>{(field.area / 100).toFixed(2)}</td>
               <td>{season?.crop.name ?? 'N/A'}</td>
               <td>{season?.variety.name ?? 'N/A'}</td>
@@ -1040,8 +1056,9 @@ export function FarmsPage() {
       if (hasPrefCity) return;
       if (prefCityByFieldUuid[field.uuid]) return;
       if (prefCityPendingRef.current.has(field.uuid)) return;
-      const lat = field.location?.center?.latitude;
-      const lon = field.location?.center?.longitude;
+      const center = getFieldCenter(field);
+      const lat = center?.latitude;
+      const lon = center?.longitude;
       if (typeof lat !== 'number' || typeof lon !== 'number') return;
       prefCityPendingRef.current.add(field.uuid);
       worker.postMessage({ type: 'lookup', id: field.uuid, lat, lon });
@@ -1070,8 +1087,9 @@ export function FarmsPage() {
       const effectiveLocation = locationOverride
         ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
         : field.location;
-      const latitude = field.location?.center?.latitude ?? null;
-      const longitude = field.location?.center?.longitude ?? null;
+      const center = getFieldCenter(field);
+      const latitude = center?.latitude ?? null;
+      const longitude = center?.longitude ?? null;
       return buildCsvRow([
         field.name,
         formatPrefectureDisplay(effectiveLocation),
