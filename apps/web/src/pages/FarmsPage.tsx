@@ -393,6 +393,7 @@ export function FarmsPage() {
   const [prefCityByFieldUuid, setPrefCityByFieldUuid] = useState<Record<string, Partial<NonNullable<Field['location']>>>>({});
   const prefCityWorkerRef = useRef<Worker | null>(null);
   const prefCityPendingRef = useRef<Set<string>>(new Set());
+  const [prefCityDatasetReady, setPrefCityDatasetReady] = useState(false);
   const tableContainerRef = useRef<HTMLDivElement | null>(null);
   const tableRef = useRef<HTMLTableElement | null>(null);
   const tableScrollbarRef = useRef<HTMLDivElement | null>(null);
@@ -1023,12 +1024,61 @@ export function FarmsPage() {
     if (prefCityWorkerRef.current) return;
     const worker = new Worker(new URL('../workers/prefCityReverseGeocode.ts', import.meta.url), { type: 'module' });
     prefCityWorkerRef.current = worker;
+    const datasetUrl = `${window.location.origin.replace(/\/$/, '')}/pref_city_p5.topo.json.gz`;
+    worker.postMessage({ type: 'init', baseUrl: window.location.origin });
+    // In dev, some browsers restrict fetch from workers depending on origin/blob URLs.
+    // Preload the dataset on the main thread and transfer it to the worker as a fallback.
+    let cancelled = false;
+    const preloadDataset = async (attempt: number) => {
+      try {
+        const res = await fetch(datasetUrl, { cache: 'no-store' });
+        if (cancelled) return;
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf = await res.arrayBuffer();
+        if (cancelled) return;
+        worker.postMessage({ type: 'dataset', gz: buf }, [buf]);
+      } catch (err) {
+        if (cancelled) return;
+        if (import.meta.env.DEV) {
+          console.warn('[pref-city] dataset preload failed', { attempt, err });
+        }
+        // Vite dev server can briefly restart; retry a few times.
+        if (attempt < 3) {
+          window.setTimeout(() => preloadDataset(attempt + 1), 800 * attempt);
+        }
+      }
+    };
+    preloadDataset(1);
     worker.onmessage = (event: MessageEvent<any>) => {
       const data = event.data;
-      if (!data || data.type !== 'result') return;
+      if (!data) return;
+      if (data.type === 'dataset_ack') {
+        worker.postMessage({ type: 'warmup' });
+        return;
+      }
+      if (data.type === 'warmup_done') {
+        if (!data.ok) {
+          setPrefCityDatasetReady(false);
+          return;
+        }
+        setPrefCityDatasetReady(true);
+        return;
+      }
+      if (data.type === 'ready') {
+        setPrefCityDatasetReady(Boolean(data.loaded));
+        return;
+      }
+      if (data.type !== 'result') return;
       const id = String(data.id ?? '');
       prefCityPendingRef.current.delete(id);
-      if (!id || !data.location) return;
+      if (!id) return;
+      if (data.error) {
+        if (import.meta.env.DEV) {
+          console.warn('[pref-city] lookup failed', { id, error: data.error });
+        }
+        return;
+      }
+      if (!data.location) return;
       setPrefCityByFieldUuid((prev) => ({
         ...prev,
         [id]: {
@@ -1044,12 +1094,14 @@ export function FarmsPage() {
       worker.terminate();
       prefCityWorkerRef.current = null;
       prefCityPendingRef.current.clear();
+      cancelled = true;
     };
   }, []);
 
   useEffect(() => {
     const worker = prefCityWorkerRef.current;
     if (!worker) return;
+    if (!prefCityDatasetReady) return;
     sortedFieldSeasonPairs.forEach(({ field }) => {
       if (!field?.uuid) return;
       const hasPrefCity = Boolean(field.location?.prefecture) && Boolean(field.location?.municipality);
@@ -1063,7 +1115,7 @@ export function FarmsPage() {
       prefCityPendingRef.current.add(field.uuid);
       worker.postMessage({ type: 'lookup', id: field.uuid, lat, lon });
     });
-  }, [prefCityByFieldUuid, sortedFieldSeasonPairs]);
+  }, [prefCityByFieldUuid, prefCityDatasetReady, sortedFieldSeasonPairs]);
 
   const downloadAsCsv = () => {
     const csvEscape = (value: unknown) => {

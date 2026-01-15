@@ -12,6 +12,31 @@ type LookupRequest = {
   lon: number;
 };
 
+type InitRequest = {
+  type: 'init';
+  baseUrl: string;
+};
+
+type DatasetRequest = {
+  type: 'dataset';
+  gz: ArrayBuffer;
+};
+
+type DatasetAckResponse = {
+  type: 'dataset_ack';
+  bytes: number;
+};
+
+type WarmupRequest = {
+  type: 'warmup';
+};
+
+type WarmupResponse = {
+  type: 'warmup_done';
+  ok: boolean;
+  error?: string;
+};
+
 type LookupResponse = {
   type: 'result';
   id: string;
@@ -38,6 +63,8 @@ let geomList: any[] = [];
 let geomBboxes: Float64Array | null = null; // [minx,miny,maxx,maxy] * n
 let arcBboxes: Float64Array | null = null; // [minx,miny,maxx,maxy] * arcs
 let tileIndex: Map<string, Uint32Array> | null = null;
+let datasetUrl: string | null = null;
+let datasetGz: ArrayBuffer | null = null;
 
 const arcPointCache = new Map<number, Float64Array>();
 const ARC_CACHE_MAX = 2000;
@@ -274,14 +301,111 @@ function computeGeomBboxesAndTileIndex() {
 
 async function loadTopologyOnce() {
   if (topology) return;
-  const res = await fetch('/pref_city_p5.topo.json.gz');
-  if (!res.ok) throw new Error(`failed to fetch dataset: ${res.status}`);
-  if (!res.body) throw new Error('dataset response has no body');
-  // Browser-native gzip decompression
-  // eslint-disable-next-line no-undef
-  const stream = res.body.pipeThrough(new DecompressionStream('gzip'));
-  const text = await new Response(stream).text();
-  const parsed = JSON.parse(text) as Topology;
+
+  // If we were handed bytes directly from the main thread, accept either:
+  // - gzip-compressed TopoJSON (.gz)
+  // - already-decompressed JSON bytes (some servers may serve .gz with Content-Encoding: gzip)
+  if (datasetGz) {
+    const bytes = new Uint8Array(datasetGz);
+    const isGzip = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+    if (!isGzip) {
+      try {
+        const text = new TextDecoder('utf-8').decode(bytes);
+        topology = JSON.parse(text) as Topology;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`loadTopologyOnce: failed to parse provided bytes: ${msg}`);
+      }
+      const objectName = topology.objects?.pref_city_minimal ? 'pref_city_minimal' : Object.keys(topology.objects ?? {})[0];
+      if (!objectName) throw new Error('topology.objects missing');
+      const object = topology.objects[objectName];
+      if (object?.type !== 'GeometryCollection' || !Array.isArray(object.geometries)) {
+        throw new Error(`unexpected object format: ${objectName}`);
+      }
+      geomList = object.geometries;
+      computeArcBboxes();
+      computeGeomBboxesAndTileIndex();
+      postMessage({ type: 'ready', loaded: true, geoms: geomList.length } satisfies ReadyResponse);
+      return;
+    }
+
+    // gzip-compressed bytes
+    let text: string;
+    try {
+      // eslint-disable-next-line no-undef
+      const stream = new Blob([datasetGz]).stream().pipeThrough(new DecompressionStream('gzip'));
+      text = await new Response(stream).text();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`loadTopologyOnce: failed to decompress provided gzip: ${msg}`);
+    }
+    try {
+      topology = JSON.parse(text) as Topology;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`loadTopologyOnce: failed to parse JSON: ${msg}`);
+    }
+    const objectName = topology.objects?.pref_city_minimal ? 'pref_city_minimal' : Object.keys(topology.objects ?? {})[0];
+    if (!objectName) throw new Error('topology.objects missing');
+    const object = topology.objects[objectName];
+    if (object?.type !== 'GeometryCollection' || !Array.isArray(object.geometries)) {
+      throw new Error(`unexpected object format: ${objectName}`);
+    }
+    geomList = object.geometries;
+    computeArcBboxes();
+    computeGeomBboxesAndTileIndex();
+    postMessage({ type: 'ready', loaded: true, geoms: geomList.length } satisfies ReadyResponse);
+    return;
+  }
+
+  let gzStream: ReadableStream;
+  {
+    const url =
+      datasetUrl ??
+      (() => {
+        try {
+          // In some dev setups the worker can be served from a blob: URL; prefer an absolute URL if possible.
+          // eslint-disable-next-line no-undef
+          const origin = (self as any)?.location?.origin;
+          if (origin && origin !== 'null') {
+            return `${origin}/pref_city_p5.topo.json.gz`;
+          }
+        } catch {
+          // ignore
+        }
+        return '/pref_city_p5.topo.json.gz';
+      })();
+
+    let res: Response;
+    try {
+      res = await fetch(url);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`loadTopologyOnce: failed to fetch dataset (${url}): ${msg}`);
+    }
+    if (!res.ok) throw new Error(`loadTopologyOnce: failed to fetch dataset (${url}): HTTP ${res.status}`);
+    if (!res.body) throw new Error('loadTopologyOnce: dataset response has no body');
+    gzStream = res.body;
+  }
+
+  // Browser-native gzip decompression (fetch branch should always be gzip bytes)
+  let text: string;
+  try {
+    // eslint-disable-next-line no-undef
+    const stream = gzStream.pipeThrough(new DecompressionStream('gzip'));
+    text = await new Response(stream).text();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`loadTopologyOnce: failed to decompress: ${msg}`);
+  }
+
+  let parsed: Topology;
+  try {
+    parsed = JSON.parse(text) as Topology;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`loadTopologyOnce: failed to parse JSON: ${msg}`);
+  }
   topology = parsed;
   const objectName = parsed.objects?.pref_city_minimal ? 'pref_city_minimal' : Object.keys(parsed.objects ?? {})[0];
   if (!objectName) throw new Error('topology.objects missing');
@@ -326,9 +450,29 @@ function lookup(lat: number, lon: number): PrefCityLocation | null {
   return null;
 }
 
-self.onmessage = async (ev: MessageEvent<LookupRequest>) => {
+self.onmessage = async (ev: MessageEvent<LookupRequest | InitRequest | DatasetRequest | WarmupRequest>) => {
   const msg = ev.data;
-  if (!msg || msg.type !== 'lookup') return;
+  if (!msg) return;
+  if (msg.type === 'init') {
+    datasetUrl = `${String(msg.baseUrl).replace(/\/$/, '')}/pref_city_p5.topo.json.gz`;
+    return;
+  }
+  if (msg.type === 'dataset') {
+    datasetGz = msg.gz;
+    postMessage({ type: 'dataset_ack', bytes: datasetGz.byteLength } satisfies DatasetAckResponse);
+    return;
+  }
+  if (msg.type === 'warmup') {
+    try {
+      await loadTopologyOnce();
+      postMessage({ type: 'warmup_done', ok: true } satisfies WarmupResponse);
+    } catch (e) {
+      const error = e instanceof Error ? e.message : 'unknown error';
+      postMessage({ type: 'warmup_done', ok: false, error } satisfies WarmupResponse);
+    }
+    return;
+  }
+  if (msg.type !== 'lookup') return;
   try {
     await loadTopologyOnce();
     const location = lookup(msg.lat, msg.lon);
@@ -338,4 +482,3 @@ self.onmessage = async (ev: MessageEvent<LookupRequest>) => {
     postMessage({ type: 'result', id: msg.id, location: null, error } satisfies LookupResponse);
   }
 };
-
