@@ -91,7 +91,7 @@ const getTargetYieldLabel = (season: CropSeason | null): string => {
   if (!Number.isFinite(num)) return '';
   // Xarvioの yieldExpectation が t/10a 相当(例: 0.55 => 550kg/10a)で返るケースがあるため補正
   const kgPer10a = num > 0 && num < 10 ? num * 1000 : num;
-  return `${kgPer10a.toLocaleString('ja-JP', { maximumFractionDigits: 1 })} kg/10a`;
+  return `${kgPer10a.toLocaleString('ja-JP', { maximumFractionDigits: 1 })}`;
 };
 
 const isImageAttachment = (att: { mimeType?: string | null; contentType?: string | null; fileName?: string | null; url?: string }) => {
@@ -238,7 +238,7 @@ const FieldsTableHeader = ({
         {headerCell('season.variety.name', '品種')}
         {headerCell('season.startDate', '作付日')}
         {headerCell('season.countryCropGrowthStagePredictions', 'BBCH89到達日', false)}
-        {headerCell('season.yieldExpectation', '目標収量', false)}
+        {headerCell('season.yieldExpectation', '目標収量(kg/10a)', false)}
         {headerCell('season.cropEstablishmentGrowthStageIndex', '作付時の生育ステージ')}
         {headerCell('season.cropEstablishmentMethodCode', '作付方法', false)}
         {headerCell('season.activeGrowthStage.gsOrder', '現在の生育ステージ')}
