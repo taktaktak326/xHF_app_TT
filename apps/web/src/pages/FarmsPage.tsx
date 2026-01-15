@@ -223,6 +223,7 @@ function FieldsTable({
   noteImageErrorByField,
   onOpenNoteList,
   tableRef,
+  locationByFieldUuid,
 }: {
   fieldSeasonPairs: FieldSeasonPair[];
   requestSort: (key: string) => void;
@@ -237,6 +238,7 @@ function FieldsTable({
   noteImageErrorByField: Record<string, string>;
   onOpenNoteList: (field: Field) => void;
   tableRef?: Ref<HTMLTableElement>;
+  locationByFieldUuid: Record<string, Partial<NonNullable<Field['location']>>>;
 }) {
   return (
     <table className="fields-table" ref={tableRef}>
@@ -253,6 +255,10 @@ function FieldsTable({
           const noteImage = noteImageByField[field.uuid] ?? null;
           const noteState = noteImageStateByField[field.uuid] ?? 'idle';
           const noteError = noteImageErrorByField[field.uuid] ?? '';
+          const locationOverride = locationByFieldUuid[field.uuid];
+          const effectiveLocation = locationOverride
+            ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
+            : field.location;
           return (
             <tr key={`${field.uuid}-${season?.uuid ?? index}`}>
               <td className="selection-cell">
@@ -301,8 +307,8 @@ function FieldsTable({
                   )}
                 </div>
               </td>
-              <td><LocationPrefectureCell location={field.location} /></td>
-              <td><LocationMunicipalityCell location={field.location} /></td>
+              <td><LocationPrefectureCell location={effectiveLocation} /></td>
+              <td><LocationMunicipalityCell location={effectiveLocation} /></td>
               <td><CoordinateCell value={field.location?.center?.latitude} /></td>
               <td><CoordinateCell value={field.location?.center?.longitude} /></td>
               <td>{(field.area / 100).toFixed(2)}</td>
@@ -368,6 +374,9 @@ export function FarmsPage() {
   const [noteModalLimit, setNoteModalLimit] = useState<number>(10);
   const [noteModalFrom, setNoteModalFrom] = useState('');
   const [noteModalTo, setNoteModalTo] = useState('');
+  const [prefCityByFieldUuid, setPrefCityByFieldUuid] = useState<Record<string, Partial<NonNullable<Field['location']>>>>({});
+  const prefCityWorkerRef = useRef<Worker | null>(null);
+  const prefCityPendingRef = useRef<Set<string>>(new Set());
   const tableContainerRef = useRef<HTMLDivElement | null>(null);
   const tableRef = useRef<HTMLTableElement | null>(null);
   const tableScrollbarRef = useRef<HTMLDivElement | null>(null);
@@ -993,6 +1002,52 @@ export function FarmsPage() {
     return list;
   }, [sortedFieldSeasonPairs]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (prefCityWorkerRef.current) return;
+    const worker = new Worker(new URL('../workers/prefCityReverseGeocode.ts', import.meta.url), { type: 'module' });
+    prefCityWorkerRef.current = worker;
+    worker.onmessage = (event: MessageEvent<any>) => {
+      const data = event.data;
+      if (!data || data.type !== 'result') return;
+      const id = String(data.id ?? '');
+      prefCityPendingRef.current.delete(id);
+      if (!id || !data.location) return;
+      setPrefCityByFieldUuid((prev) => ({
+        ...prev,
+        [id]: {
+          ...(prev[id] ?? {}),
+          prefecture: data.location.prefecture ?? null,
+          municipality: data.location.municipality ?? null,
+          subMunicipality: data.location.subMunicipality ?? null,
+          cityCode: data.location.cityCode ?? null,
+        },
+      }));
+    };
+    return () => {
+      worker.terminate();
+      prefCityWorkerRef.current = null;
+      prefCityPendingRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    const worker = prefCityWorkerRef.current;
+    if (!worker) return;
+    sortedFieldSeasonPairs.forEach(({ field }) => {
+      if (!field?.uuid) return;
+      const hasPrefCity = Boolean(field.location?.prefecture) && Boolean(field.location?.municipality);
+      if (hasPrefCity) return;
+      if (prefCityByFieldUuid[field.uuid]) return;
+      if (prefCityPendingRef.current.has(field.uuid)) return;
+      const lat = field.location?.center?.latitude;
+      const lon = field.location?.center?.longitude;
+      if (typeof lat !== 'number' || typeof lon !== 'number') return;
+      prefCityPendingRef.current.add(field.uuid);
+      worker.postMessage({ type: 'lookup', id: field.uuid, lat, lon });
+    });
+  }, [prefCityByFieldUuid, sortedFieldSeasonPairs]);
+
   const downloadAsCsv = () => {
     const csvEscape = (value: unknown) => {
       const text = String(value ?? '')
@@ -1011,12 +1066,16 @@ export function FarmsPage() {
     ];
 
     const rows = sortedFieldSeasonPairs.map(({ field, season, nextStage }) => {
+      const locationOverride = prefCityByFieldUuid[field.uuid];
+      const effectiveLocation = locationOverride
+        ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
+        : field.location;
       const latitude = field.location?.center?.latitude ?? null;
       const longitude = field.location?.center?.longitude ?? null;
       return buildCsvRow([
         field.name,
-        formatPrefectureDisplay(field.location),
-        formatMunicipalityDisplay(field.location),
+        formatPrefectureDisplay(effectiveLocation),
+        formatMunicipalityDisplay(effectiveLocation),
         latitude !== null ? latitude.toFixed(6) : '',
         longitude !== null ? longitude.toFixed(6) : '',
         (field.area / 100).toFixed(2),
@@ -1229,6 +1288,7 @@ export function FarmsPage() {
               noteImageErrorByField={noteImageErrorByField}
               onOpenNoteList={handleOpenNoteList}
               tableRef={tableRef}
+              locationByFieldUuid={prefCityByFieldUuid}
             />
           </div>
         )}
