@@ -235,6 +235,14 @@
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2); /* 影を追加して立体感を出す */
 }
 
+.table-container--synced-scroll {
+  scrollbar-width: none; /* Firefox: hide native scrollbar (use the synced one below) */
+}
+
+.table-container--synced-scroll::-webkit-scrollbar {
+  height: 0; /* WebKit: hide native horizontal scrollbar */
+}
+
 .table-scrollbar {
   position: sticky;
   bottom: 0;

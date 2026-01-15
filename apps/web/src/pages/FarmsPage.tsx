@@ -1480,7 +1480,7 @@ export function FarmsPage() {
           </div>
         )}
         {paginatedFieldSeasonPairs.length > 0 && (
-          <div className="table-container" ref={tableContainerRef} onScroll={handleTableScroll}>
+          <div className="table-container table-container--synced-scroll" ref={tableContainerRef} onScroll={handleTableScroll}>
             <FieldsTable
               fieldSeasonPairs={paginatedFieldSeasonPairs}
               requestSort={requestSort}
