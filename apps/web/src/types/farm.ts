@@ -182,8 +182,8 @@ export type Field = {
   uuid: string;
   name: string;
   area: number;
-  farm?: { uuid?: string | null; name?: string | null } | null;
-  farmV2?: { uuid?: string | null; name?: string | null } | null;
+  farm?: { uuid?: string | null; name?: string | null; owner?: { firstName?: string | null; lastName?: string | null; email?: string | null } | null } | null;
+  farmV2?: { uuid?: string | null; name?: string | null; owner?: { firstName?: string | null; lastName?: string | null; email?: string | null } | null } | null;
   cropSeasonsV2: CropSeason[] | null;
   // 作付タスク
   cropEstablishments?: BaseTask[] | null;

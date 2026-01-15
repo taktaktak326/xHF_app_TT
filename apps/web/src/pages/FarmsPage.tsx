@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Ref, UIEvent } from 'react';
 import {
   Chart as ChartJS,
@@ -72,7 +72,7 @@ const getFarmName = (field: Field): string => {
 };
 
 const getFarmOwnerName = (field: Field): string => {
-  const owner = (field as any)?.farmV2?.owner ?? (field as any)?.farm?.owner ?? null;
+  const owner = field.farmV2?.owner ?? field.farm?.owner ?? null;
   const name = owner ? `${owner.lastName ?? ''} ${owner.firstName ?? ''}`.trim() : '';
   return name || owner?.email || '';
 };
@@ -89,7 +89,9 @@ const getTargetYieldLabel = (season: CropSeason | null): string => {
   const raw = season?.yieldExpectation ?? null;
   const num = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isFinite(num)) return '';
-  return `${num.toLocaleString('ja-JP', { maximumFractionDigits: 1 })} kg/10a`;
+  // Xarvioの yieldExpectation が t/10a 相当(例: 0.55 => 550kg/10a)で返るケースがあるため補正
+  const kgPer10a = num > 0 && num < 10 ? num * 1000 : num;
+  return `${kgPer10a.toLocaleString('ja-JP', { maximumFractionDigits: 1 })}`;
 };
 
 const isImageAttachment = (att: { mimeType?: string | null; contentType?: string | null; fileName?: string | null; url?: string }) => {
@@ -407,6 +409,10 @@ export function FarmsPage() {
     combinedFetchMaxAttempts,
     combinedRetryCountdown,
   } = useData();
+  const [seasonView, setSeasonView] = useState<'active' | 'closed'>('active');
+  const [closedCombinedOut, setClosedCombinedOut] = useState<any | null>(null);
+  const [closedLoading, setClosedLoading] = useState(false);
+  const [closedError, setClosedError] = useState<string | null>(null);
   // ソート用の状態
   type SortConfig = { key: string; direction: 'ascending' | 'descending' } | null;
   const [sortConfig, setSortConfig] = useState<SortConfig>({
@@ -438,6 +444,58 @@ export function FarmsPage() {
   const [showTableScrollbar, setShowTableScrollbar] = useState(false);
   const isSyncingScrollRef = useRef(false);
 
+  useEffect(() => {
+    // when farms selection changes, reset closed view cache
+    setClosedCombinedOut(null);
+    setClosedError(null);
+    setSelectedFieldIds(new Set());
+  }, [submittedFarms]);
+
+  const fetchClosedCombined = useCallback(async () => {
+    if (!auth) return;
+    if (submittedFarms.length === 0) return;
+    setClosedLoading(true);
+    setClosedError(null);
+    try {
+      const res = await fetch(withApiBase('/combined-fields'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          login_token: auth.login.login_token,
+          api_token: auth.api_token,
+          farm_uuids: submittedFarms,
+          languageCode: 'ja',
+          countryCode: 'JP',
+          cropSeasonLifeCycleStates: ['CLOSED'],
+          withBoundarySvg: true,
+          stream: false,
+          includeTasks: false,
+          includeTokens: false,
+        }),
+      });
+      const out = await res.json();
+      if (!res.ok || out?.ok === false) {
+        const detail = out?.detail ?? out?.message ?? out?.error ?? `HTTP ${res.status}`;
+        throw new Error(detail);
+      }
+      setClosedCombinedOut(out);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : '過去作期の取得に失敗しました。';
+      setClosedError(message);
+    } finally {
+      setClosedLoading(false);
+    }
+  }, [auth, submittedFarms]);
+
+  useEffect(() => {
+    if (seasonView !== 'closed') return;
+    if (closedCombinedOut) return;
+    if (closedLoading) return;
+    fetchClosedCombined();
+  }, [seasonView, closedCombinedOut, closedLoading, fetchClosedCombined]);
+
+  const combinedOutForView = seasonView === 'closed' ? closedCombinedOut : combinedOut;
+
   const {
     paginatedFieldSeasonPairs,
     sortedFieldSeasonPairs,
@@ -447,7 +505,7 @@ export function FarmsPage() {
     rowsPerPage,
     setCurrentPage,
     setRowsPerPage,
-  } = usePaginatedFields(combinedOut, sortConfig);
+  } = usePaginatedFields(combinedOutForView, sortConfig, { hideEmptySeasons: seasonView === 'closed' });
 
   const requestSort = (key: string) => {
     let direction: 'ascending' | 'descending' = 'ascending';
@@ -973,13 +1031,15 @@ export function FarmsPage() {
     });
   };
 
-  const showLoading = combinedLoading;
-  const loadingMessage = formatCombinedLoadingMessage(
-    '圃場データ',
-    combinedFetchAttempt,
-    combinedFetchMaxAttempts,
-    combinedRetryCountdown,
-  );
+  const showLoading = combinedLoading || closedLoading;
+  const loadingMessage = closedLoading
+    ? '過去作期の圃場データを取得しています...'
+    : formatCombinedLoadingMessage(
+        '圃場データ',
+        combinedFetchAttempt,
+        combinedFetchMaxAttempts,
+        combinedRetryCountdown,
+      );
 
   const handlePageChange = (newPage: number) => {
     if (newPage >= 1 && newPage <= totalPages) setCurrentPage(newPage);
@@ -1227,6 +1287,38 @@ export function FarmsPage() {
     <div className="farms-page-container">
       {showLoading && <LoadingOverlay message={loadingMessage} />}
       <h2>圃場情報</h2>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.75rem' }}>
+        <span style={{ color: '#b9b9c6' }}>作期表示:</span>
+        <button
+          type="button"
+          className={`fields-action-btn${seasonView === 'active' ? ' fields-action-btn--accent' : ''}`}
+          onClick={() => {
+            setSeasonView('active');
+            fetchCombinedDataIfNeeded({ includeTasks: false, force: true });
+            setSelectedFieldIds(new Set());
+          }}
+        >
+          現在/予定
+        </button>
+        <button
+          type="button"
+          className={`fields-action-btn${seasonView === 'closed' ? ' fields-action-btn--accent' : ''}`}
+          onClick={() => {
+            setSeasonView('closed');
+            setSelectedFieldIds(new Set());
+          }}
+        >
+          過去(完了)
+        </button>
+        {seasonView === 'closed' && (
+          <button type="button" className="fields-action-btn" onClick={fetchClosedCombined} disabled={closedLoading}>
+            再取得
+          </button>
+        )}
+        {seasonView === 'closed' && closedError && (
+          <span style={{ color: '#ff9e9e' }}>過去作期の取得に失敗: {closedError}</span>
+        )}
+      </div>
       <div className="risk-summary-card">
         <div className="risk-summary-header">
           <div>
@@ -1541,7 +1633,7 @@ export function FarmsPage() {
 
 type SortConfig = { key: string; direction: 'ascending' | 'descending' } | null;
 
-function usePaginatedFields(combinedOut: any, sortConfig: SortConfig) {
+function usePaginatedFields(combinedOut: any, sortConfig: SortConfig, opts?: { hideEmptySeasons?: boolean }) {
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(50);
 
@@ -1602,12 +1694,12 @@ function usePaginatedFields(combinedOut: any, sortConfig: SortConfig) {
       const seasons = field.cropSeasonsV2 ?? [];
       if (seasons.length > 0) {
         seasons.forEach((season: CropSeason) => acc.push({ field, season }));
-      } else {
+      } else if (!opts?.hideEmptySeasons) {
         acc.push({ field, season: null });
       }
       return acc;
     }, []);
-  }, [allFields]);
+  }, [allFields, opts?.hideEmptySeasons]);
 
   // ソート用に「次の生育ステージ」を事前に計算
   const allFieldSeasonPairsWithNextStage = useMemo(() => {

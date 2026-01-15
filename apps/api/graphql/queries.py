@@ -37,7 +37,7 @@ query CombinedDataBase(
     uuid
     name
     area
-    farmV2 { uuid name latitude longitude }
+    farmV2 { uuid name latitude longitude owner { firstName lastName email } }
     boundary: boundary @include(if: $withBoundary)
     cropSeasonsV2(lifecycleState: $cropSeasonLifeCycleStates) {
       uuid
