@@ -91,7 +91,7 @@ const getTargetYieldLabel = (season: CropSeason | null): string => {
   if (!Number.isFinite(num)) return '';
   // Xarvioの yieldExpectation が t/10a 相当(例: 0.55 => 550kg/10a)で返るケースがあるため補正
   const kgPer10a = num > 0 && num < 10 ? num * 1000 : num;
-  return `${kgPer10a.toLocaleString('ja-JP', { maximumFractionDigits: 1 })}`;
+  return `${kgPer10a.toLocaleString('ja-JP', { maximumFractionDigits: 1 })} kg/10a`;
 };
 
 const isImageAttachment = (att: { mimeType?: string | null; contentType?: string | null; fileName?: string | null; url?: string }) => {
