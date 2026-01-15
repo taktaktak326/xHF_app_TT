@@ -42,6 +42,8 @@ query CombinedDataBase(
     cropSeasonsV2(lifecycleState: $cropSeasonLifeCycleStates) {
       uuid
       startDate
+      yield
+      yieldExpectation
       lifecycleState
       crop(languageCode: $languageCode) { uuid name }
       variety(languageCode: $languageCode) { name }
@@ -220,6 +222,8 @@ query CombinedFieldData(
     cropSeasonsV2(lifecycleState: $cropSeasonLifeCycleStates) @include(if: $withCropSeasonsV2) {
       uuid
       startDate
+      yield
+      yieldExpectation
       lifecycleState
       crop(languageCode: $languageCode) { uuid name }
       variety(languageCode: $languageCode) { name }

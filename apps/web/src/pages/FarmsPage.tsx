@@ -86,7 +86,7 @@ const getBbch89Date = (season: CropSeason | null): string => {
 };
 
 const getTargetYieldLabel = (season: CropSeason | null): string => {
-  const raw = (season as any)?.yieldExpectation ?? (season as any)?.yield_expectation ?? null;
+  const raw = season?.yieldExpectation ?? null;
   const num = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isFinite(num)) return '';
   return `${num.toLocaleString('ja-JP', { maximumFractionDigits: 1 })} kg/10a`;

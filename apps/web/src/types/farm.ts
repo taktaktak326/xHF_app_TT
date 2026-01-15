@@ -150,6 +150,8 @@ export type BaseTask = {
 export type CropSeason = {
   uuid: string;
   startDate: string;
+  yield?: number | null;
+  yieldExpectation?: number | null;
   crop: Crop;
   variety: Variety;
   activeGrowthStage: ActiveGrowthStage | null;
