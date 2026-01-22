@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useFarms } from '../context/FarmContext';
 import { useData } from '../context/DataContext';
@@ -71,6 +71,44 @@ export function FarmSelector() {
     );
   }, [farms, searchTerm, sortKey, collator]);
 
+  const allFarmIds = useMemo(
+    () => farms.map((farm) => String(farm.uuid ?? '')).filter(Boolean),
+    [farms],
+  );
+
+  const filteredFarmIds = useMemo(
+    () => filteredFarms.map((farm) => String(farm.uuid ?? '')).filter(Boolean),
+    [filteredFarms],
+  );
+
+  const selectedFarmIdSet = useMemo(() => new Set(selectedFarms), [selectedFarms]);
+
+  const allSelectedCount = useMemo(
+    () => allFarmIds.reduce((acc, id) => acc + (selectedFarmIdSet.has(id) ? 1 : 0), 0),
+    [allFarmIds, selectedFarmIdSet],
+  );
+
+  const visibleSelectedCount = useMemo(
+    () => filteredFarmIds.reduce((acc, id) => acc + (selectedFarmIdSet.has(id) ? 1 : 0), 0),
+    [filteredFarmIds, selectedFarmIdSet],
+  );
+
+  const isAllSelected = allFarmIds.length > 0 && allSelectedCount === allFarmIds.length;
+  const isAllVisibleSelected = filteredFarmIds.length > 0 && visibleSelectedCount === filteredFarmIds.length;
+
+  const allToggleRef = useRef<HTMLInputElement | null>(null);
+  const visibleToggleRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!allToggleRef.current) return;
+    allToggleRef.current.indeterminate = allSelectedCount > 0 && !isAllSelected;
+  }, [allSelectedCount, isAllSelected]);
+
+  useEffect(() => {
+    if (!visibleToggleRef.current) return;
+    visibleToggleRef.current.indeterminate = visibleSelectedCount > 0 && !isAllVisibleSelected;
+  }, [visibleSelectedCount, isAllVisibleSelected]);
+
   const selectedFarmNames = useMemo(() => {
     const selectedSet = new Set(selectedFarms);
     return farms
@@ -129,6 +167,38 @@ export function FarmSelector() {
     setSelectedFarms(newSelected);
   }
 
+  const setSelectedFarmIdSet = (next: Set<string>) => {
+    const ordered = allFarmIds.filter((id) => next.has(id));
+    setSelectedFarms(ordered);
+  };
+
+  const selectAllFarms = () => {
+    if (allFarmIds.length === 0) return;
+    if (allFarmIds.length >= 20) {
+      const ok = window.confirm(`全${allFarmIds.length}件の農場を選択します。よろしいですか？`);
+      if (!ok) return;
+    }
+    setSelectedFarms(allFarmIds);
+  };
+
+  const clearAllFarms = () => {
+    setSelectedFarms([]);
+  };
+
+  const selectVisibleFarms = () => {
+    if (filteredFarmIds.length === 0) return;
+    const next = new Set(selectedFarms);
+    filteredFarmIds.forEach((id) => next.add(id));
+    setSelectedFarmIdSet(next);
+  };
+
+  const clearVisibleFarms = () => {
+    if (filteredFarmIds.length === 0) return;
+    const next = new Set(selectedFarms);
+    filteredFarmIds.forEach((id) => next.delete(id));
+    setSelectedFarmIdSet(next);
+  };
+
   return (
     <div className="farm-selection-container">
       <div
@@ -182,14 +252,61 @@ export function FarmSelector() {
               onClick={(e) => e.stopPropagation()} // ヘッダーのクリックイベントが発火しないように
             />
             <button
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 submitSelectedFarms(); // ★ 選択を「確定」する
                 setDropdownOpen(false);
               }}
               disabled={selectedFarms.length === 0}
-              style={{ marginLeft: 'auto', backgroundColor: '#646cff', color: 'white' }}
+              className="fields-action-btn fields-action-btn--accent farm-dropdown-submit"
             >データを取得</button>
+
+            <div className="farm-dropdown-bulk">
+              <label className="farm-bulk-toggle" title="全農場を選択/解除">
+                <input
+                  ref={allToggleRef}
+                  type="checkbox"
+                  checked={isAllSelected}
+                  onChange={(event) => {
+                    event.stopPropagation();
+                    if (event.target.checked) selectAllFarms();
+                    else clearAllFarms();
+                  }}
+                />
+                全件 <strong>{allFarmIds.length}</strong>
+              </label>
+
+              <label className="farm-bulk-toggle" title="検索結果(表示中)を選択/解除">
+                <input
+                  ref={visibleToggleRef}
+                  type="checkbox"
+                  checked={isAllVisibleSelected}
+                  onChange={(event) => {
+                    event.stopPropagation();
+                    if (event.target.checked) selectVisibleFarms();
+                    else clearVisibleFarms();
+                  }}
+                />
+                表示中 <strong>{filteredFarmIds.length}</strong>
+              </label>
+
+              <button
+                type="button"
+                className="fields-action-btn"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  clearAllFarms();
+                }}
+                disabled={selectedFarms.length === 0}
+              >
+                選択クリア
+              </button>
+
+              <span className="farm-bulk-meta">
+                選択中: <strong>{selectedFarms.length}</strong> / 表示中の選択: <strong>{visibleSelectedCount}</strong>
+              </span>
+            </div>
           </div>
 
           {loading && <p>農場読み込み中...</p>}

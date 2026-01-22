@@ -48,7 +48,7 @@
 | POST | `/biomass-ndvi` | NDVI 値取得 (GraphQL)。|
 | POST | `/biomass-lai` | LAI 取得 (REST)。|
 | POST | `/field-notes` | 圃場メモ取得。|
-| POST | `/weather-by-field` | 天気・散布適性データ取得。|
+| POST | `/weather-by-field` | 天気・散布適性データ取得（`weatherV2`: HISTORIC/FORECAST + `sprayWeather`）。|
 | GET/DELETE/POST | `/cache/graphql/*` | GraphQL レスポンスの簡易キャッシュ閲覧／削除。|
 | GET | `/healthz` / `/api/healthz` | ヘルスチェック。|
 

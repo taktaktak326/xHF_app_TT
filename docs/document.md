@@ -60,17 +60,23 @@
 
 2. **フロントエンド (Cloudflare Pages + Wrangler)**
 
-   - ビルド時に API の向き先を指定してデプロイする
+   - ビルド時に API の向き先を指定してデプロイする（この構成では Pages 側で `/api` をプロキシしないため、フロントは `VITE_API_BASE` に指定した API に直接アクセスします）
    ```bash
    cd /Users/takuya/Desktop/xhf-app
-   VITE_API_BASE=https://xhf-app-tt.onrender.com/api npm run build --workspace=web
-   npx wrangler pages deploy apps/web/dist --project-name xhf-app-tt
+   VITE_API_BASE=https://xhf-app-tt.onrender.com/api npm run build --workspace web
+   # 本番ドメイン (xhf-app-tt.pages.dev) に反映する場合
+   npx wrangler pages deploy apps/web/dist --project-name xhf-app-tt --branch main
    ```
 
 デプロイ後の動作確認:
 
 1. `curl https://xhf-app-tt.onrender.com/api/healthz` で `{ "ok": true }` が返ることを確認。
-2. `https://xhf-app-tt.pages.dev` でログインし、`/api/*` の機能が正常に動くか確認。
+2. `https://xhf-app-tt.pages.dev` でログインし、画面操作で API 呼び出しが正常に動くことを確認（通信先は `VITE_API_BASE` で指定した Render の `.../api`）。
 
 キャッシュの削除
 curl -X POST https://xhf-app-tt.onrender.com/api/cache/graphql/clear
+
+---
+## デプロイ運用方針
+
+このプロジェクトの本番反映は **Render + Cloudflare Pages（GitHub 連携）** を前提にします。Firebase / Cloud Run は使用しません。

@@ -410,11 +410,15 @@ export function FarmsPage() {
     combinedRetryCountdown,
   } = useData();
   const [seasonView, setSeasonView] = useState<'active' | 'closed'>('active');
+  const [hideNoSeason, setHideNoSeason] = useState(false);
+  const [fieldQuery, setFieldQuery] = useState('');
+  const [fieldPrefecture, setFieldPrefecture] = useState('');
+  const [fieldCrop, setFieldCrop] = useState('');
+  const [fieldRiskTier, setFieldRiskTier] = useState<RiskTierFilter>('all');
   const [closedCombinedOut, setClosedCombinedOut] = useState<any | null>(null);
   const [closedLoading, setClosedLoading] = useState(false);
   const [closedError, setClosedError] = useState<string | null>(null);
   // ソート用の状態
-  type SortConfig = { key: string; direction: 'ascending' | 'descending' } | null;
   const [sortConfig, setSortConfig] = useState<SortConfig>({
     key: 'field.name',
     direction: 'ascending',
@@ -449,6 +453,11 @@ export function FarmsPage() {
     setClosedCombinedOut(null);
     setClosedError(null);
     setSelectedFieldIds(new Set());
+    setHideNoSeason(false);
+    setFieldQuery('');
+    setFieldPrefecture('');
+    setFieldCrop('');
+    setFieldRiskTier('all');
   }, [submittedFarms]);
 
   const fetchClosedCombined = useCallback(async () => {
@@ -500,12 +509,22 @@ export function FarmsPage() {
     paginatedFieldSeasonPairs,
     sortedFieldSeasonPairs,
     allFieldSeasonPairsWithNextStage,
+    filteredFieldSeasonPairsWithNextStage,
     totalPages,
     currentPage,
     rowsPerPage,
     setCurrentPage,
     setRowsPerPage,
-  } = usePaginatedFields(combinedOutForView, sortConfig, { hideEmptySeasons: seasonView === 'closed' });
+  } = usePaginatedFields(combinedOutForView, sortConfig, {
+    hideEmptySeasons: seasonView === 'closed' || hideNoSeason,
+    locationByFieldUuid: prefCityByFieldUuid,
+    filters: {
+      query: fieldQuery,
+      prefecture: fieldPrefecture,
+      crop: fieldCrop,
+      risk: fieldRiskTier,
+    },
+  });
 
   const requestSort = (key: string) => {
     let direction: 'ascending' | 'descending' = 'ascending';
@@ -986,13 +1005,18 @@ export function FarmsPage() {
   };
 
   const selectedFieldSeasonPairs = useMemo(
-    () => sortedFieldSeasonPairs.filter(pair => selectedFieldIds.has(pair.field.uuid)),
-    [sortedFieldSeasonPairs, selectedFieldIds],
+    () => allFieldSeasonPairsWithNextStage.filter(pair => selectedFieldIds.has(pair.field.uuid)),
+    [allFieldSeasonPairsWithNextStage, selectedFieldIds],
   );
 
   const uniqueFieldIds = useMemo(
     () => Array.from(new Set(sortedFieldSeasonPairs.map(pair => pair.field.uuid))),
     [sortedFieldSeasonPairs],
+  );
+
+  const allUniqueFieldIds = useMemo(
+    () => Array.from(new Set(allFieldSeasonPairsWithNextStage.map(pair => pair.field.uuid))),
+    [allFieldSeasonPairsWithNextStage],
   );
 
   const pageFieldIds = useMemo(
@@ -1199,7 +1223,7 @@ export function FarmsPage() {
     const worker = prefCityWorkerRef.current;
     if (!worker) return;
     if (!prefCityDatasetReady) return;
-    sortedFieldSeasonPairs.forEach(({ field }) => {
+    allFieldSeasonPairsWithNextStage.forEach(({ field }) => {
       if (!field?.uuid) return;
       const hasPrefCity = Boolean(field.location?.prefecture) && Boolean(field.location?.municipality);
       if (hasPrefCity) return;
@@ -1212,7 +1236,34 @@ export function FarmsPage() {
       prefCityPendingRef.current.add(field.uuid);
       worker.postMessage({ type: 'lookup', id: field.uuid, lat, lon });
     });
-  }, [prefCityByFieldUuid, prefCityDatasetReady, sortedFieldSeasonPairs]);
+  }, [allFieldSeasonPairsWithNextStage, prefCityByFieldUuid, prefCityDatasetReady]);
+
+  const { prefectures: availablePrefectures, crops: availableCrops } = useMemo(() => {
+    const prefSet = new Set<string>();
+    const cropSet = new Set<string>();
+    allFieldSeasonPairsWithNextStage.forEach(({ field, season }) => {
+      const locationOverride = prefCityByFieldUuid[field.uuid];
+      const effectiveLocation = locationOverride
+        ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
+        : field.location;
+      const pref = formatPrefectureDisplay(effectiveLocation).replace(/[＊*]/g, '').trim();
+      if (pref) prefSet.add(pref);
+      const crop = (season?.crop?.name ?? '').trim();
+      if (crop) cropSet.add(crop);
+    });
+    const prefectures = Array.from(prefSet).sort((a, b) => a.localeCompare(b, 'ja'));
+    const crops = Array.from(cropSet).sort((a, b) => a.localeCompare(b, 'ja'));
+    return { prefectures, crops };
+  }, [allFieldSeasonPairsWithNextStage, prefCityByFieldUuid]);
+
+  const clearFieldFilters = () => {
+    setFieldQuery('');
+    setFieldPrefecture('');
+    setFieldCrop('');
+    setFieldRiskTier('all');
+    setHideNoSeason(false);
+    setCurrentPage(1);
+  };
 
   const downloadAsCsv = () => {
     const csvEscape = (value: unknown) => {
@@ -1430,7 +1481,87 @@ export function FarmsPage() {
       ) : <p>ヘッダーのドロップダウンから農場を選択してください。</p>}
 
       {allFieldSeasonPairsWithNextStage.length > 0 && (
-        <PlantingStackedChart fieldSeasonPairs={allFieldSeasonPairsWithNextStage} />
+        <div className="fields-filters">
+          <div className="fields-filters__row">
+            <input
+              className="fields-filter-input"
+              value={fieldQuery}
+              onChange={(event) => {
+                setFieldQuery(event.target.value);
+                setCurrentPage(1);
+              }}
+              placeholder="検索: 圃場名/UUID/農場/作物/住所…"
+            />
+            <select
+              className="fields-filter-select"
+              value={fieldPrefecture}
+              onChange={(event) => {
+                setFieldPrefecture(event.target.value);
+                setCurrentPage(1);
+              }}
+            >
+              <option value="">都道府県: すべて</option>
+              {availablePrefectures.map((pref) => (
+                <option key={pref} value={pref}>
+                  {pref}
+                </option>
+              ))}
+            </select>
+            <select
+              className="fields-filter-select"
+              value={fieldCrop}
+              onChange={(event) => {
+                setFieldCrop(event.target.value);
+                setCurrentPage(1);
+              }}
+            >
+              <option value="">作物: すべて</option>
+              {availableCrops.map((crop) => (
+                <option key={crop} value={crop}>
+                  {crop}
+                </option>
+              ))}
+            </select>
+            <select
+              className="fields-filter-select"
+              value={fieldRiskTier}
+              onChange={(event) => {
+                setFieldRiskTier(event.target.value as RiskTierFilter);
+                setCurrentPage(1);
+              }}
+            >
+              <option value="all">2週間リスク: すべて</option>
+              <option value="high">高</option>
+              <option value="medium">中</option>
+              <option value="low">低</option>
+              <option value="other">他</option>
+              <option value="none">なし</option>
+            </select>
+            <label className="fields-filter-checkbox">
+              <input
+                type="checkbox"
+                checked={hideNoSeason || seasonView === 'closed'}
+                disabled={seasonView === 'closed'}
+                onChange={(event) => {
+                  setHideNoSeason(event.target.checked);
+                  setCurrentPage(1);
+                }}
+              />
+              作付なしを除外
+            </label>
+            <button type="button" className="fields-action-btn" onClick={clearFieldFilters}>
+              クリア
+            </button>
+          </div>
+          <div className="fields-filters__meta">
+            表示: <strong>{uniqueFieldIds.length}</strong> 圃場 / 全体: <strong>{allUniqueFieldIds.length}</strong> 圃場 ・行数:{' '}
+            <strong>{sortedFieldSeasonPairs.length}</strong> / <strong>{allFieldSeasonPairsWithNextStage.length}</strong>
+          </div>
+        </div>
+      )}
+
+      {filteredFieldSeasonPairsWithNextStage.length > 0 && (
+        <PlantingStackedChart fieldSeasonPairs={sortedFieldSeasonPairs} />
       )}
 
       {/* 圃場データ取得結果表示エリア */}
@@ -1447,7 +1578,8 @@ export function FarmsPage() {
           <div className="fields-actions">
             <div className="fields-actions__meta">
               <div>
-                選択: <strong>{selectedFieldIds.size}</strong> 圃場 / 全体: <strong>{uniqueFieldIds.length}</strong> 圃場
+                選択: <strong>{selectedFieldIds.size}</strong> 圃場 / 表示: <strong>{uniqueFieldIds.length}</strong> 圃場 / 全体:{' '}
+                <strong>{allUniqueFieldIds.length}</strong> 圃場
               </div>
               <div className="fields-actions__hint">
                 Google My Maps 取り込み用のGeoJSONを出力します。
@@ -1457,9 +1589,9 @@ export function FarmsPage() {
               <button
                 type="button"
                 className="fields-action-btn fields-action-btn--primary"
-                onClick={() => downloadForMyMaps(sortedFieldSeasonPairs, 'all')}
+                onClick={() => downloadForMyMaps(sortedFieldSeasonPairs, 'displayed')}
               >
-                My Mapsダウンロード（全圃場）
+                My Mapsダウンロード（表示中）
               </button>
               <button
                 type="button"
@@ -1633,9 +1765,28 @@ export function FarmsPage() {
 
 type SortConfig = { key: string; direction: 'ascending' | 'descending' } | null;
 
-function usePaginatedFields(combinedOut: any, sortConfig: SortConfig, opts?: { hideEmptySeasons?: boolean }) {
+type RiskTierFilter = 'all' | 'high' | 'medium' | 'low' | 'other' | 'none';
+
+type FieldListFilters = {
+  query: string;
+  prefecture: string;
+  crop: string;
+  risk: RiskTierFilter;
+};
+
+function usePaginatedFields(
+  combinedOut: any,
+  sortConfig: SortConfig,
+  opts?: {
+    hideEmptySeasons?: boolean;
+    locationByFieldUuid?: Record<string, Partial<NonNullable<Field['location']>>>;
+    filters?: FieldListFilters;
+  },
+) {
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(50);
+  const locationByFieldUuid = opts?.locationByFieldUuid ?? {};
+  const filters = opts?.filters ?? { query: '', prefecture: '', crop: '', risk: 'all' as const };
 
   const allFields = useMemo((): Field[] => {
     const mergeSeasons = (a: any, b: any) => {
@@ -1719,9 +1870,95 @@ function usePaginatedFields(combinedOut: any, sortConfig: SortConfig, opts?: { h
     });
   }, [allFieldSeasonPairs]);
 
+  const filteredFieldSeasonPairsWithNextStage = useMemo(() => {
+    const normalizeValue = (value: unknown) =>
+      String(value ?? '')
+        .replace(/\u3000/g, ' ')
+        .replace(/[＊*]/g, '')
+        .trim();
+    const normalizeComparable = (value: unknown) => normalizeValue(value).toLowerCase();
+
+    const tokens = normalizeValue(filters.query)
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((token) => token.toLowerCase());
+
+    const selectedPrefecture = normalizeValue(filters.prefecture);
+    const selectedCrop = normalizeValue(filters.crop);
+    const selectedRisk = filters.risk;
+
+    const getRiskTier = (season: CropSeason | null): Exclude<RiskTierFilter, 'all'> => {
+      const alerts = getAlertsForSeason(season, 14);
+      if (alerts.length === 0) return 'none';
+      let hasHigh = false;
+      let hasMedium = false;
+      let hasLow = false;
+      let hasOther = false;
+      alerts.forEach((alert) => {
+        const statusClass = getStatusBadgeClass((alert?.status ?? '').toUpperCase());
+        if (statusClass === 'high' || statusClass === 'medium-high') hasHigh = true;
+        else if (statusClass === 'medium') hasMedium = true;
+        else if (statusClass === 'medium-low' || statusClass === 'low') hasLow = true;
+        else hasOther = true;
+      });
+      if (hasHigh) return 'high';
+      if (hasMedium) return 'medium';
+      if (hasLow) return 'low';
+      return hasOther ? 'other' : 'none';
+    };
+
+    return allFieldSeasonPairsWithNextStage.filter(({ field, season }) => {
+      const locationOverride = locationByFieldUuid[field.uuid];
+      const effectiveLocation = locationOverride
+        ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
+        : field.location;
+
+      if (selectedPrefecture) {
+        const pref = normalizeValue(formatPrefectureDisplay(effectiveLocation));
+        if (pref !== selectedPrefecture) return false;
+      }
+
+      if (selectedCrop) {
+        const crop = normalizeValue(season?.crop?.name ?? '');
+        if (crop !== selectedCrop) return false;
+      }
+
+      if (selectedRisk !== 'all') {
+        const tier = getRiskTier(season);
+        if (tier !== selectedRisk) return false;
+      }
+
+      if (tokens.length > 0) {
+        const haystack = normalizeComparable(
+          [
+            field.name,
+            field.uuid,
+            getFarmName(field),
+            getFarmOwnerName(field),
+            formatPrefectureDisplay(effectiveLocation),
+            formatMunicipalityDisplay(effectiveLocation),
+            season?.crop?.name ?? '',
+            season?.variety?.name ?? '',
+          ].join(' '),
+        );
+        const ok = tokens.every((token) => haystack.includes(token));
+        if (!ok) return false;
+      }
+
+      return true;
+    });
+  }, [
+    allFieldSeasonPairsWithNextStage,
+    filters.crop,
+    filters.prefecture,
+    filters.query,
+    filters.risk,
+    locationByFieldUuid,
+  ]);
+
   // ソートされたデータを計算
   const sortedFieldSeasonPairs = useMemo(() => {
-    const sortableItems: FieldSeasonPair[] = [...allFieldSeasonPairsWithNextStage];
+    const sortableItems: FieldSeasonPair[] = [...filteredFieldSeasonPairsWithNextStage];
     if (sortConfig !== null) {
       sortableItems.sort((a: FieldSeasonPair, b: FieldSeasonPair) => {
         const getNestedValue = (obj: any, path: string) =>
@@ -1743,7 +1980,7 @@ function usePaginatedFields(combinedOut: any, sortConfig: SortConfig, opts?: { h
       });
     }
     return sortableItems;
-  }, [allFieldSeasonPairsWithNextStage, sortConfig]);
+  }, [filteredFieldSeasonPairsWithNextStage, sortConfig]);
 
   // 現在のページに表示するデータを計算
   const paginatedFieldSeasonPairs = useMemo(() => {
@@ -1764,6 +2001,7 @@ function usePaginatedFields(combinedOut: any, sortConfig: SortConfig, opts?: { h
     paginatedFieldSeasonPairs,
     sortedFieldSeasonPairs,
     allFieldSeasonPairsWithNextStage,
+    filteredFieldSeasonPairsWithNextStage,
     totalPages,
     currentPage,
     rowsPerPage,

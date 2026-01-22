@@ -81,16 +81,26 @@ query CombinedDataBase(
 WEATHER_HISTORIC_FORECAST_DAILY = """
 query WeatherHistoricForecastDaily($fieldUuid: UUID!, $fromDate: Date!, $tillDate: Date!) {
   fieldV2(uuid: $fieldUuid) {
-    weatherHistoricForecastDaily: weather(type: [HISTORIC, FORECAST], fromDate: $fromDate, tillDate: $tillDate) {
+    weatherHistoricForecastDaily: weatherV2(
+      fromDate: $fromDate
+      tillDate: $tillDate
+      format: DAILY
+      type: [HISTORIC, FORECAST]
+    ) {
+      datetime
       date
+      airTempCAvg
       airTempCMax
       airTempCMin
-      airTempCAvg
       sunshineDurationH
       precipitationBestMm
+      precipitationProbabilityPct
       windSpeedMSAvg
       windDirectionDeg
       relativeHumidityPctAvg
+      relativeHumidityPctMax
+      relativeHumidityPctMin
+      leafWetnessDurationH
     }
   }
 }
@@ -99,7 +109,13 @@ query WeatherHistoricForecastDaily($fieldUuid: UUID!, $fromDate: Date!, $tillDat
 WEATHER_CLIMATOLOGY_DAILY = """
 query WeatherClimatologyDaily($fieldUuid: UUID!, $fromDate: Date!, $tillDate: Date!) {
   fieldV2(uuid: $fieldUuid) {
-    weatherClimatologyDaily: weather(type: [CLIMATOLOGY10Y], fromDate: $fromDate, tillDate: $tillDate) {
+    weatherClimatologyDaily: weatherV2(
+      fromDate: $fromDate
+      tillDate: $tillDate
+      format: DAILY
+      type: [CLIMATOLOGY10Y]
+    ) {
+      datetime
       date
       airTempCMax
       airTempCAvg
@@ -125,11 +141,21 @@ query SprayWeather($fieldUuid: UUID!, $fromDate: Date!, $tillDate: Date!) {
 WEATHER_HISTORIC_FORECAST_HOURLY = """
 query WeatherHistoricForecastHourly($fieldUuid: UUID!, $fromDate: Date!, $tillDate: Date!) {
   fieldV2(uuid: $fieldUuid) {
-    weatherHistoricForecastHourly: weather(type: [HISTORIC, FORECAST], format: HOURLY, fromDate: $fromDate, tillDate: $tillDate) {
+    weatherHistoricForecastHourly: weatherV2(
+      fromDate: $fromDate
+      tillDate: $tillDate
+      format: HOURLY
+      type: [HISTORIC, FORECAST]
+    ) {
+      datetime
       startDatetime
+      endDatetime
       airTempCAvg
+      precipitationBestMm
       windSpeedMSAvg
+      windDirectionDeg
       relativeHumidityPctAvg
+      leafWetnessBool
     }
   }
 }
