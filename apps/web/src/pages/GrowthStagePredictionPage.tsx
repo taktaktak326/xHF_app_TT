@@ -18,11 +18,14 @@ import ChartDataLabels from 'chartjs-plugin-datalabels';
 import zoomPlugin from 'chartjs-plugin-zoom';
 import annotationPlugin from 'chartjs-plugin-annotation';
 import 'chartjs-adapter-date-fns';
-import { ja } from 'date-fns/locale';
+import { enUS, ja } from 'date-fns/locale';
 import { format, startOfDay, subDays, addDays, differenceInCalendarDays } from 'date-fns';
 import { useData } from '../context/DataContext';
 import { useFarms } from '../context/FarmContext';
-import type { Field, CropSeason, CountryCropGrowthStagePrediction } from '../types/farm';
+import { useLanguage } from '../context/LanguageContext';
+import { tr } from '../i18n/runtime';
+import type { BaseTask, Field, CropSeason, CountryCropGrowthStagePrediction } from '../types/farm';
+import { getSessionCache, setSessionCache } from '../utils/sessionCache';
 import './FarmsPage.css'; // 共通スタイルをインポート
 import './GrowthStagePredictionPage.css';
 import LoadingOverlay from '../components/LoadingOverlay';
@@ -34,19 +37,24 @@ ChartJS.register(
   BarElement, TimeScale, TimeSeriesScale, ChartDataLabels, zoomPlugin, annotationPlugin
 );
 
+const PREF_CITY_CACHE_KEY = 'pref-city:by-field:v1';
+
 // =============================================================================
 // Type Definitions
 // =============================================================================
 
 type GroupedPrediction = {
   seasonUuid: string;
+  farmName: string;
   fieldName: string;
   cropName: string;
   varietyName: string;
   seasonStartDate: string;
+  plantingMethodCode: string | null;
   predictions: CountryCropGrowthStagePrediction[];
   prefecture: string | null;
   municipalityLabel: string | null;
+  tasks: Array<{ typeKey: string; task: BaseTask }>;
 };
 
 type ChartJSDataset = {
@@ -70,6 +78,44 @@ type UpcomingStageItem = {
   start: Date;
   end: Date;
 };
+
+type FieldCenter = {
+  latitude: number;
+  longitude: number;
+};
+
+const getFieldCenter = (field: Field): FieldCenter | null => {
+  const farmV2 = (field as any).farmV2 ?? (field as any).farm ?? null;
+  const farmCenter = farmV2 && typeof farmV2.latitude === 'number' && typeof farmV2.longitude === 'number'
+    ? { latitude: farmV2.latitude, longitude: farmV2.longitude }
+    : null;
+  const candidates = [field.location?.center, (field as any).center, (field as any).centroid, farmCenter];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate.latitude === 'number' && typeof candidate.longitude === 'number') {
+      return { latitude: candidate.latitude, longitude: candidate.longitude };
+    }
+  }
+  return null;
+};
+
+function formatMunicipalityDisplay(location: Field['location']): string {
+  if (!location) return '';
+  const parts: string[] = [];
+  if (location.municipality) {
+    parts.push(location.municipality);
+  }
+  if (location.subMunicipality) {
+    parts.push(location.subMunicipality);
+  }
+  const formatted = parts.join(' ').trim();
+  if (!formatted) return '';
+  return location.isApproximate ? `${formatted}*` : formatted;
+}
+
+function formatPrefectureDisplay(location: Field['location']): string {
+  if (!location?.prefecture) return '';
+  return location.isApproximate ? `${location.prefecture}*` : location.prefecture;
+}
 
 const selectFieldsFromCombinedOut = (combinedOut: any): Field[] => {
   const mergeSeasons = (a: any, b: any) => {
@@ -124,33 +170,221 @@ const selectFieldsFromCombinedOut = (combinedOut: any): Field[] => {
 
 const useGroupedPredictions = (): GroupedPrediction[] => {
   const { combinedOut } = useData();
+  const [locationByFieldUuid, setLocationByFieldUuid] = useState<Record<string, Partial<NonNullable<Field['location']>>>>(
+    () => getSessionCache<Record<string, Partial<NonNullable<Field['location']>>>>(PREF_CITY_CACHE_KEY) ?? {},
+  );
+  const prefCityWorkerRef = useRef<Worker | null>(null);
+  const prefCityPendingRef = useRef<Set<string>>(new Set());
+  const prefCityWarmupRetryRef = useRef(0);
+  const [prefCityDatasetReady, setPrefCityDatasetReady] = useState(false);
+  const [prefCityWarmupError, setPrefCityWarmupError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setSessionCache(PREF_CITY_CACHE_KEY, locationByFieldUuid);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [locationByFieldUuid]);
+
+  const fields = useMemo(() => selectFieldsFromCombinedOut(combinedOut), [combinedOut]);
+
+  const mergeLocationPreferNonEmpty = useCallback(
+    (base: Field['location'], override: Partial<NonNullable<Field['location']>> | undefined) => {
+      if (!override) return base;
+      const out: any = { ...(base ?? {}) };
+      Object.entries(override).forEach(([k, v]) => {
+        if (v === null || v === undefined) return;
+        if (typeof v === 'string' && v.trim() === '') return;
+        out[k] = v;
+      });
+      return out as Field['location'];
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (prefCityWorkerRef.current) return;
+    const worker = new Worker(new URL('../workers/prefCityReverseGeocode.ts', import.meta.url), { type: 'module' });
+    prefCityWorkerRef.current = worker;
+    let cancelled = false;
+    prefCityWarmupRetryRef.current = 0;
+
+    const supportsGzip = typeof (window as any).DecompressionStream !== 'undefined';
+    const datasetPath = supportsGzip ? '/pref_city_p5.topo.json.gz' : '/pref_city_p5.topo.json';
+    const datasetUrl = `${window.location.origin.replace(/\/$/, '')}${datasetPath}`;
+    async function preloadDataset(attempt: number) {
+      try {
+        const res = await fetch(datasetUrl, { cache: 'no-store' });
+        if (cancelled) return;
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf = await res.arrayBuffer();
+        if (cancelled) return;
+        worker.postMessage({ type: 'dataset', gz: buf }, [buf]);
+      } catch (err) {
+        if (cancelled) return;
+        if (import.meta.env.DEV) {
+          console.warn('[pref-city] dataset preload failed', { attempt, err });
+        }
+        if (attempt < 3) {
+          window.setTimeout(() => preloadDataset(attempt + 1), 800 * attempt);
+        }
+      }
+    }
+
+	    worker.onmessage = (event: MessageEvent<any>) => {
+      const data = event.data;
+      if (!data) return;
+      if (data.type === 'dataset_ack') {
+        worker.postMessage({ type: 'warmup' });
+        return;
+      }
+      if (data.type === 'warmup_done') {
+        if (!data.ok) {
+          setPrefCityDatasetReady(false);
+          setPrefCityWarmupError(String(data.error ?? 'unknown error'));
+          if (!cancelled && prefCityWarmupRetryRef.current < 2) {
+            prefCityWarmupRetryRef.current += 1;
+            window.setTimeout(() => preloadDataset(1), 800 * prefCityWarmupRetryRef.current);
+          }
+          return;
+        }
+        setPrefCityWarmupError(null);
+        setPrefCityDatasetReady(true);
+        return;
+      }
+      if (data.type === 'ready') {
+        setPrefCityDatasetReady(Boolean(data.loaded));
+        return;
+      }
+      if (data.type !== 'result') return;
+      const id = String(data.id ?? '');
+      prefCityPendingRef.current.delete(id);
+      if (!id) return;
+      if (data.error) {
+        if (import.meta.env.DEV) {
+          console.warn('[pref-city] lookup failed', { id, error: data.error });
+        }
+        return;
+      }
+      if (!data.location) return;
+	      setLocationByFieldUuid((prev) => ({
+	        ...prev,
+	        [id]: {
+          ...(prev[id] ?? {}),
+          prefecture: data.location.prefecture ?? null,
+          municipality: data.location.municipality ?? null,
+          subMunicipality: data.location.subMunicipality ?? null,
+          cityCode: data.location.cityCode ?? null,
+        },
+	      }));
+	    };
+	    worker.onerror = (e: any) => {
+	      const msg = String(e?.message ?? e ?? 'unknown worker error');
+	      setPrefCityDatasetReady(false);
+	      setPrefCityWarmupError(msg);
+	    };
+	    worker.postMessage({ type: 'init', baseUrl: window.location.origin });
+	    // Always request warmup as a fallback so the worker can fetch the dataset by itself
+	    // even if main-thread preload fails.
+	    worker.postMessage({ type: 'warmup' });
+	    preloadDataset(1);
+	    const warmupNudgeTimer = window.setTimeout(() => {
+	      if (!cancelled && !prefCityDatasetReady) {
+	        worker.postMessage({ type: 'warmup' });
+	      }
+	    }, 1500);
+	    return () => {
+	      window.clearTimeout(warmupNudgeTimer);
+	      worker.terminate();
+	      prefCityWorkerRef.current = null;
+	      prefCityPendingRef.current.clear();
+	      cancelled = true;
+	    };
+	  }, []);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    if (!prefCityWarmupError) return;
+    console.warn('[pref-city] warmup failed', { error: prefCityWarmupError });
+  }, [prefCityWarmupError]);
+
+  useEffect(() => {
+    const worker = prefCityWorkerRef.current;
+    if (!worker) return;
+    if (!prefCityDatasetReady) return;
+    fields.forEach((field) => {
+      if (!field?.uuid) return;
+      const hasPrefCity = Boolean(field.location?.prefecture) && Boolean(field.location?.municipality);
+      if (hasPrefCity) return;
+      if (locationByFieldUuid[field.uuid]) return;
+      if (prefCityPendingRef.current.has(field.uuid)) return;
+      const center = getFieldCenter(field);
+      const lat = center?.latitude;
+      const lon = center?.longitude;
+      if (typeof lat !== 'number' || typeof lon !== 'number') return;
+      prefCityPendingRef.current.add(field.uuid);
+      worker.postMessage({ type: 'lookup', id: field.uuid, lat, lon });
+    });
+  }, [fields, locationByFieldUuid, prefCityDatasetReady]);
 
   return useMemo(() => {
-    const fields = selectFieldsFromCombinedOut(combinedOut);
     if (!fields || fields.length === 0) return [];
 
-    const allPredictions = fields.flatMap(field =>
-      field.cropSeasonsV2
-        ?.filter((season: CropSeason) => season.countryCropGrowthStagePredictions && season.countryCropGrowthStagePredictions.length > 0)
-        .map((season: CropSeason) => ({
-          seasonUuid: season.uuid,
-          fieldName: field.name,
-          cropName: season.crop.name,
-          varietyName: season.variety.name,
-          seasonStartDate: season.startDate,
-          predictions: season.countryCropGrowthStagePredictions!,
-          prefecture: field.location?.prefecture ?? null,
-          municipalityLabel: [
-            field.location?.prefectureOffice,
-            field.location?.municipality,
-            field.location?.subMunicipality,
-          ].filter(Boolean).join(' ') || null,
-        })) ?? []
-    );
+    const allPredictions = fields.flatMap(field => {
+      const seasons = field.cropSeasonsV2 ?? [];
+      const seasonsWithPred = seasons.filter((season: CropSeason) =>
+        Array.isArray(season.countryCropGrowthStagePredictions) && season.countryCropGrowthStagePredictions.length > 0,
+      );
+      const attachCropEstablishToSeasonUuid = seasonsWithPred.length > 0 ? seasonsWithPred[0].uuid : null;
+
+        return seasons.map((season: CropSeason) => {
+          const locationOverride = locationByFieldUuid[field.uuid];
+          const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
+          const farmName = field.farmV2?.name ?? (field as any)?.farm?.name ?? '';
+          const cropEstablishmentTasks =
+            attachCropEstablishToSeasonUuid && season.uuid === attachCropEstablishToSeasonUuid
+              ? (field.cropEstablishments ?? [])
+              : [];
+          const sprayingTypeKeyForTask = (task: BaseTask) => {
+            const hint = (task.creationFlowHint ?? task.dosedMap?.creationFlowHint ?? '').toUpperCase();
+            if (hint === 'CROP_PROTECTION') return 'tasks.type.spraying_crop_protection';
+            if (hint === 'WEED_MANAGEMENT') return 'tasks.type.spraying_weed_management';
+            if (hint === 'NUTRITION_MANAGEMENT') return 'tasks.type.spraying_nutrition';
+            return 'tasks.type.spraying_other';
+          };
+          return {
+            seasonUuid: season.uuid,
+            farmName,
+            fieldName: field.name,
+            cropName: (season as any)?.crop?.name ?? '',
+            varietyName: (season as any)?.variety?.name ?? '',
+            seasonStartDate: season.startDate ?? '',
+          plantingMethodCode: season.cropEstablishmentMethodCode ?? null,
+          predictions: Array.isArray(season.countryCropGrowthStagePredictions) ? season.countryCropGrowthStagePredictions : [],
+          prefecture: formatPrefectureDisplay(effectiveLocation) || null,
+          municipalityLabel: formatMunicipalityDisplay(effectiveLocation) || null,
+          tasks: [
+            ...((cropEstablishmentTasks ?? []).map(task => ({ typeKey: 'tasks.type.crop_establishment', task }))),
+            ...((season.harvests ?? []).map(task => ({ typeKey: 'tasks.type.harvest', task }))),
+            ...((season.sprayingsV2 ?? []).map(task => ({ typeKey: sprayingTypeKeyForTask(task), task }))),
+            ...((season.waterManagementTasks ?? []).map(task => ({ typeKey: 'tasks.type.water_management', task }))),
+            ...((season.scoutingTasks ?? []).map(task => ({ typeKey: 'tasks.type.scouting', task }))),
+            ...((season.landPreparations ?? []).map(task => ({ typeKey: 'tasks.type.land_preparation', task }))),
+            ...((season.seedTreatmentTasks ?? []).map(task => ({ typeKey: 'tasks.type.seed_treatment', task }))),
+            ...((season.seedBoxTreatments ?? []).map(task => ({ typeKey: 'tasks.type.seed_box_treatment', task }))),
+          ],
+          };
+        });
+    });
 
     // 作付開始日でソート
-    return allPredictions.sort((a, b) => new Date(a.seasonStartDate).getTime() - new Date(b.seasonStartDate).getTime());
-  }, [combinedOut]);
+    return allPredictions.sort((a, b) => {
+      const aMs = Date.parse(a.seasonStartDate || '') || 0;
+      const bMs = Date.parse(b.seasonStartDate || '') || 0;
+      return aMs - bMs;
+    });
+  }, [fields, locationByFieldUuid, mergeLocationPreferNonEmpty]);
 };
 
 const useTimelineData = (groupedPredictions: GroupedPrediction[], enabledStages: string[]): TimelineData => {
@@ -185,7 +419,7 @@ const useTimelineData = (groupedPredictions: GroupedPrediction[], enabledStages:
               ...prediction,
               startMs,
               endMs,
-              stageName: prediction.cropGrowthStageV2?.name ?? '不明なステージ',
+              stageName: prediction.cropGrowthStageV2?.name ?? tr('gsp.stage.unknown'),
             };
           })
           .filter((p): p is NormalizedPrediction => Boolean(p));
@@ -288,30 +522,61 @@ export function GrowthStagePredictionPage() {
   const {
     combinedOut,
     combinedLoading,
+    combinedInProgress,
     combinedErr,
     combinedFetchAttempt,
     combinedFetchMaxAttempts,
     combinedRetryCountdown,
   } = useData();
   const { submittedFarms, fetchCombinedDataIfNeeded } = useFarms();
+  const { language, t } = useLanguage();
+  const collator = useMemo(() => new Intl.Collator(language === 'en' ? 'en' : 'ja'), [language]);
   const groupedPredictions = useGroupedPredictions();
   const [fieldQuery, setFieldQuery] = useState('');
   const [selectedCrop, setSelectedCrop] = useState<string>('ALL');
   const [selectedVariety, setSelectedVariety] = useState<string>('ALL');
   const [selectedPrefecture, setSelectedPrefecture] = useState<string>('ALL');
   const [selectedMunicipality, setSelectedMunicipality] = useState<string>('ALL');
+  const [predictionPresence, setPredictionPresence] = useState<'ALL' | 'HAS' | 'NONE'>('ALL');
   const [enabledStages, setEnabledStages] = useState<string[]>([]);
   const [rowsPerPage, setRowsPerPage] = useState<number>(10);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [tableRowsPerPage, setTableRowsPerPage] = useState<number>(10);
   const [tableCurrentPage, setTableCurrentPage] = useState<number>(1);
   const [isUpcomingExpanded, setIsUpcomingExpanded] = useState<boolean>(false);
+  const today = useMemo(() => startOfDay(new Date()), []);
+
+  const formatPlantingMethod = useCallback((methodCode: string | null | undefined) => {
+    if (!methodCode) return '-';
+    if (methodCode === 'TRANSPLANTING') return t('fmt.crop_method.transplanting');
+    if (methodCode === 'DIRECT_SEEDING') return t('fmt.crop_method.direct_seeding');
+    if (methodCode === 'MYKOS_DRY_DIRECT_SEEDING') return t('fmt.crop_method.mykos_dry_direct_seeding');
+    return methodCode;
+  }, [t]);
+
+  const TASK_TYPE_COLUMNS = useMemo(
+    () =>
+      [
+        { typeKey: 'tasks.type.crop_establishment', header: t('tasks.type.crop_establishment') },
+        { typeKey: 'tasks.type.land_preparation', header: t('tasks.type.land_preparation') },
+        { typeKey: 'tasks.type.seed_treatment', header: t('tasks.type.seed_treatment') },
+        { typeKey: 'tasks.type.seed_box_treatment', header: t('tasks.type.seed_box_treatment') },
+        { typeKey: 'tasks.type.spraying_crop_protection', header: t('tasks.type.spraying_crop_protection') },
+        { typeKey: 'tasks.type.spraying_weed_management', header: t('tasks.type.spraying_weed_management') },
+        { typeKey: 'tasks.type.spraying_nutrition', header: t('tasks.type.spraying_nutrition') },
+        { typeKey: 'tasks.type.spraying_other', header: t('tasks.type.spraying_other') },
+        { typeKey: 'tasks.type.water_management', header: t('tasks.type.water_management') },
+        { typeKey: 'tasks.type.scouting', header: t('tasks.type.scouting') },
+        { typeKey: 'tasks.type.harvest', header: t('tasks.type.harvest') },
+      ] as const,
+    [t]
+  );
 
   const cropOptions = useMemo(() => {
     const set = new Set<string>();
     groupedPredictions.forEach(group => set.add(group.cropName));
-    return Array.from(set).sort();
-  }, [groupedPredictions]);
+    return Array.from(set).sort(collator.compare);
+  }, [groupedPredictions, collator]);
 
   const varietyOptions = useMemo(() => {
     const targetGroups = selectedCrop === 'ALL'
@@ -319,8 +584,8 @@ export function GrowthStagePredictionPage() {
       : groupedPredictions.filter(group => group.cropName === selectedCrop);
     const set = new Set<string>();
     targetGroups.forEach(group => set.add(group.varietyName));
-    return Array.from(set).sort();
-  }, [groupedPredictions, selectedCrop]);
+    return Array.from(set).sort(collator.compare);
+  }, [groupedPredictions, selectedCrop, collator]);
 
   const prefectureOptions = useMemo(() => {
     const set = new Set<string>();
@@ -329,8 +594,8 @@ export function GrowthStagePredictionPage() {
         set.add(group.prefecture);
       }
     });
-    return Array.from(set).sort();
-  }, [groupedPredictions]);
+    return Array.from(set).sort(collator.compare);
+  }, [groupedPredictions, collator]);
 
   const municipalityOptions = useMemo(() => {
     const targetGroups = selectedPrefecture === 'ALL'
@@ -342,8 +607,8 @@ export function GrowthStagePredictionPage() {
         set.add(group.municipalityLabel);
       }
     });
-    return Array.from(set).sort();
-  }, [groupedPredictions, selectedPrefecture]);
+    return Array.from(set).sort(collator.compare);
+  }, [groupedPredictions, selectedPrefecture, collator]);
 
   useEffect(() => {
     if (selectedVariety === 'ALL') return;
@@ -366,19 +631,48 @@ export function GrowthStagePredictionPage() {
       const varietyMatch = selectedVariety === 'ALL' || group.varietyName === selectedVariety;
       const prefectureMatch = selectedPrefecture === 'ALL' || group.prefecture === selectedPrefecture;
       const municipalityMatch = selectedMunicipality === 'ALL' || group.municipalityLabel === selectedMunicipality;
+      const hasNextStagePrediction =
+        Array.isArray(group.predictions) &&
+        group.predictions.some((pred) => {
+          if (!pred?.index) return false;
+          const ms = Date.parse(pred.startDate);
+          return Number.isFinite(ms) && ms >= today.getTime();
+        });
+      const predictionMatch =
+        predictionPresence === 'ALL' ||
+        (predictionPresence === 'HAS' ? hasNextStagePrediction : !hasNextStagePrediction);
       const queryMatch =
         lowerQuery.length === 0 ||
         group.fieldName.toLowerCase().includes(lowerQuery) ||
         group.varietyName.toLowerCase().includes(lowerQuery) ||
         group.cropName.toLowerCase().includes(lowerQuery);
-      return cropMatch && varietyMatch && prefectureMatch && municipalityMatch && queryMatch;
+      return cropMatch && varietyMatch && prefectureMatch && municipalityMatch && predictionMatch && queryMatch;
     });
-  }, [groupedPredictions, selectedCrop, selectedVariety, selectedPrefecture, selectedMunicipality, fieldQuery]);
+  }, [
+    groupedPredictions,
+    selectedCrop,
+    selectedVariety,
+    selectedPrefecture,
+    selectedMunicipality,
+    predictionPresence,
+    fieldQuery,
+    today,
+  ]);
+
+  const activeTaskTypeColumns = useMemo(() => {
+    const used = new Set<string>();
+    filteredPredictions.forEach(group => {
+      group.tasks.forEach(({ typeKey, task }) => {
+        if (task.plannedDate) used.add(typeKey);
+      });
+    });
+    return TASK_TYPE_COLUMNS.filter(col => used.has(col.typeKey));
+  }, [TASK_TYPE_COLUMNS, filteredPredictions]);
 
   useEffect(() => {
     setCurrentPage(1);
     setTableCurrentPage(1);
-  }, [selectedCrop, selectedVariety, selectedPrefecture, selectedMunicipality, fieldQuery]);
+  }, [selectedCrop, selectedVariety, selectedPrefecture, selectedMunicipality, predictionPresence, fieldQuery]);
 
   const filteredCount = filteredPredictions.length;
   const totalPages = Math.max(1, Math.ceil(filteredCount / rowsPerPage));
@@ -479,7 +773,6 @@ export function GrowthStagePredictionPage() {
     });
   };
 
-  const today = useMemo(() => startOfDay(new Date()), []);
   const UPCOMING_WINDOW_DAYS = 21;
   const upcomingStages = useMemo((): UpcomingStageItem[] => {
     const limit = addDays(today, UPCOMING_WINDOW_DAYS);
@@ -529,22 +822,64 @@ export function GrowthStagePredictionPage() {
       stageDates[pred.index] = endLabel ? `${startLabel}〜${endLabel}` : startLabel;
     });
 
+    const taskDatesByTypeKey = new Map<string, string[]>();
+    group.tasks.forEach(({ typeKey, task }) => {
+      const iso = task.plannedDate;
+      if (!iso) return;
+      const ms = Date.parse(iso);
+      if (!Number.isFinite(ms)) return;
+      const label = format(new Date(ms), 'yyyy/MM/dd');
+      const prev = taskDatesByTypeKey.get(typeKey) ?? [];
+      prev.push(label);
+      taskDatesByTypeKey.set(typeKey, prev);
+    });
+
+    TASK_TYPE_COLUMNS.forEach(col => {
+      const list = taskDatesByTypeKey.get(col.typeKey) ?? [];
+      list.sort();
+      const deduped = Array.from(new Set(list));
+      taskDatesByTypeKey.set(col.typeKey, deduped);
+    });
+
     return {
+      farmName: group.farmName,
       fieldName: group.fieldName,
+      prefecture: group.prefecture,
+      municipalityLabel: group.municipalityLabel,
       cropName: group.cropName,
       varietyName: group.varietyName,
       seasonStartDate: group.seasonStartDate,
+      plantingMethod: formatPlantingMethod(group.plantingMethodCode),
       nextStageIndex: nextStage?.index ?? null,
       nextStageName: nextStage?.cropGrowthStageV2?.name ?? null,
       nextStageStart: nextStage ? new Date(nextStage.start!) : null,
       lastStageIndex: lastStage?.index ?? null,
       lastStageName: lastStage?.cropGrowthStageV2?.name ?? null,
       stageDates,
+      taskDatesByTypeKey,
     };
-  }, [today]);
+  }, [today, TASK_TYPE_COLUMNS, formatPlantingMethod]);
 
   const tableRows = useMemo(() => tablePagePredictions.map(deriveTableRow), [tablePagePredictions, deriveTableRow]);
   const csvTableRows = useMemo(() => filteredPredictions.map(deriveTableRow), [filteredPredictions, deriveTableRow]);
+
+  const activeTaskDateColumns = useMemo(() => {
+    const columns: Array<{ typeKey: string; occurrence: number; header: string }> = [];
+    activeTaskTypeColumns.forEach(typeCol => {
+      const maxCount = csvTableRows.reduce((max, row) => {
+        const count = row.taskDatesByTypeKey?.get(typeCol.typeKey)?.length ?? 0;
+        return Math.max(max, count);
+      }, 0);
+      for (let i = 0; i < maxCount; i++) {
+        columns.push({
+          typeKey: typeCol.typeKey,
+          occurrence: i,
+          header: `${typeCol.header} (${i + 1})`,
+        });
+      }
+    });
+    return columns;
+  }, [activeTaskTypeColumns, csvTableRows]);
 
   const handleRowsPerPageChange = (value: number) => {
     setRowsPerPage(value);
@@ -571,31 +906,43 @@ export function GrowthStagePredictionPage() {
   };
 
   const downloadTableCsv = () => {
-    if (csvTableRows.length === 0) return;
+    const targetRows = csvTableRows;
+    if (targetRows.length === 0) return;
 
-    const headers = [
-      '圃場',
-      '作物',
-      '品種',
-      '作付日',
-      '次のステージ',
-      '予測開始',
-      ...stageColumns.map(col => col.label),
-    ];
+	    const headers = [
+	      t('table.farm'),
+	      t('table.field'),
+	      t('table.prefecture'),
+	      t('table.municipality'),
+	      t('table.crop'),
+	      t('gsp.filter.variety'),
+	      t('table.planting_date'),
+	      t('table.planting_method'),
+	      t('gsp.table.next_stage'),
+	      ...activeTaskDateColumns.map(col => col.header),
+	      ...stageColumns.map(col => col.label),
+	    ];
 
-    const rows = csvTableRows.map(row => {
+    const rows = targetRows.map(row => {
       const nextStageLabel = row.nextStageIndex
         ? `BBCH ${row.nextStageIndex}${row.nextStageName ? ` - ${row.nextStageName}` : ''}`
-        : '予定なし';
-      const cells = [
-        row.fieldName,
-        row.cropName,
-        row.varietyName,
-        row.seasonStartDate ? format(new Date(row.seasonStartDate), 'yyyy/MM/dd') : '不明',
-        nextStageLabel,
-        row.nextStageStart ? format(row.nextStageStart, 'MM/dd') : '-',
-        ...stageColumns.map(col => row.stageDates[col.index] ?? '-'),
-      ];
+        : t('gsp.value.none');
+			      const cells = [
+			        row.farmName || '-',
+			        row.fieldName,
+			        row.prefecture?.trim() ? row.prefecture : '-',
+			        row.municipalityLabel?.trim() ? row.municipalityLabel : '-',
+			        row.cropName,
+			        row.varietyName,
+			        row.seasonStartDate ? format(new Date(row.seasonStartDate), 'yyyy/MM/dd') : t('gsp.value.unknown'),
+			        row.plantingMethod ?? '-',
+			        nextStageLabel,
+	            ...activeTaskDateColumns.map(col => {
+	              const dates = row.taskDatesByTypeKey?.get(col.typeKey) ?? [];
+	              return dates[col.occurrence] ?? '-';
+	            }),
+			        ...stageColumns.map(col => row.stageDates[col.index] ?? '-'),
+			      ];
 
       return cells
         .map(cell => `"${String(cell ?? '').replace(/"/g, '""')}"`)
@@ -616,14 +963,27 @@ export function GrowthStagePredictionPage() {
   };
 
   useEffect(() => {
-    fetchCombinedDataIfNeeded();
+    fetchCombinedDataIfNeeded({ includeTasks: true });
   }, [fetchCombinedDataIfNeeded]);
+
+  const isCombinedOutMatchingSelection = useMemo(() => {
+    if (!combinedOut) return false;
+    const payload: any = (combinedOut as any)?.request?.payload ?? {};
+    const farms: string[] = Array.isArray(payload.farm_uuids)
+      ? payload.farm_uuids
+      : Array.isArray(payload.farmUuids)
+        ? payload.farmUuids
+        : [];
+    const a = [...submittedFarms].slice().sort();
+    const b = [...farms].slice().sort();
+    return a.length > 0 && JSON.stringify(a) === JSON.stringify(b);
+  }, [combinedOut, submittedFarms]);
 
   if (submittedFarms.length === 0) {
     return (
       <div className="farms-page-container">
-        <h2>生育ステージ予測</h2>
-        <p>ヘッダーのドロップダウンから農場を選択してください。</p>
+        <h2>{t('gsp.title')}</h2>
+        <p>{t('risk.select_farm_hint')}</p>
       </div>
     );
   }
@@ -633,13 +993,31 @@ export function GrowthStagePredictionPage() {
       <div className="farms-page-container">
         <LoadingOverlay
           message={formatCombinedLoadingMessage(
-            '生育ステージ予測データ',
+            t('gsp.loading_label'),
             combinedFetchAttempt,
             combinedFetchMaxAttempts,
             combinedRetryCountdown,
           )}
         />
-        <h2>生育ステージ予測</h2>
+        <h2>{t('gsp.title')}</h2>
+      </div>
+    );
+  }
+
+  // When farm selection changes, FarmContext intentionally keeps the previous data visible while fetching.
+  // On this page we prefer not to show stale predictions for a different selection, so show a loading overlay instead.
+  if (!isCombinedOutMatchingSelection && combinedInProgress) {
+    return (
+      <div className="farms-page-container">
+        <LoadingOverlay
+          message={formatCombinedLoadingMessage(
+            t('gsp.loading_label'),
+            combinedFetchAttempt,
+            combinedFetchMaxAttempts,
+            combinedRetryCountdown,
+          )}
+        />
+        <h2>{t('gsp.title')}</h2>
       </div>
     );
   }
@@ -647,8 +1025,8 @@ export function GrowthStagePredictionPage() {
   if (combinedErr) {
     return (
       <div className="farms-page-container">
-        <h2>生育ステージ予測</h2>
-        <h3 style={{ color: '#ff6b6b' }}>予測データの取得に失敗しました</h3>
+        <h2>{t('gsp.title')}</h2>
+        <h3 style={{ color: '#ff6b6b' }}>{t('gsp.load_failed')}</h3>
         <pre style={{ color: '#ff6b6b', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
           {combinedErr}
         </pre>
@@ -658,12 +1036,12 @@ export function GrowthStagePredictionPage() {
 
   return (
     <div className="farms-page-container">
-      <h2>生育ステージ予測</h2>
+      <h2>{t('gsp.title')}</h2>
       <p>
-        選択された {submittedFarms.length} 件の農場の生育ステージ予測タイムラインを表示しています。
+        {t('gsp.summary', { count: submittedFarms.length })}
         {combinedOut?.source && (
           <span style={{ marginLeft: '1em', color: combinedOut.source === 'cache' ? '#4caf50' : '#2196f3', fontWeight: 'bold' }}>
-            ({combinedOut.source === 'cache' ? 'キャッシュから取得' : 'APIから取得'})
+            ({combinedOut.source === 'cache' ? t('source.cache') : t('source.api')})
           </span>
         )}
       </p>
@@ -671,34 +1049,34 @@ export function GrowthStagePredictionPage() {
       <div className="gsp-controls">
         <div className="gsp-filter-grid">
           <label>
-            圃場 / 作物検索
+            {t('gsp.filter.field_crop')}
             <input
               type="text"
               value={fieldQuery}
               onChange={(e) => setFieldQuery(e.currentTarget.value)}
-              placeholder="圃場名・作物・品種でフィルタ"
+              placeholder={t('gsp.filter.field_crop_ph')}
             />
           </label>
           <label>
-            作物
+            {t('gsp.filter.crop')}
             <select value={selectedCrop} onChange={(e) => setSelectedCrop(e.currentTarget.value)}>
-              <option value="ALL">すべて</option>
+              <option value="ALL">{t('satellite.option.all')}</option>
               {cropOptions.map(crop => (
                 <option key={crop} value={crop}>{crop}</option>
               ))}
             </select>
           </label>
           <label>
-            品種
+            {t('gsp.filter.variety')}
             <select value={selectedVariety} onChange={(e) => setSelectedVariety(e.currentTarget.value)}>
-              <option value="ALL">すべて</option>
+              <option value="ALL">{t('satellite.option.all')}</option>
               {varietyOptions.map(variety => (
                 <option key={variety} value={variety}>{variety}</option>
               ))}
             </select>
           </label>
           <label>
-            都道府県
+            {t('gsp.filter.prefecture')}
             <select
               value={selectedPrefecture}
               onChange={(e) => {
@@ -707,50 +1085,61 @@ export function GrowthStagePredictionPage() {
                 setSelectedMunicipality('ALL');
               }}
             >
-              <option value="ALL">すべて</option>
+              <option value="ALL">{t('satellite.option.all')}</option>
               {prefectureOptions.map(pref => (
                 <option key={pref} value={pref}>{pref}</option>
               ))}
             </select>
           </label>
           <label>
-            市区町村
+            {t('gsp.filter.municipality')}
             <select
               value={selectedMunicipality}
               onChange={(e) => setSelectedMunicipality(e.currentTarget.value)}
             >
-              <option value="ALL">すべて</option>
+              <option value="ALL">{t('satellite.option.all')}</option>
               {municipalityOptions.map(muni => (
                 <option key={muni} value={muni}>{muni}</option>
               ))}
             </select>
           </label>
+          <label>
+            {language === 'en' ? 'Next-stage prediction' : '次ステージ予測'}
+            <select
+              value={predictionPresence}
+              onChange={(e) => setPredictionPresence(e.currentTarget.value as any)}
+            >
+              <option value="ALL">{t('satellite.option.all')}</option>
+              <option value="HAS">{language === 'en' ? 'Not null' : 'あり'}</option>
+              <option value="NONE">{language === 'en' ? 'Null' : 'なし'}</option>
+            </select>
+          </label>
         </div>
 
-        <div className="gsp-stage-filters">
-          <div className="gsp-stage-header">
-            <strong>表示する BBCH ステージ</strong>
-            <div className="gsp-stage-actions">
+	        <div className="gsp-stage-filters">
+	          <div className="gsp-stage-header">
+	            <strong>{t('gsp.controls.stage_list_title')}</strong>
+	            <div className="gsp-stage-actions">
               <button
                 type="button"
                 disabled={availableStages.length === 0}
                 onClick={() => setEnabledStages(availableStages)}
-              >
-                すべて選択
-              </button>
+	              >
+	                {t('gsp.controls.select_all')}
+	              </button>
               <button
                 type="button"
                 disabled={enabledStages.length === 0}
                 onClick={() => setEnabledStages([])}
-              >
-                全解除
-              </button>
-            </div>
-          </div>
-          <div className="gsp-stage-checkboxes">
-            {availableStages.length === 0 ? (
-              <span>表示可能なステージがありません。</span>
-            ) : (
+	              >
+	                {t('gsp.controls.clear_all')}
+	              </button>
+	            </div>
+	          </div>
+	          <div className="gsp-stage-checkboxes">
+	            {availableStages.length === 0 ? (
+	              <span>{t('gsp.controls.no_stages')}</span>
+	            ) : (
               availableStages.map(stage => (
                 <label key={stage} className="gsp-stage-checkbox">
                   <input
@@ -759,54 +1148,60 @@ export function GrowthStagePredictionPage() {
                     onChange={() => toggleStage(stage)}
                   />
                   <span>BBCH {stage}</span>
-                </label>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
+	                </label>
+	              ))
+	            )}
+	          </div>
+	        </div>
+	      </div>
 
-      <div className="gsp-instructions">
-        <span>ヒント: グラフはホイール操作またはドラッグでズーム / パンできます。右上の「表示範囲をリセット」ボタンで初期表示に戻せます。</span>
-      </div>
+	      <div className="gsp-instructions">
+	        <span>{t('gsp.hint.zoom_pan')}</span>
+	      </div>
 
-      {upcomingStages.length > 0 && (
-        <div className="gsp-upcoming">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
-            <h3 style={{ margin: 0 }}>直近 {UPCOMING_WINDOW_DAYS} 日以内に開始するステージ</h3>
-            <button
+	      {upcomingStages.length > 0 && (
+	        <div className="gsp-upcoming">
+	          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
+	            <h3 style={{ margin: 0 }}>{t('gsp.upcoming.title', { days: UPCOMING_WINDOW_DAYS })}</h3>
+	            <button
               type="button"
               onClick={() => setIsUpcomingExpanded(prev => !prev)}
               aria-expanded={isUpcomingExpanded}
               aria-controls="gsp-upcoming-list"
-            >
-              {isUpcomingExpanded ? '折りたたむ' : '開く'}
-            </button>
-          </div>
+	            >
+	              {isUpcomingExpanded ? t('gsp.toggle.collapse') : t('gsp.toggle.open')}
+	            </button>
+	          </div>
           {isUpcomingExpanded && (
             <ul id="gsp-upcoming-list">
               {upcomingStages.map((stage, idx) => (
                 <li key={`${stage.fieldName}-${stage.stageIndex}-${idx}`}>
                   <strong>{stage.fieldName}</strong> / {stage.cropName}（{stage.varietyName}） : BBCH {stage.stageIndex} {stage.stageName ? `- ${stage.stageName}` : ''}
-                  <span style={{ marginLeft: '0.5rem' }}>
-                    {format(stage.start, 'MM/dd')} 開始
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
+	                  <span style={{ marginLeft: '0.5rem' }}>
+	                    {t('gsp.upcoming.start', { date: format(stage.start, 'MM/dd') })}
+	                  </span>
+	                </li>
+	              ))}
+	            </ul>
+	          )}
+	        </div>
+	      )}
 
-      <div className="gsp-summary">
-        フィルタ後の圃場作期: {filteredCount} 件（タイムライン {filteredCount === 0 ? 0 : paginatedPredictions.length} 件 / テーブル {filteredCount === 0 ? 0 : tablePagePredictions.length} 件表示） / 表示中のステージ数: {enabledStages.length}（全 {availableStages.length}）
-      </div>
+	      <div className="gsp-summary">
+	        {t('gsp.summary.filtered', {
+	          filtered: filteredCount,
+	          timeline: filteredCount === 0 ? 0 : paginatedPredictions.length,
+	          table: filteredCount === 0 ? 0 : tablePagePredictions.length,
+	          enabled: enabledStages.length,
+	          total: availableStages.length,
+	        })}
+	      </div>
 
-      {filteredCount > 0 && (
-        <div className="gsp-pagination-controls">
-          <div className="gsp-pagination-left">
-            <label htmlFor="gsp-rows-per-page">
-              表示件数:{' '}
+	      {filteredCount > 0 && (
+	        <div className="gsp-pagination-controls">
+	          <div className="gsp-pagination-left">
+	            <label htmlFor="gsp-rows-per-page">
+	              {t('gsp.rows_per_page')}{' '}
               <select
                 id="gsp-rows-per-page"
                 value={rowsPerPage}
@@ -818,13 +1213,13 @@ export function GrowthStagePredictionPage() {
               </select>
             </label>
           </div>
-          <div className="gsp-pagination-right">
+	          <div className="gsp-pagination-right">
             <button
               type="button"
               onClick={() => handlePageChange(-1)}
               disabled={currentPage <= 1}
             >
-              前へ
+	              {t('pagination.prev')}
             </button>
             <span style={{ margin: '0 0.75rem' }}>
               {currentPage} / {totalPages}
@@ -834,33 +1229,34 @@ export function GrowthStagePredictionPage() {
               onClick={() => handlePageChange(1)}
               disabled={currentPage >= totalPages}
             >
-              次へ
-            </button>
-          </div>
-        </div>
-      )}
+	              {t('pagination.next')}
+	            </button>
+	          </div>
+	        </div>
+	      )}
 
       <div className="timeline-container">
         <GrowthStageTimeline items={paginatedPredictions} enabledStages={enabledStages} />
       </div>
 
-      {tableRows.length > 0 && (
-        <div className="gsp-table-wrapper">
-          <div className="gsp-table-header">
-            <h3>作期一覧</h3>
-            <button
-              type="button"
-              onClick={downloadTableCsv}
-              disabled={csvTableRows.length === 0}
-            >
-              CSVダウンロード
-            </button>
-          </div>
-          {filteredCount > 0 && (
-            <div className="gsp-pagination-controls gsp-table-pagination">
-              <div className="gsp-pagination-left">
-                <label htmlFor="gsp-table-rows-per-page">
-                  表示件数:{' '}
+		      {tableRows.length > 0 && (
+		        <div className="gsp-table-wrapper">
+		          <div className="gsp-table-header">
+		            <h3>{t('gsp.section.seasons')}</h3>
+		            <button
+	              type="button"
+	              onClick={downloadTableCsv}
+	              disabled={csvTableRows.length === 0}
+	              title={language === 'en' ? 'Export all filtered rows' : 'フィルタ後の全行をCSV出力'}
+	            >
+		              {t('gsp.action.csv_download')}
+		            </button>
+		          </div>
+	          {filteredCount > 0 && (
+	            <div className="gsp-pagination-controls gsp-table-pagination">
+	              <div className="gsp-pagination-left">
+	                <label htmlFor="gsp-table-rows-per-page">
+	                  {t('gsp.rows_per_page')}{' '}
                   <select
                     id="gsp-table-rows-per-page"
                     value={tableRowsPerPage}
@@ -872,13 +1268,13 @@ export function GrowthStagePredictionPage() {
                   </select>
                 </label>
               </div>
-              <div className="gsp-pagination-right">
+	              <div className="gsp-pagination-right">
                 <button
                   type="button"
                   onClick={() => handleTablePageChange(-1)}
                   disabled={tableCurrentPage <= 1}
                 >
-                  前へ
+	                  {t('pagination.prev')}
                 </button>
                 <span style={{ margin: '0 0.75rem' }}>
                   {tableCurrentPage} / {tableTotalPages}
@@ -888,46 +1284,62 @@ export function GrowthStagePredictionPage() {
                   onClick={() => handleTablePageChange(1)}
                   disabled={tableCurrentPage >= tableTotalPages}
                 >
-                  次へ
-                </button>
-              </div>
-            </div>
-          )}
-          <table className="gsp-table">
-            <thead>
-              <tr>
-                <th>圃場</th>
-                <th>作物</th>
-                <th>品種</th>
-                <th>作付日</th>
-                <th>次のステージ</th>
-                <th>予測開始</th>
-                {stageColumns.map(col => (
-                  <th key={`stage-col-${col.index}`}>{col.label}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {tableRows.map(row => (
-                <tr key={`${row.fieldName}-${row.varietyName}-${row.seasonStartDate}`}>
-                  <td>{row.fieldName}</td>
-                  <td>{row.cropName}</td>
-                  <td>{row.varietyName}</td>
-                  <td>{row.seasonStartDate ? format(new Date(row.seasonStartDate), 'yyyy/MM/dd') : '不明'}</td>
-                  <td>
-                    {row.nextStageIndex
-                      ? `BBCH ${row.nextStageIndex}${row.nextStageName ? ` - ${row.nextStageName}` : ''}`
-                      : '予定なし'}
-                  </td>
-                  <td>
-                    {row.nextStageStart ? format(row.nextStageStart, 'MM/dd') : '-'}
-                  </td>
-                  {stageColumns.map(col => (
-                    <td key={`stage-date-${col.index}`}>
-                      {row.stageDates[col.index] ?? '-'}
-                    </td>
-                  ))}
-                </tr>
+	                  {t('pagination.next')}
+	                </button>
+	              </div>
+	            </div>
+	          )}
+		          <table className="gsp-table">
+		            <thead>
+			              <tr>
+			                <th>{t('table.farm')}</th>
+			                <th>{t('table.field')}</th>
+			                <th>{t('table.prefecture')}</th>
+			                <th>{t('table.municipality')}</th>
+			                <th>{t('table.crop')}</th>
+			                <th>{t('gsp.filter.variety')}</th>
+			                <th>{t('table.planting_date')}</th>
+			                <th>{t('table.planting_method')}</th>
+			                <th>{t('gsp.table.next_stage')}</th>
+                    {activeTaskDateColumns.map(col => (
+                      <th key={`task-col-${col.typeKey}-${col.occurrence}`}>{col.header}</th>
+                    ))}
+		                {stageColumns.map(col => (
+		                  <th key={`stage-col-${col.index}`}>{col.label}</th>
+		                ))}
+		              </tr>
+	            </thead>
+	            <tbody>
+	              {tableRows.map(row => (
+				                <tr key={`${row.fieldName}-${row.varietyName}-${row.seasonStartDate}`}>
+				                  <td>{row.farmName?.trim() ? row.farmName : '-'}</td>
+				                  <td>{row.fieldName}</td>
+				                  <td>{row.prefecture?.trim() ? row.prefecture : '-'}</td>
+				                  <td>{row.municipalityLabel?.trim() ? row.municipalityLabel : '-'}</td>
+				                  <td>{row.cropName}</td>
+			                  <td>{row.varietyName}</td>
+			                  <td>{row.seasonStartDate ? format(new Date(row.seasonStartDate), 'yyyy/MM/dd') : t('gsp.value.unknown')}</td>
+			                  <td>{row.plantingMethod ?? '-'}</td>
+			                  <td>
+			                    {row.nextStageIndex
+			                      ? `BBCH ${row.nextStageIndex}${row.nextStageName ? ` - ${row.nextStageName}` : ''}`
+			                      : t('gsp.value.none')}
+			                  </td>
+                      {activeTaskDateColumns.map(col => {
+                        const dates = row.taskDatesByTypeKey?.get(col.typeKey) ?? [];
+                        const display = dates[col.occurrence] ?? '-';
+                        return (
+                          <td key={`task-cell-${col.typeKey}-${col.occurrence}`} style={{ minWidth: 140 }}>
+                            {display}
+                          </td>
+                        );
+                      })}
+	                  {stageColumns.map(col => (
+	                    <td key={`stage-date-${col.index}`}>
+	                      {row.stageDates[col.index] ?? '-'}
+	                    </td>
+	                  ))}
+	                </tr>
               ))}
             </tbody>
           </table>
@@ -944,9 +1356,11 @@ export function GrowthStagePredictionPage() {
 const GrowthStageTimeline: FC<{ items: GroupedPrediction[]; enabledStages: string[] }> = memo(({ items, enabledStages }) => {
   const chartRef = useRef<ChartJSInstance | null>(null);
   const { chartData, chartHeight, maxDate, minDate } = useTimelineData(items, enabledStages);
+  const { language, t } = useLanguage();
+  const dateLocale = language === 'en' ? enUS : ja;
 
   if (!chartData || chartData.datasets.length === 0) {
-    return <div className="chart-no-data">表示できる生育予測データがありません。</div>;
+    return <div className="chart-no-data">{t('gsp.chart.no_data')}</div>;
   }
 
   const today = new Date();
@@ -1011,7 +1425,7 @@ const GrowthStageTimeline: FC<{ items: GroupedPrediction[]; enabledStages: strin
               const start = new Date(rawData.x[0]);
               const end = new Date(rawData.x[1]);
               const duration = differenceInCalendarDays(end, start);
-              return `期間: ${duration}日`;
+              return t('gsp.duration_days', { days: duration });
             }
             return '';
           }
@@ -1051,35 +1465,38 @@ const GrowthStageTimeline: FC<{ items: GroupedPrediction[]; enabledStages: strin
       },
       annotation: {
         annotations: {
-          todayLine: {
+	          todayLine: {
             type: 'line',
             xMin: todayForTimeline.getTime(),
             xMax: todayForTimeline.getTime(),
             borderColor: 'rgba(255, 99, 132, 0.8)',
             borderWidth: 2,
             borderDash: [6, 6],
-            label: {
-              content: 'Today',
-              display: true,
-              position: 'start',
-            }
-          }
-        }
-      }
-    },
-    scales: {
-      x: {
-        type: 'time' as const, position: 'top' as const,
-        min: initialViewMin, max: initialViewMax,
-        adapters: { date: { locale: ja } },
-        time: {
-          tooltipFormat: 'yyyy/MM/dd', minUnit: 'day',
-          displayFormats: { day: 'M/d', week: 'M/d', month: 'yyyy年 M月', year: 'yyyy年' }
-        }
-      },
-      y: { stacked: true, ticks: { autoSkip: false } }
-    },
-  };
+	            label: {
+	              content: t('chart.today'),
+	              display: true,
+	              position: 'start',
+	            }
+	          }
+	        }
+	      }
+	    },
+	    scales: {
+	      x: {
+	        type: 'time' as const, position: 'top' as const,
+	        min: initialViewMin, max: initialViewMax,
+	        adapters: { date: { locale: dateLocale } },
+	        time: {
+	          tooltipFormat: language === 'en' ? 'yyyy-MM-dd' : 'yyyy/MM/dd',
+	          minUnit: 'day',
+	          displayFormats: language === 'en'
+	            ? { day: 'M/d', week: 'M/d', month: 'MMM yyyy', year: 'yyyy' }
+	            : { day: 'M/d', week: 'M/d', month: 'yyyy年 M月', year: 'yyyy年' }
+	        }
+	      },
+	      y: { stacked: true, ticks: { autoSkip: false } }
+	    },
+	  };
 
   return (
     <div>
@@ -1092,10 +1509,10 @@ const GrowthStageTimeline: FC<{ items: GroupedPrediction[]; enabledStages: strin
               (chartRef.current as any)?.resetZoom?.();
             }
           }}
-        >
-          表示範囲をリセット
-        </button>
-      </div>
+	        >
+	          {t('gsp.chart.reset_view')}
+	        </button>
+	      </div>
       <div className="gantt-chart-wrapper" style={{ height: `${chartHeight}px` }}>
         <Bar
           ref={(instance) => {

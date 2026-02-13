@@ -24,7 +24,7 @@ import ChartDataLabels from 'chartjs-plugin-datalabels';
 import zoomPlugin from 'chartjs-plugin-zoom';
 import annotationPlugin from 'chartjs-plugin-annotation';
 import 'chartjs-adapter-date-fns';
-import { ja } from 'date-fns/locale';
+import { enUS, ja } from 'date-fns/locale';
 import { format, startOfDay, subDays, addDays, differenceInCalendarDays } from 'date-fns';
 import './FarmsPage.css'; // 共通スタイルをインポート
 import './NdviPage.css'; // NDVIページ専用のスタイルをインポート
@@ -34,7 +34,9 @@ import { withApiBase } from '../utils/apiBase';
 import LoadingSpinner from '../components/LoadingSpinner';
 import LoadingOverlay from '../components/LoadingOverlay';
 import { formatCombinedLoadingMessage } from '../utils/loadingMessage';
-import { getSessionCache, setSessionCache } from '../utils/sessionCache';
+import { useLanguage } from '../context/LanguageContext';
+import { getCurrentLanguage, tr } from '../i18n/runtime';
+import { postJsonCached } from '../utils/cachedJsonFetch';
 
 ChartJS.register(
   ArcElement,
@@ -62,74 +64,68 @@ type WeatherMetricKey =
 
 const WEATHER_METRICS_CONFIG: Array<{
   key: WeatherMetricKey;
-  label: string;
+  labelKey: string;
   color: string;
   type: 'line' | 'area' | 'bar';
   yAxisId: 'temp' | 'precip' | 'humidity' | 'wind' | 'sunshine' | 'degreeDays';
   strokeDasharray?: string;
   unit: string;
 }> = [
-  { key: 'temperatureAvg', label: '平均気温 (°C)', color: '#ff7043', type: 'line', yAxisId: 'temp', unit: '°C' },
-  { key: 'temperatureMax', label: '最高気温 (°C)', color: '#ff8a65', type: 'line', yAxisId: 'temp', strokeDasharray: '4 4', unit: '°C' },
-  { key: 'temperatureMin', label: '最低気温 (°C)', color: '#4fc3f7', type: 'line', yAxisId: 'temp', strokeDasharray: '4 4', unit: '°C' },
-  { key: 'sunshineHours', label: '日照時間 (h)', color: '#ffd54f', type: 'area', yAxisId: 'sunshine', unit: 'h' },
-  { key: 'precipitationMm', label: '降水量 (mm)', color: '#4fc3f7', type: 'bar', yAxisId: 'precip', unit: 'mm' },
-  { key: 'humidityAvg', label: '湿度 (%)', color: '#64b5f6', type: 'line', yAxisId: 'humidity', unit: '%' },
-  { key: 'windSpeedAvg', label: '風速 (m/s)', color: '#9575cd', type: 'line', yAxisId: 'wind', strokeDasharray: '6 3', unit: 'm/s' },
-  { key: 'gdd', label: '積算温度 (°C日)', color: '#ffa726', type: 'line', yAxisId: 'degreeDays', unit: '°C日' },
+  { key: 'temperatureAvg', labelKey: 'ndvi.weather.temperature_avg', color: '#ff7043', type: 'line', yAxisId: 'temp', unit: '°C' },
+  { key: 'temperatureMax', labelKey: 'ndvi.weather.temperature_max', color: '#ff8a65', type: 'line', yAxisId: 'temp', strokeDasharray: '4 4', unit: '°C' },
+  { key: 'temperatureMin', labelKey: 'ndvi.weather.temperature_min', color: '#4fc3f7', type: 'line', yAxisId: 'temp', strokeDasharray: '4 4', unit: '°C' },
+  { key: 'sunshineHours', labelKey: 'ndvi.weather.sunshine', color: '#ffd54f', type: 'area', yAxisId: 'sunshine', unit: 'h' },
+  { key: 'precipitationMm', labelKey: 'ndvi.weather.precipitation', color: '#4fc3f7', type: 'bar', yAxisId: 'precip', unit: 'mm' },
+  { key: 'humidityAvg', labelKey: 'ndvi.weather.humidity', color: '#64b5f6', type: 'line', yAxisId: 'humidity', unit: '%' },
+  { key: 'windSpeedAvg', labelKey: 'ndvi.weather.wind_speed', color: '#9575cd', type: 'line', yAxisId: 'wind', strokeDasharray: '6 3', unit: 'm/s' },
+  { key: 'gdd', labelKey: 'ndvi.weather.gdd', color: '#ffa726', type: 'line', yAxisId: 'degreeDays', unit: '°C·d' },
 ];
 
-const WIND_DIRECTIONS = [
+const WIND_DIRECTIONS_JA = [
   '北', '北北東', '北東', '東北東', '東', '東南東', '南東', '南南東',
   '南', '南南西', '南西', '西南西', '西', '西北西', '北西', '北北西',
+];
+
+const WIND_DIRECTIONS_EN = [
+  'N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
+  'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW',
 ];
 
 const formatWindDirection = (deg: number | null): string => {
   if (deg === null || !Number.isFinite(deg)) return '-';
   const normalized = ((deg % 360) + 360) % 360;
   const index = Math.round(normalized / 22.5) % 16;
-  return `${WIND_DIRECTIONS[index]} (${Math.round(normalized)}°)`;
+  const dirs = getCurrentLanguage() === 'ja' ? WIND_DIRECTIONS_JA : WIND_DIRECTIONS_EN;
+  return `${dirs[index]} (${Math.round(normalized)}°)`;
 };
 
 async function fetchBiomassNdviApi(params: { auth: LoginAndTokenResp; cropSeasonUuids: string[]; fromDate: string }): Promise<any> {
-    const cacheKey = `biomass-ndvi:${[...params.cropSeasonUuids].sort().join(',')}|${params.fromDate}`;
-    if (params.cropSeasonUuids.length > 0) {
-        const cached = getSessionCache<any>(cacheKey);
-        if (cached) return { ...cached, source: 'cache' };
-    }
-    const requestBody = {
-        login_token: params.auth.login.login_token,
-        api_token: params.auth.api_token,
-        crop_season_uuids: params.cropSeasonUuids,
-        from_date: params.fromDate,
-    };
+  const cacheKey = `biomass-ndvi:${[...params.cropSeasonUuids].sort().join(',')}|${params.fromDate}`;
+  const requestBody = {
+    login_token: params.auth.login.login_token,
+    api_token: params.auth.api_token,
+    crop_season_uuids: params.cropSeasonUuids,
+    from_date: params.fromDate,
+  };
 
-    const res = await fetch(withApiBase('/biomass-ndvi'), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-    });
+  const { status, json, source } = await postJsonCached<any>(
+    withApiBase('/biomass-ndvi'),
+    requestBody,
+    undefined,
+    { cacheKey, cache: params.cropSeasonUuids.length > 0 ? 'session' : 'none' },
+  );
 
-    // レスポンスボディが空の場合に .json() がエラーになるのを防ぐ
-    const text = await res.text();
-    if (!text) {
-        // ボディが空の場合は、エラーを示すオブジェクトを返すか、nullを返す
-        const errorResponse = { ok: false, status: res.status, response_text: "Empty response from server", source: 'api' };
-        return errorResponse;
-    }
-    const j = JSON.parse(text);
-    if (j?.ok && params.cropSeasonUuids.length > 0) {
-        setSessionCache(cacheKey, { ...j, source: 'api' });
-    }
-    return { ...j, source: 'api' };
+  if (!json) {
+    return { ok: false, status, response_text: 'Empty response from server', source };
+  }
+  if (typeof json === 'string') {
+    return { ok: false, status, detail: json, source };
+  }
+  return { ...json, source };
 }
 
 async function fetchBiomassLaiApi(params: { auth: LoginAndTokenResp; cropSeasonUuids: string[]; fromDate: string; tillDate: string }): Promise<any> {
   const cacheKey = `biomass-lai:${[...params.cropSeasonUuids].sort().join(',')}|${params.fromDate}|${params.tillDate}`;
-  if (params.cropSeasonUuids.length > 0) {
-    const cached = getSessionCache<any>(cacheKey);
-    if (cached) return { ...cached, source: 'cache' };
-  }
   const requestBody = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
@@ -138,33 +134,23 @@ async function fetchBiomassLaiApi(params: { auth: LoginAndTokenResp; cropSeasonU
     till_date: params.tillDate,
   };
 
-  const res = await fetch(withApiBase('/biomass-lai'), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  });
-  const text = await res.text();
-  if (!text) {
-    const errorResponse = { ok: false, status: res.status, detail: "Empty response from server", source: 'api' };
-    return errorResponse;
+  const { status, json, source } = await postJsonCached<any>(
+    withApiBase('/biomass-lai'),
+    requestBody,
+    undefined,
+    { cacheKey, cache: params.cropSeasonUuids.length > 0 ? 'session' : 'none' },
+  );
+  if (!json) {
+    return { ok: false, status, detail: 'Empty response from server', source };
   }
-
-  try {
-    const json = JSON.parse(text);
-    if (json?.ok && params.cropSeasonUuids.length > 0) {
-      setSessionCache(cacheKey, { ...json, source: 'api' });
-    }
-    return { ...json, source: 'api' };
-  } catch (error) {
-    console.error("⚠️ [API Response] /biomass-lai (Invalid JSON)", { text, error });
-    return { ok: false, status: res.status, detail: text };
+  if (typeof json === 'string') {
+    return { ok: false, status, detail: json, source };
   }
+  return { ...json, source };
 }
 
 async function fetchWeatherByFieldApi(params: { auth: LoginAndTokenResp; fieldUuid: string; fromDate: string; tillDate: string }): Promise<any> {
   const cacheKey = `weather-by-field:${params.fieldUuid}|${params.fromDate}|${params.tillDate}`;
-  const cached = getSessionCache<any>(cacheKey);
-  if (cached) return { ...cached, source: 'cache' };
   const requestBody = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
@@ -172,29 +158,20 @@ async function fetchWeatherByFieldApi(params: { auth: LoginAndTokenResp; fieldUu
     from_date: params.fromDate,
     till_date: params.tillDate,
   };
+  const { status, json, source } = await postJsonCached<any>(
+    withApiBase('/weather-by-field'),
+    requestBody,
+    undefined,
+    { cacheKey, cache: 'session' },
+  );
 
-  const res = await fetch(withApiBase('/weather-by-field'), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  });
-
-  const text = await res.text();
-  if (!text) {
-    const emptyResponse = { ok: true, status: res.status, response: { data: { fieldV2: {} } }, source: 'api' };
-    return emptyResponse;
+  if (!json) {
+    return { ok: true, status, response: { data: { fieldV2: {} } }, source };
   }
-
-  try {
-    const json = JSON.parse(text);
-    if (json?.ok) {
-      setSessionCache(cacheKey, { ...json, source: 'api' });
-    }
-    return { ...json, source: 'api' };
-  } catch (error) {
-    console.error("⚠️ [API Response] /weather-by-field (Invalid JSON)", { text, error });
-    return { ok: false, status: res.status, detail: text };
+  if (typeof json === 'string') {
+    return { ok: false, status, detail: json, source };
   }
+  return { ...json, source };
 }
 
 type FieldWithSeasons = {
@@ -498,6 +475,7 @@ const useBiomassData = (selectedOptions: MultiValue<SelectOption>, fieldSeasons:
 
 export function NdviPage() {
   const { auth } = useAuth();
+  const { language, t } = useLanguage();
   const { submittedFarms, fetchCombinedDataIfNeeded } = useFarms();
   const {
     combinedOut,
@@ -538,7 +516,7 @@ export function NdviPage() {
   const { ndviData, laiData, loading: biomassLoading, error: biomassError, dataSource: biomassDataSource, handleFetchBiomass, reset: resetBiomass } = useBiomassData(selectedOptions, fieldSeasons);
   const showGlobalLoading = biomassLoading || weatherLoading || combinedLoading;
   const combinedLoadingMessage = formatCombinedLoadingMessage(
-    'データ',
+    t('label.data'),
     combinedFetchAttempt,
     combinedFetchMaxAttempts,
     combinedRetryCountdown,
@@ -546,10 +524,10 @@ export function NdviPage() {
   const overlayMessage = combinedLoading
     ? combinedLoadingMessage
     : biomassLoading
-    ? 'リモートセンシングデータを取得しています...'
+    ? t('ndvi.loading.remote_sensing')
     : weatherLoading
-    ? '気象データを取得しています...'
-    : 'データを取得しています...';
+    ? t('ndvi.loading.weather')
+    : t('ndvi.loading.data');
 
   const weatherChartData = useMemo(() => {
     if (!weatherData) return [];
@@ -1398,27 +1376,27 @@ useEffect(() => {
   fetchCombinedDataIfNeeded({ includeTasks: true });
 }, [fetchCombinedDataIfNeeded]);
 
-  return (
-    <div className="ndvi-page-container">
-      {showGlobalLoading && (
-        <LoadingOverlay message={overlayMessage} />
-      )}
-      <h2>リモートセンシング</h2>
-      {!submittedFarms || submittedFarms.length === 0 ? (
-        <p>ヘッダーのドロップダウンから農場を選択してください。</p>
-      ) : combinedErr ? (
-        <p style={{ color: 'crimson' }}>エラー: {combinedErr}</p>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          <div>
-            <h3>リモートセンシングデータを取得する作期を選択してください</h3>
-            <Select
-              isMulti
-              options={groupedOptions} // グループ化されたオプションを使用
-              isLoading={combinedLoading} // combinedLoadingを使用
-              placeholder="圃場と作期を選択..."
-              value={selectedOptions}
-              onChange={(options) => setSelectedOptions(options)}
+	  return (
+	    <div className="ndvi-page-container">
+	      {showGlobalLoading && (
+	        <LoadingOverlay message={overlayMessage} />
+	      )}
+	      <h2>{t('nav.ndvi')}</h2>
+	      {!submittedFarms || submittedFarms.length === 0 ? (
+	        <p>{t('tasks.select_farms_hint')}</p>
+	      ) : combinedErr ? (
+	        <p style={{ color: 'crimson' }}>{t('error.prefix', { message: combinedErr })}</p>
+	      ) : (
+	        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+	          <div>
+	            <h3>{t('ndvi.select_seasons_title')}</h3>
+	            <Select
+	              isMulti
+	              options={groupedOptions} // グループ化されたオプションを使用
+	              isLoading={combinedLoading} // combinedLoadingを使用
+	              placeholder={t('ndvi.select_placeholder')}
+	              value={selectedOptions}
+	              onChange={(options) => setSelectedOptions(options)}
               closeMenuOnSelect={false} // 項目選択後もメニューを開いたままにする
               hideSelectedOptions={false} // 選択済みの項目をリストから隠さない
               components={{ Option: CheckboxOption }}
@@ -1436,42 +1414,46 @@ useEffect(() => {
               }}
             />
           </div>
-          <div>
-            <button onClick={handleFetchAll} disabled={selectedOptions.length === 0 || showGlobalLoading}>
-              {showGlobalLoading ? (
-                <span className="ndvi-button-loading">
-                  <LoadingSpinner size={18} />
-                  <span>取得中...</span>
-                </span>
-              ) : (
-                '選択した作期のNDVI/LAIと天気を取得'
-              )}
-            </button>
-          </div>
-          {biomassError && <p style={{ color: 'crimson' }}>エラー: {biomassError}</p>}
-          {biomassDataSource && (
-            <p style={{ color: biomassDataSource === 'cache' ? '#4caf50' : '#2196f3', fontWeight: 'bold' }}>
-              ({biomassDataSource === 'cache' ? 'バイオマスデータをキャッシュから取得' : 'バイオマスデータをAPIから取得'})
-            </p>
-          )}
-          {weatherLoading && <p style={{ color: '#2196f3' }}>気象データを取得しています...</p>}
-          {weatherError && <p style={{ color: 'crimson' }}>気象データの取得でエラーが発生しました: {weatherError}</p>}
-          {series.length > 0 && (
-            <div className="series-toggle-container">
-              <div className="series-toggle-actions">
-                <button onClick={() => setAllVisibility(true)} disabled={series.length === 0 || allVisible}>
-                  全て表示
-                </button>
-                <button onClick={() => setAllVisibility(false)} disabled={series.length === 0 || allHidden}>
-                  全て非表示
-                </button>
-                <button onClick={() => showOnlyMetric('ndvi')} disabled={!hasNdviSeries}>
-                  NDVIのみ表示
-                </button>
-                <button onClick={() => showOnlyMetric('lai')} disabled={!hasLaiSeries}>
-                  LAIのみ表示
-                </button>
-              </div>
+	          <div>
+	            <button onClick={handleFetchAll} disabled={selectedOptions.length === 0 || showGlobalLoading}>
+	              {showGlobalLoading ? (
+	                <span className="ndvi-button-loading">
+	                  <LoadingSpinner size={18} />
+	                  <span>{t('loading.fetching_short')}</span>
+	                </span>
+	              ) : (
+	                t('ndvi.fetch_selected')
+	              )}
+	            </button>
+	          </div>
+	          {biomassError && <p style={{ color: 'crimson' }}>{t('error.prefix', { message: biomassError })}</p>}
+	          {biomassDataSource && (
+	            <p style={{ color: biomassDataSource === 'cache' ? '#4caf50' : '#2196f3', fontWeight: 'bold' }}>
+	              (
+	                {biomassDataSource === 'cache'
+	                  ? t('ndvi.source.biomass_cache')
+	                  : t('ndvi.source.biomass_api')}
+	              )
+	            </p>
+	          )}
+	          {weatherLoading && <p style={{ color: '#2196f3' }}>{t('ndvi.loading.weather')}</p>}
+	          {weatherError && <p style={{ color: 'crimson' }}>{t('ndvi.weather_failed', { error: weatherError })}</p>}
+	          {series.length > 0 && (
+	            <div className="series-toggle-container">
+	              <div className="series-toggle-actions">
+	                <button onClick={() => setAllVisibility(true)} disabled={series.length === 0 || allVisible}>
+	                  {t('action.show_all')}
+	                </button>
+	                <button onClick={() => setAllVisibility(false)} disabled={series.length === 0 || allHidden}>
+	                  {t('action.hide_all')}
+	                </button>
+	                <button onClick={() => showOnlyMetric('ndvi')} disabled={!hasNdviSeries}>
+	                  {t('ndvi.show_only_ndvi')}
+	                </button>
+	                <button onClick={() => showOnlyMetric('lai')} disabled={!hasLaiSeries}>
+	                  {t('ndvi.show_only_lai')}
+	                </button>
+	              </div>
               <div className="series-toggle-list">
                 {series.map(s => {
                   const isVisible = visibleSeries[s.dataKey] !== false;
@@ -1584,21 +1566,21 @@ useEffect(() => {
                   </div>
                 )}
               </div>
-              {weatherChartData.length > 0 && (
-                  <div className="weather-chart-section">
-                    <div className="weather-chart-header">
-                      <h3>気象データ（日次）</h3>
-                      <div className="weather-toggle-actions">
-                        <button onClick={() => setAllWeatherMetrics(true)} disabled={Object.values(visibleWeatherMetrics).every(Boolean)}>
-                          全て表示
-                        </button>
-                      </div>
-                    </div>
-                  {gddDateBounds && (
-                    <div className="weather-gdd-control" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <span>積算温度開始日</span>
-                        <input
+	              {weatherChartData.length > 0 && (
+	                  <div className="weather-chart-section">
+	                    <div className="weather-chart-header">
+	                      <h3>{t('ndvi.weather.title_daily')}</h3>
+	                      <div className="weather-toggle-actions">
+	                        <button onClick={() => setAllWeatherMetrics(true)} disabled={Object.values(visibleWeatherMetrics).every(Boolean)}>
+	                          {t('action.show_all')}
+	                        </button>
+	                      </div>
+	                    </div>
+	                  {gddDateBounds && (
+	                    <div className="weather-gdd-control" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+	                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+	                        <span>{t('ndvi.gdd.start_date')}</span>
+	                        <input
                           type="date"
                           min={gddDateBounds.min}
                           max={gddDateBounds.max}
@@ -1606,12 +1588,14 @@ useEffect(() => {
                           onChange={handleGddStartDateInput}
                           style={{ padding: '0.25rem 0.5rem' }}
                         />
-                      </label>
-                      <span style={{ fontSize: '0.85em', color: '#9e9e9e' }}>※ 作付日（{gddDateBounds.min}）以降を選択してください</span>
-                    </div>
-                  )}
-                  <div className="weather-toggle-grid">
-                    {WEATHER_METRICS_CONFIG.map(metric => {
+	                      </label>
+	                      <span style={{ fontSize: '0.85em', color: '#9e9e9e' }}>
+	                        {t('ndvi.gdd.note', { min: gddDateBounds.min })}
+	                      </span>
+	                    </div>
+	                  )}
+	                  <div className="weather-toggle-grid">
+	                    {WEATHER_METRICS_CONFIG.map(metric => {
                       const active = visibleWeatherMetrics[metric.key];
                       return (
                         <label
@@ -1622,12 +1606,12 @@ useEffect(() => {
                             type="checkbox"
                             checked={active}
                             onChange={() => toggleWeatherMetric(metric.key)}
-                          />
-                          <span className="weather-toggle-swatch" style={{ backgroundColor: metric.color }} />
-                          <span className="weather-toggle-label">{metric.label}</span>
-                        </label>
-                      );
-                    })}
+	                          />
+	                          <span className="weather-toggle-swatch" style={{ backgroundColor: metric.color }} />
+	                          <span className="weather-toggle-label">{t(metric.labelKey)}</span>
+	                        </label>
+	                      );
+	                    })}
                   </div>
                   <div className="weather-chart-container">
                     <ResponsiveContainer width="100%" height={320}>
@@ -1645,12 +1629,17 @@ useEffect(() => {
                         <CartesianGrid strokeDasharray="3 3" stroke="#4a4a4f" />
                         <XAxis
                           type="number"
-                          dataKey="timestamp"
-                          domain={syncedRange ? [syncedRange.min, syncedRange.max] : ['dataMin', 'dataMax']}
-                          tickFormatter={(unixTime) => new Date(unixTime).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}
-                          stroke="#9e9e9e"
-                          allowDataOverflow
-                        />
+	                          dataKey="timestamp"
+	                          domain={syncedRange ? [syncedRange.min, syncedRange.max] : ['dataMin', 'dataMax']}
+	                          tickFormatter={(unixTime) =>
+	                            new Date(unixTime).toLocaleDateString(
+	                              language === 'ja' ? 'ja-JP' : 'en-US',
+	                              { month: 'numeric', day: 'numeric' },
+	                            )
+	                          }
+	                          stroke="#9e9e9e"
+	                          allowDataOverflow
+	                        />
                         <YAxis yAxisId="temp" stroke="#ff7043" width={42} domain={["auto", "auto"]} allowDecimals />
                         <YAxis yAxisId="precip" orientation="right" stroke="#4fc3f7" width={42} domain={[0, 'dataMax']} allowDecimals />
                         <YAxis yAxisId="humidity" hide domain={[0, 100]} allowDecimals />
@@ -1658,114 +1647,115 @@ useEffect(() => {
                         <YAxis yAxisId="sunshine" hide domain={[0, 'dataMax']} allowDecimals />
                         <YAxis yAxisId="degreeDays" hide domain={[0, 'dataMax']} allowDecimals />
                         <Tooltip content={(props) => renderWeatherTooltip(props as WeatherTooltipArgs, visibleWeatherMetrics)} />
-                        {visibleWeatherMetrics.precipitationMm && (
-                          <Bar
-                            dataKey="precipitationMm"
-                            yAxisId="precip"
-                            fill="#4fc3f7"
-                            fillOpacity={0.7}
-                            name="降水量 (mm)"
-                            maxBarSize={24}
-                          />
-                        )}
-                        {visibleWeatherMetrics.sunshineHours && (
-                          <Area
-                            type="monotone"
-                            dataKey="sunshineHours"
-                            yAxisId="sunshine"
-                            stroke="#ffd54f"
-                            fill="url(#sunshineGradient)"
-                            fillOpacity={0.35}
-                            name="日照時間 (h)"
-                          />
-                        )}
-                        {visibleWeatherMetrics.temperatureAvg && (
-                          <Line
-                            type="monotone"
-                            dataKey="temperatureAvg"
-                            yAxisId="temp"
-                            stroke="#ff7043"
-                            strokeWidth={2.2}
-                            dot={false}
-                            name="平均気温 (°C)"
-                          />
-                        )}
-                        {visibleWeatherMetrics.temperatureMax && (
-                          <Line
+	                        {visibleWeatherMetrics.precipitationMm && (
+	                          <Bar
+	                            dataKey="precipitationMm"
+	                            yAxisId="precip"
+	                            fill="#4fc3f7"
+	                            fillOpacity={0.7}
+	                            name={t('ndvi.weather.precipitation')}
+	                            maxBarSize={24}
+	                          />
+	                        )}
+	                        {visibleWeatherMetrics.sunshineHours && (
+	                          <Area
+	                            type="monotone"
+	                            dataKey="sunshineHours"
+	                            yAxisId="sunshine"
+	                            stroke="#ffd54f"
+	                            fill="url(#sunshineGradient)"
+	                            fillOpacity={0.35}
+	                            name={t('ndvi.weather.sunshine')}
+	                          />
+	                        )}
+	                        {visibleWeatherMetrics.temperatureAvg && (
+	                          <Line
+	                            type="monotone"
+	                            dataKey="temperatureAvg"
+	                            yAxisId="temp"
+	                            stroke="#ff7043"
+	                            strokeWidth={2.2}
+	                            dot={false}
+	                            name={t('ndvi.weather.temperature_avg')}
+	                          />
+	                        )}
+	                        {visibleWeatherMetrics.temperatureMax && (
+	                          <Line
                             type="monotone"
                             dataKey="temperatureMax"
                             yAxisId="temp"
                             stroke="#ff8a65"
-                            strokeDasharray="4 4"
-                            strokeWidth={1.6}
-                            dot={false}
-                            name="最高気温 (°C)"
-                          />
-                        )}
-                        {visibleWeatherMetrics.temperatureMin && (
-                          <Line
+	                            strokeDasharray="4 4"
+	                            strokeWidth={1.6}
+	                            dot={false}
+	                            name={t('ndvi.weather.temperature_max')}
+	                          />
+	                        )}
+	                        {visibleWeatherMetrics.temperatureMin && (
+	                          <Line
                             type="monotone"
                             dataKey="temperatureMin"
                             yAxisId="temp"
                             stroke="#4fc3f7"
-                            strokeDasharray="4 4"
-                            strokeWidth={1.6}
-                            dot={false}
-                            name="最低気温 (°C)"
-                          />
-                        )}
-                        {visibleWeatherMetrics.gdd && (
-                          <Line
+	                            strokeDasharray="4 4"
+	                            strokeWidth={1.6}
+	                            dot={false}
+	                            name={t('ndvi.weather.temperature_min')}
+	                          />
+	                        )}
+	                        {visibleWeatherMetrics.gdd && (
+	                          <Line
                             type="monotone"
                             dataKey="gdd"
                             yAxisId="degreeDays"
-                            stroke="#ffa726"
-                            strokeWidth={2.4}
-                            dot={false}
-                            name="積算温度 (°C日)"
-                          />
-                        )}
-                        {visibleWeatherMetrics.humidityAvg && (
-                          <Line
+	                            stroke="#ffa726"
+	                            strokeWidth={2.4}
+	                            dot={false}
+	                            name={t('ndvi.weather.gdd')}
+	                          />
+	                        )}
+	                        {visibleWeatherMetrics.humidityAvg && (
+	                          <Line
                             type="monotone"
                             dataKey="humidityAvg"
                             yAxisId="humidity"
-                            stroke="#64b5f6"
-                            strokeWidth={1.8}
-                            dot={false}
-                            name="湿度 (%)"
-                          />
-                        )}
-                        {visibleWeatherMetrics.windSpeedAvg && (
-                          <Line
+	                            stroke="#64b5f6"
+	                            strokeWidth={1.8}
+	                            dot={false}
+	                            name={t('ndvi.weather.humidity')}
+	                          />
+	                        )}
+	                        {visibleWeatherMetrics.windSpeedAvg && (
+	                          <Line
                             type="monotone"
                             dataKey="windSpeedAvg"
                             yAxisId="wind"
                             stroke="#9575cd"
-                            strokeDasharray="6 3"
-                            strokeWidth={1.8}
-                            dot={false}
-                            name="風速 (m/s)"
-                          />
-                        )}
+	                            strokeDasharray="6 3"
+	                            strokeWidth={1.8}
+	                            dot={false}
+	                            name={t('ndvi.weather.wind_speed')}
+	                          />
+	                        )}
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>
                 </div>
               )}
-              <SelectedGrowthStageTimeline
-                items={selectedPredictions}
-                ndviRange={ndviRange}
-                syncedRange={syncedRange}
-                onRangeChange={(range) =>
-                  setSyncedRange(prev => {
-                    if (prev && Math.abs(prev.min - range.min) < 1 && Math.abs(prev.max - range.max) < 1) {
-                      return prev;
-                    }
-                    return range;
-                  })
-                }
-              />
+	              <SelectedGrowthStageTimeline
+	                items={selectedPredictions}
+	                language={language}
+	                ndviRange={ndviRange}
+	                syncedRange={syncedRange}
+	                onRangeChange={(range) =>
+	                  setSyncedRange(prev => {
+	                    if (prev && Math.abs(prev.min - range.min) < 1 && Math.abs(prev.max - range.max) < 1) {
+	                      return prev;
+	                    }
+	                    return range;
+	                  })
+	                }
+	              />
             </div>
           )}
           {chartData && chartData.length > 0 && (
@@ -1809,12 +1799,13 @@ useEffect(() => {
 
 type SelectedGrowthStageTimelineProps = {
   items: SelectedPrediction[];
+  language: 'ja' | 'en';
   ndviRange: { min: number; max: number } | null;
   syncedRange: { min: number; max: number } | null;
   onRangeChange: (range: { min: number; max: number }) => void;
 };
 
-const SelectedGrowthStageTimeline: FC<SelectedGrowthStageTimelineProps> = memo(({ items, ndviRange, syncedRange, onRangeChange }) => {
+const SelectedGrowthStageTimeline: FC<SelectedGrowthStageTimelineProps> = memo(({ items, language, ndviRange, syncedRange, onRangeChange }) => {
   const timeline = useMemo(() => {
     if (!items || items.length === 0) {
       return {
@@ -1871,7 +1862,7 @@ const SelectedGrowthStageTimeline: FC<SelectedGrowthStageTimelineProps> = memo((
         dataset.data.push({
           x: [startTime, endTime],
           y: `${group.fieldName} (${group.varietyName})`,
-          stageName: prediction.cropGrowthStageV2?.name ?? '不明なステージ',
+          stageName: prediction.cropGrowthStageV2?.name ?? tr('gsp.stage.unknown'),
         });
       });
 
@@ -1896,7 +1887,7 @@ const SelectedGrowthStageTimeline: FC<SelectedGrowthStageTimelineProps> = memo((
     const chartHeight = Math.max(240, labels.length * 50 + 120);
 
     return { chartData, chartHeight, maxDate, minDate };
-  }, [items]);
+  }, [items, language]);
 
   const emitRange = useCallback(
     (chart: Chart<'bar'>) => {
@@ -1950,16 +1941,16 @@ const SelectedGrowthStageTimeline: FC<SelectedGrowthStageTimelineProps> = memo((
               }
               return `BBCH ${bbchIndex}: ${stageName}`;
             },
-            footer: (tooltipItems: TooltipItem<'bar'>[]): string => {
-              if (tooltipItems.length === 0) return '';
-              const raw = tooltipItems[0].raw as { x?: [number, number] };
-              if (!raw?.x) return '';
-              const [start, end] = raw.x;
-              const duration = differenceInCalendarDays(new Date(end), new Date(start));
-              return `期間: ${duration}日`;
-            },
-          },
-        },
+	            footer: (tooltipItems: TooltipItem<'bar'>[]): string => {
+	              if (tooltipItems.length === 0) return '';
+	              const raw = tooltipItems[0].raw as { x?: [number, number] };
+	              if (!raw?.x) return '';
+	              const [start, end] = raw.x;
+	              const duration = differenceInCalendarDays(new Date(end), new Date(start));
+	              return tr('gsp.duration_days', { days: duration });
+	            },
+	          },
+	        },
         datalabels: {
           clip: true,
           display: (context: any) => {
@@ -2004,7 +1995,7 @@ const SelectedGrowthStageTimeline: FC<SelectedGrowthStageTimelineProps> = memo((
               borderWidth: 2,
               borderDash: [6, 6],
               label: {
-                content: 'Today',
+                content: tr('chart.today'),
                 display: true,
                 position: 'start',
               },
@@ -2018,11 +2009,14 @@ const SelectedGrowthStageTimeline: FC<SelectedGrowthStageTimelineProps> = memo((
           position: 'top' as const,
           min: viewMin,
           max: viewMax,
-          adapters: { date: { locale: ja } },
+          adapters: { date: { locale: language === 'ja' ? ja : enUS } },
           time: {
             tooltipFormat: 'yyyy/MM/dd',
             minUnit: 'day',
-            displayFormats: { day: 'M/d', week: 'M/d', month: 'yyyy年 M月', year: 'yyyy年' },
+            displayFormats:
+              language === 'ja'
+                ? { day: 'M/d', week: 'M/d', month: 'yyyy年 M月', year: 'yyyy年' }
+                : { day: 'M/d', week: 'M/d', month: 'MMM yyyy', year: 'yyyy' },
           },
         },
         y: {
@@ -2031,13 +2025,13 @@ const SelectedGrowthStageTimeline: FC<SelectedGrowthStageTimelineProps> = memo((
         },
       },
     }),
-    [emitRange, limitMin, limitMax, ndviMin, ndviMax, todayStart, viewMin, viewMax],
+    [emitRange, limitMin, limitMax, ndviMin, ndviMax, todayStart, viewMin, viewMax, language],
   );
 
   if (!timeline.chartData || timeline.chartData.datasets.length === 0) {
     return (
       <div className="chart-container" style={{ marginTop: '1rem', padding: '1.5rem' }}>
-        <p style={{ color: '#b0b0b5', margin: 0 }}>選択した作期に紐づく生育ステージ予測がありません。</p>
+        <p style={{ color: '#b0b0b5', margin: 0 }}>{tr('ndvi.no_stage_predictions')}</p>
       </div>
     );
   }
@@ -2064,7 +2058,7 @@ const renderWeatherTooltip = (
   if (!datum) return null;
 
   const dateLabel = datum.isoDate
-    ? new Date(`${datum.isoDate}T00:00:00Z`).toLocaleDateString('ja-JP')
+    ? new Date(`${datum.isoDate}T00:00:00Z`).toLocaleDateString(getCurrentLanguage() === 'ja' ? 'ja-JP' : 'en-US')
     : datum.dateLabel || '';
 
   const rows = WEATHER_METRICS_CONFIG
@@ -2082,7 +2076,7 @@ const renderWeatherTooltip = (
       if (metric.key === 'gdd') digits = 1;
       const formatted = `${num.toFixed(digits)} ${metric.unit}`.trim();
       return {
-        label: metric.label,
+        label: tr(metric.labelKey),
         color: metric.color,
         value: formatted,
       };
@@ -2092,7 +2086,7 @@ const renderWeatherTooltip = (
   const windDir = datum.windDirectionDeg;
   if (windDir !== null && windDir !== undefined && Number.isFinite(Number(windDir))) {
     rows.push({
-      label: '風向',
+      label: tr('ndvi.weather.wind_direction'),
       color: '#9575cd',
       value: formatWindDirection(Number(windDir)),
     });

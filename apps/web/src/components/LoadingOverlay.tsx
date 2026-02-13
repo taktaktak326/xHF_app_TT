@@ -1,6 +1,7 @@
 import type { FC, ReactNode } from 'react';
 import LoadingSpinner from './LoadingSpinner';
 import './LoadingOverlay.css';
+import { tr } from '../i18n/runtime';
 
 type LoadingOverlayProps = {
   message?: string;
@@ -11,7 +12,7 @@ type LoadingOverlayProps = {
 };
 
 const LoadingOverlay: FC<LoadingOverlayProps> = ({
-  message = '読み込み中...',
+  message = tr('loading.default'),
   spinnerSize = 40,
   children,
   progress,

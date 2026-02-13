@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { LANGUAGE_STORAGE_KEY, useLanguage } from '../context/LanguageContext';
 import { withApiBase } from '../utils/apiBase';
 import { useNavigate } from 'react-router-dom';
 import './LoginForm.css';
@@ -17,7 +18,7 @@ async function loginAndToken(email: string, password: string): Promise<LoginAndT
   try {
     j = text ? JSON.parse(text) : null;
   } catch {
-    throw new Error(`応答がJSONではありません (status ${res.status}): ${text?.slice(0, 200)}`);
+    throw new Error(`Response is not JSON (status ${res.status}): ${text?.slice(0, 200)}`);
   }
   if (!res.ok || !j?.ok) {
     const msg = j?.detail?.gigya_errorMessage || j?.detail || j?.message || `HTTP ${res.status}`;
@@ -27,7 +28,7 @@ async function loginAndToken(email: string, password: string): Promise<LoginAndT
       normalizedMessage === 'Invalid LoginID' ||
       normalizedMessage === 'Invalid loginId'
     ) {
-      throw new Error('メールアドレスまたはパスワードが正しくありません');
+      throw new Error('Incorrect email or password');
     }
     throw new Error(normalizedMessage);
   }
@@ -40,6 +41,7 @@ export function LoginForm() {
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const { setAuth } = useAuth();
+  const { language, toggleLanguage, t } = useLanguage();
   const navigate = useNavigate();
 
   async function handleSubmit() {
@@ -49,13 +51,23 @@ export function LoginForm() {
       // 新規ログイン前にブラウザ側のストレージをクリアして古いトークン/キャッシュを除去
       if (typeof window !== 'undefined') {
         sessionStorage.clear();
+        const preservedLang = localStorage.getItem(LANGUAGE_STORAGE_KEY);
         localStorage.clear();
+        if (preservedLang) localStorage.setItem(LANGUAGE_STORAGE_KEY, preservedLang);
       }
       const authData = await loginAndToken(email, pw);
       setAuth(authData);
       navigate('/farms'); // ログイン後に圃場ページへ遷移
     } catch (e: any) {
-      setErr(e?.message || 'ログインに失敗しました');
+      const fallback = t('login.failed');
+      const msg = e?.message || fallback;
+      if (msg.startsWith('Response is not JSON')) {
+        setErr(`${t('login.invalid_json')} (${msg.replace('Response is not JSON', '').trim()})`);
+      } else if (msg === 'Incorrect email or password') {
+        setErr(t('login.invalid_credentials'));
+      } else {
+        setErr(msg || fallback);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -64,12 +76,21 @@ export function LoginForm() {
   return (
     <div className="login-form-container">
       <div className="login-form">
-        <h2>ログイン</h2>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
+          <h2 style={{ margin: 0 }}>{t('login.title')}</h2>
+          <button
+            onClick={toggleLanguage}
+            title={language === 'ja' ? t('action.switch_to_en') : t('action.switch_to_ja')}
+            style={{ flexShrink: 0 }}
+          >
+            {language === 'ja' ? 'JA' : 'EN'}
+          </button>
+        </div>
         <div className="login-form-grid">
-          <input placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-          <input placeholder="password" type="password" value={pw} onChange={(e) => setPw(e.target.value)} />
+          <input placeholder={t('login.email_placeholder')} value={email} onChange={(e) => setEmail(e.target.value)} />
+          <input placeholder={t('login.password_placeholder')} type="password" value={pw} onChange={(e) => setPw(e.target.value)} />
           <button onClick={handleSubmit} disabled={submitting}>
-            {submitting ? 'ログイン中...' : 'ログイン'}
+            {submitting ? t('login.submitting') : t('login.submit')}
           </button>
         </div>
         {err && <p className="login-error">{err}</p>}

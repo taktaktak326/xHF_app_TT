@@ -6,6 +6,7 @@ import { useFarms } from '../context/FarmContext';
 import { useAuth } from '../context/AuthContext';
 import { withApiBase } from '../utils/apiBase';
 import { formatCombinedLoadingMessage } from '../utils/loadingMessage';
+import { postJsonCached } from '../utils/cachedJsonFetch';
 import './CropRegistrationPage.css';
 
 const CROP_LIST = [
@@ -723,19 +724,17 @@ const EditRegistrationForm: FC<{
 
     const fetchCrops = async () => {
       try {
-        const res = await fetch(withApiBase('/masterdata/crops'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const { ok, status, json } = await postJsonCached<any>(
+          withApiBase('/masterdata/crops'),
+          {
             login_token: auth.login.login_token,
             api_token: auth.api_token,
             locale: 'JA-JP',
-          }),
-        });
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
-        const json = await res.json();
+          },
+          undefined,
+          { cacheKey: 'masterdata:crops:JA-JP', cache: 'session' },
+        );
+        if (!ok) throw new Error(`HTTP ${status}`);
         const items = (json.items ?? json ?? []) as any[];
         const normalized = items
           .map((item) => ({
@@ -827,22 +826,22 @@ const EditRegistrationForm: FC<{
       setVarietiesLoading(true);
       setVarietiesError(null);
       try {
-        const res = await fetch(withApiBase('/masterdata/varieties'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const { ok, status, json } = await postJsonCached<any>(
+          withApiBase('/masterdata/varieties'),
+          {
             login_token: auth.login.login_token,
             api_token: auth.api_token,
             locale: 'JA-JP',
             countryCode: 'JP',
             cropUuid: registrationData.cropUuid,
-          }),
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+          },
+          undefined,
+          { cacheKey: `masterdata:varieties:JA-JP:JP:${registrationData.cropUuid}`, cache: 'session' },
+        );
+        if (!ok) {
+          const detail = typeof json === 'string' ? json.slice(0, 200) : '';
+          throw new Error(`HTTP ${status}${detail ? `: ${detail}` : ''}`);
         }
-        const json = await res.json();
         const items = (json.items ?? json ?? []) as any[];
         const normalized = items
           .map((item) => ({
@@ -1382,20 +1381,20 @@ const RegistrationDetailsScreen: FC<{
       setCropsLoading(true);
       setCropFetchError(null);
       try {
-        const res = await fetch(withApiBase('/masterdata/crops'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const { ok, status, json } = await postJsonCached<any>(
+          withApiBase('/masterdata/crops'),
+          {
             login_token: auth.login.login_token,
             api_token: auth.api_token,
             locale: 'JA-JP',
-          }),
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+          },
+          undefined,
+          { cacheKey: 'masterdata:crops:JA-JP', cache: 'session' },
+        );
+        if (!ok) {
+          const detail = typeof json === 'string' ? json.slice(0, 200) : '';
+          throw new Error(`HTTP ${status}${detail ? `: ${detail}` : ''}`);
         }
-        const json = await res.json();
         const items = (json.items ?? json ?? []) as any[];
         const normalized = items
           .map((item) => ({
@@ -1444,22 +1443,22 @@ const RegistrationDetailsScreen: FC<{
       setVarietiesLoading(true);
       setVarietiesError(null);
       try {
-        const res = await fetch(withApiBase('/masterdata/varieties'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const { ok, status, json } = await postJsonCached<any>(
+          withApiBase('/masterdata/varieties'),
+          {
             login_token: auth.login.login_token,
             api_token: auth.api_token,
             locale: 'JA-JP',
             countryCode: 'JP',
             cropUuid: selectedCrop.uuid,
-          }),
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+          },
+          undefined,
+          { cacheKey: `masterdata:varieties:JA-JP:JP:${selectedCrop.uuid}`, cache: 'session' },
+        );
+        if (!ok) {
+          const detail = typeof json === 'string' ? json.slice(0, 200) : '';
+          throw new Error(`HTTP ${status}${detail ? `: ${detail}` : ''}`);
         }
-        const json = await res.json();
         const items = (json.items ?? json ?? []) as any[];
         const normalized = items
           .map((item) => ({
@@ -2294,20 +2293,20 @@ export const CropRegistrationPage: FC = () => {
     setTillageSystemsLoading(true);
     setTillageSystemsError(null);
     try {
-      const res = await fetch(withApiBase('/masterdata/tillage-systems'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const { ok, status, json } = await postJsonCached<any>(
+        withApiBase('/masterdata/tillage-systems'),
+        {
           login_token: auth.login.login_token,
           api_token: auth.api_token,
           locale: 'JA-JP',
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+        },
+        undefined,
+        { cacheKey: 'masterdata:tillage-systems:JA-JP', cache: 'session' },
+      );
+      if (!ok) {
+        const detail = typeof json === 'string' ? json.slice(0, 200) : '';
+        throw new Error(`HTTP ${status}${detail ? `: ${detail}` : ''}`);
       }
-      const json = await res.json();
       const items = (json.items ?? json ?? []) as any[];
       const normalized = items
         .map((item) => ({

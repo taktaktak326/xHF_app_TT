@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { FarmProvider } from './context/FarmContext';
 import { DataProvider } from './context/DataContext';
 import { WarmupProvider } from './context/WarmupContext';
+import { LanguageProvider } from './context/LanguageContext';
 import { Layout } from './components/Layout';
 import { LoginForm } from './components/LoginForm';
 import { FarmsPage } from './pages/FarmsPage';
@@ -54,16 +55,18 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <WarmupProvider>
-        <DataProvider>
-          <FarmProvider>
-            <WarmupToast />
-            <CombinedDataToast />
-            <AppRoutes />
-          </FarmProvider>
-        </DataProvider>
-      </WarmupProvider>
-    </AuthProvider>
+    <LanguageProvider>
+      <AuthProvider>
+        <WarmupProvider>
+          <DataProvider>
+            <FarmProvider>
+              <WarmupToast />
+              <CombinedDataToast />
+              <AppRoutes />
+            </FarmProvider>
+          </DataProvider>
+        </WarmupProvider>
+      </AuthProvider>
+    </LanguageProvider>
   );
 }

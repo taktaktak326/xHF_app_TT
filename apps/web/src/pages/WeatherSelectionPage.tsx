@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useData } from '../context/DataContext';
+import { useLanguage } from '../context/LanguageContext';
 import type { Field } from '../types/farm';
 import './FarmsPage.css'; // Reuse common styles
 import LoadingOverlay from '../components/LoadingOverlay';
@@ -94,6 +95,7 @@ export function WeatherSelectionPage() {
     combinedFetchMaxAttempts,
     combinedRetryCountdown,
   } = useData();
+  const { language, t } = useLanguage();
   const navigate = useNavigate();
 
   const fields = useMemo(() => {
@@ -119,23 +121,23 @@ export function WeatherSelectionPage() {
       {combinedLoading && (
         <LoadingOverlay
           message={formatCombinedLoadingMessage(
-            '圃場リスト',
+            t('weather.selection.loading_label'),
             combinedFetchAttempt,
             combinedFetchMaxAttempts,
             combinedRetryCountdown,
           )}
         />
       )}
-      <h2>天気情報</h2>
-      <p>2km以内の圃場はまとめて天気情報を取得します。</p>
+      <h2>{t('weather.selection.title')}</h2>
+      <p>{t('weather.selection.description')}</p>
 
       <div className="field-list-container">
         {clusters.map(cluster => {
           const primary = cluster.fields[0];
           const displayName = cluster.fields.length > 1
-            ? `${primary.name} ほか ${cluster.fields.length - 1} 圃場`
+            ? t('weather.selection.cluster_display', { name: primary.name, count: cluster.fields.length - 1 })
             : primary.name;
-          const tooltip = cluster.fields.map(field => field.name).join('、');
+          const tooltip = cluster.fields.map(field => field.name).join(language === 'ja' ? '、' : ', ');
           return (
             <div
               key={cluster.id}
@@ -155,7 +157,7 @@ export function WeatherSelectionPage() {
               }
             >
               <h4>{displayName}</h4>
-              <p className="cluster-meta">クラスタ: {cluster.fields.length} 圃場 / 半径 {CLUSTER_RADIUS_KM}km</p>
+              <p className="cluster-meta">{t('weather.selection.cluster_meta', { count: cluster.fields.length, km: CLUSTER_RADIUS_KM })}</p>
             </div>
           );
         })}
@@ -166,11 +168,11 @@ export function WeatherSelectionPage() {
             onClick={() => navigate(`/weather/${field.uuid}`)}
           >
             <h4>{field.name}</h4>
-            <p className="cluster-meta">位置情報なし</p>
+            <p className="cluster-meta">{t('weather.selection.no_location')}</p>
           </div>
         ))}
         {!combinedLoading && fields.length === 0 && (
-          <p>表示できる圃場がありません。</p>
+          <p>{t('weather.selection.no_fields')}</p>
         )}
       </div>
     </div>

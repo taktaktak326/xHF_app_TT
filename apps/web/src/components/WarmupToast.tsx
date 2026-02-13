@@ -1,9 +1,11 @@
 import { useEffect } from 'react';
 import { useWarmup } from '../context/WarmupContext';
+import { useLanguage } from '../context/LanguageContext';
 import './WarmupToast.css';
 
 export const WarmupToast = () => {
   const { status, progress, details, error, retryWarmup, dismiss } = useWarmup();
+  const { t } = useLanguage();
 
   useEffect(() => {
     if (status === 'success') {
@@ -20,10 +22,10 @@ export const WarmupToast = () => {
   }
 
   const messageMap = {
-    running: 'アプリを起動しています...',
-    success: 'アプリの準備が完了しました',
-    failed: 'アプリの準備に失敗しました',
-  };
+    running: t('warmup.running'),
+    success: t('warmup.success'),
+    failed: t('warmup.failed'),
+  } as const;
 
   const showProgress = status === 'running';
 
@@ -31,7 +33,7 @@ export const WarmupToast = () => {
     <div className={`warmup-toast warmup-toast--${status}`}>
       <div className="warmup-toast__header">
         <span className="warmup-toast__title">{messageMap[status]}</span>
-        <button className="warmup-toast__close" onClick={dismiss} aria-label="閉じる">
+        <button className="warmup-toast__close" onClick={dismiss} aria-label={t('action.close')}>
           ×
         </button>
       </div>
@@ -48,7 +50,7 @@ export const WarmupToast = () => {
       </div>
       {status === 'failed' && (
         <div className="warmup-toast__actions">
-          <button onClick={retryWarmup}>再試行</button>
+          <button onClick={retryWarmup}>{t('action.retry')}</button>
         </div>
       )}
     </div>

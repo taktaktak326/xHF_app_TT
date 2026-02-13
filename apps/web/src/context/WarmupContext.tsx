@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { withApiBase } from '../utils/apiBase';
+import { tr } from '../i18n/runtime';
 
 type WarmupStatus = 'idle' | 'running' | 'success' | 'failed';
 
@@ -63,8 +64,8 @@ export const WarmupProvider = ({ children }: { children: ReactNode }) => {
       setStatus('success');
       setProgress(100);
       setDetails([
-        'アプリの準備が完了しました',
-        `位置情報データ: ${entryCount ?? '不明'} 件をロードしました`,
+        tr('warmup.detail.ready'),
+        tr('warmup.detail.location_loaded', { count: entryCount ?? tr('gsp.value.unknown') }),
       ]);
       setError(null);
       if (statusRef.current !== 'success') {
@@ -81,8 +82,8 @@ export const WarmupProvider = ({ children }: { children: ReactNode }) => {
         return Math.min(90, prev + 10);
       });
       setDetails([
-        'バックエンドを初期化中',
-        `位置情報データを準備しています（現在 ${entryCount ?? 0} 件）`,
+        tr('warmup.detail.backend_initializing'),
+        tr('warmup.detail.location_preparing', { count: entryCount ?? 0 }),
       ]);
       setError(null);
       return;
@@ -92,11 +93,11 @@ export const WarmupProvider = ({ children }: { children: ReactNode }) => {
       setStatus('failed');
       setProgress(0);
       setDetails([
-        'バックエンドの初期化に失敗しました',
-        '再試行ボタンをタップしてもう一度お試しください',
-        `位置情報データの読み込み状況: ${entryCount ?? 0} 件`,
+        tr('warmup.detail.backend_failed'),
+        tr('warmup.detail.retry_hint'),
+        tr('warmup.detail.location_progress', { count: entryCount ?? 0 }),
       ]);
-      setError(payload?.error ?? 'ウォームアップに失敗しました');
+      setError(payload?.error ?? tr('warmup.error.failed'));
       return;
     }
 
@@ -153,10 +154,10 @@ export const WarmupProvider = ({ children }: { children: ReactNode }) => {
         setStatus('failed');
         setProgress(0);
         setDetails([
-          'バックエンドの初期化に失敗しました',
-          '再試行ボタンをタップしてもう一度お試しください',
+          tr('warmup.detail.backend_failed'),
+          tr('warmup.detail.retry_hint'),
         ]);
-        setError(err instanceof Error ? err.message : 'ウォームアップに失敗しました');
+        setError(err instanceof Error ? err.message : tr('warmup.error.failed'));
       }
     },
     [applyPayload, clearAutoDismiss, startPolling, stopPolling],

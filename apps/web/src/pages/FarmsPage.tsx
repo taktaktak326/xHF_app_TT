@@ -29,6 +29,9 @@ import './FarmsPage.css';
 import LoadingOverlay from '../components/LoadingOverlay';
 import { formatCombinedLoadingMessage } from '../utils/loadingMessage';
 import { withApiBase } from '../utils/apiBase';
+import { useLanguage } from '../context/LanguageContext';
+import { postJsonCached } from '../utils/cachedJsonFetch';
+import { getCurrentLanguage, tr } from '../i18n/runtime';
 import { getSessionCache, setSessionCache } from '../utils/sessionCache';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend, zoomPlugin, ChartDataLabels);
@@ -58,13 +61,38 @@ type FieldCenter = {
 };
 
 const getFieldCenter = (field: Field): FieldCenter | null => {
-  const candidates = [field.location?.center, (field as any).center, (field as any).centroid];
+  const farmV2 = (field as any).farmV2 ?? (field as any).farm ?? null;
+  const farmCenter = farmV2 && typeof farmV2.latitude === 'number' && typeof farmV2.longitude === 'number'
+    ? { latitude: farmV2.latitude, longitude: farmV2.longitude }
+    : null;
+  const candidates = [field.location?.center, (field as any).center, (field as any).centroid, farmCenter];
   for (const candidate of candidates) {
     if (candidate && typeof candidate.latitude === 'number' && typeof candidate.longitude === 'number') {
       return { latitude: candidate.latitude, longitude: candidate.longitude };
     }
   }
   return null;
+};
+
+const normalizeLatLon = (lat: number, lon: number) => {
+  const inRange = (la: number, lo: number) => Math.abs(la) <= 90 && Math.abs(lo) <= 180;
+  if (inRange(lat, lon)) return { lat, lon };
+  if (inRange(lon, lat)) return { lat: lon, lon: lat };
+  return { lat, lon };
+};
+
+const mergeLocationPreferNonEmpty = (
+  base: Field['location'],
+  override: Partial<NonNullable<Field['location']>> | undefined,
+): Field['location'] => {
+  if (!override) return base;
+  const out: any = { ...(base ?? {}) };
+  Object.entries(override).forEach(([k, v]) => {
+    if (v === null || v === undefined) return;
+    if (typeof v === 'string' && v.trim() === '') return;
+    out[k] = v;
+  });
+  return out as Field['location'];
 };
 
 const getFarmName = (field: Field): string => {
@@ -147,27 +175,35 @@ const buildNoteImageItems = (notes: FieldNote[] | null | undefined): NoteImageIt
 const getFieldNotesCacheKey = (farmUuids: string[]) =>
   `field-notes:${[...farmUuids].sort().join(',')}`;
 
+const PREF_CITY_CACHE_KEY = 'pref-city:by-field:v1';
+
+const getClosedCombinedCacheKey = (farmUuids: string[], language: string) =>
+  `combined-fields:closed:${language}:${[...farmUuids].sort().join(',')}`;
+
 async function fetchFieldNotesApi(params: { auth: { login: { login_token: string }; api_token: string }; farmUuids: string[] }) {
   const cacheKey = getFieldNotesCacheKey(params.farmUuids);
-  if (params.farmUuids.length > 0) {
-    const cached = getSessionCache<any>(cacheKey);
-    if (cached) return { ...cached, source: 'cache' };
-  }
   const requestBody = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
     farm_uuids: params.farmUuids,
   };
-  const res = await fetch(withApiBase('/field-notes'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(requestBody),
-  });
-  const out = await res.json();
-  if (res.ok && params.farmUuids.length > 0) {
-    setSessionCache(cacheKey, { ...out, source: 'api' });
+  const { ok, status, json: out, source } = await postJsonCached<any>(
+    withApiBase('/field-notes'),
+    requestBody,
+    undefined,
+    { cacheKey, cache: params.farmUuids.length > 0 ? 'session' : 'none' },
+  );
+  if (!ok) {
+    const detail = typeof out === 'string' ? out : out?.detail ?? out?.message ?? out?.error ?? `HTTP ${status}`;
+    return { ok: false, status, detail, source };
   }
-  return { ...out, source: 'api' };
+  if (!out) {
+    return { ok: false, status, detail: 'Empty response from server', source };
+  }
+  if (typeof out === 'string') {
+    return { ok: false, status, detail: out, source };
+  }
+  return { ...out, source };
 }
 
 // =============================================================================
@@ -190,6 +226,7 @@ const FieldsTableHeader = ({
   isSomeSelectedOnPage: boolean;
   onToggleSelectAll: (nextValue: boolean) => void;
 }) => {
+  const { t } = useLanguage();
   const selectAllRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -223,30 +260,30 @@ const FieldsTableHeader = ({
             type="checkbox"
             checked={isAllSelectedOnPage}
             onChange={(event) => onToggleSelectAll(event.target.checked)}
-            aria-label="表示中の圃場をすべて選択"
+            aria-label={t('action.select_all_visible_fields')}
           />
         </th>
-        {headerCell('field.name', '圃場')}
-        {headerCell('field.farmV2.name', '農場', false)}
-        {headerCell('field.farmV2.owner', 'ユーザー', false)}
-        {headerCell('field.location.prefecture', '都道府県', false)}
-        {headerCell('field.location.municipality', '市区町村', false)}
-        {headerCell('field.location.center.latitude', '緯度', false)}
-        {headerCell('field.location.center.longitude', '経度', false)}
-        {headerCell('field.area', '面積(a)')}
-        {headerCell('season.crop.name', '作物')}
-        {headerCell('season.variety.name', '品種')}
-        {headerCell('season.startDate', '作付日')}
-        {headerCell('season.countryCropGrowthStagePredictions', 'BBCH89到達日', false)}
-        {headerCell('season.yieldExpectation', '目標収量(kg/10a)', false)}
-        {headerCell('season.cropEstablishmentGrowthStageIndex', '作付時の生育ステージ')}
-        {headerCell('season.cropEstablishmentMethodCode', '作付方法', false)}
-        {headerCell('season.activeGrowthStage.gsOrder', '現在の生育ステージ')}
-        {headerCell('nextStage.gsOrder', '次の生育ステージ')}
-        {headerCell('nutritionRecommendations', '施肥推奨', false)}
-        {headerCell('waterRecommendations', '水管理', false)}
-        {headerCell('weedManagementRecommendations', '雑草管理', false)}
-        {headerCell('riskAlert', 'リスクアラート', false)}
+        {headerCell('field.name', t('table.field'))}
+        {headerCell('field.farmV2.name', t('table.farm'), false)}
+        {headerCell('field.farmV2.owner', t('table.user'), false)}
+        {headerCell('field.location.prefecture', t('table.prefecture'), false)}
+        {headerCell('field.location.municipality', t('table.municipality'), false)}
+        {headerCell('field.location.center.latitude', t('table.latitude'), false)}
+        {headerCell('field.location.center.longitude', t('table.longitude'), false)}
+        {headerCell('field.area', t('table.area_a'))}
+        {headerCell('season.crop.name', t('table.crop'))}
+        {headerCell('season.variety.name', t('gsp.filter.variety'))}
+        {headerCell('season.startDate', t('table.planting_date'))}
+        {headerCell('season.countryCropGrowthStagePredictions', t('table.bbch89'), false)}
+        {headerCell('season.yieldExpectation', t('table.target_yield'), false)}
+        {headerCell('season.cropEstablishmentGrowthStageIndex', t('table.stage_at_planting'))}
+        {headerCell('season.cropEstablishmentMethodCode', t('table.planting_method'), false)}
+        {headerCell('season.activeGrowthStage.gsOrder', t('table.current_stage'))}
+        {headerCell('nextStage.gsOrder', t('table.next_stage'))}
+        {headerCell('nutritionRecommendations', t('table.nutrition_rec'), false)}
+        {headerCell('waterRecommendations', t('table.water_rec'), false)}
+        {headerCell('weedManagementRecommendations', t('table.weed_rec'), false)}
+        {headerCell('riskAlert', t('table.risk_alert'), false)}
       </tr>
     </thead>
   );
@@ -286,6 +323,8 @@ function FieldsTable({
   tableRef?: Ref<HTMLTableElement>;
   locationByFieldUuid: Record<string, Partial<NonNullable<Field['location']>>>;
 }) {
+  const { t } = useLanguage();
+
   return (
     <table className="fields-table" ref={tableRef}>
       <FieldsTableHeader
@@ -298,17 +337,15 @@ function FieldsTable({
       <tbody>
         {fieldSeasonPairs.map((pair, index) => {
           const { field, season } = pair;
-          const noteImage = noteImageByField[field.uuid] ?? null;
-          const noteState = noteImageStateByField[field.uuid] ?? 'idle';
-          const noteError = noteImageErrorByField[field.uuid] ?? '';
-          const locationOverride = locationByFieldUuid[field.uuid];
-          const effectiveLocation = locationOverride
-            ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
-            : field.location;
-          const center = getFieldCenter(field);
-          const farmName = getFarmName(field);
-          const ownerName = getFarmOwnerName(field);
-          const bbch89Date = getBbch89Date(season);
+	          const noteImage = noteImageByField[field.uuid] ?? null;
+	          const noteState = noteImageStateByField[field.uuid] ?? 'idle';
+	          const noteError = noteImageErrorByField[field.uuid] ?? '';
+	          const locationOverride = locationByFieldUuid[field.uuid];
+	          const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
+	          const center = getFieldCenter(field);
+	          const farmName = getFarmName(field);
+	          const ownerName = getFarmOwnerName(field);
+	          const bbch89Date = getBbch89Date(season);
           const targetYield = getTargetYieldLabel(season);
           return (
             <tr key={`${field.uuid}-${season?.uuid ?? index}`}>
@@ -317,7 +354,7 @@ function FieldsTable({
                   type="checkbox"
                   checked={selectedFieldIds.has(field.uuid)}
                   onChange={() => onToggleFieldSelection(field.uuid)}
-                  aria-label={`${field.name}を選択`}
+                  aria-label={t('farms.table.select_field_aria', { fieldName: field.name })}
                 />
               </td>
               <td>
@@ -332,13 +369,13 @@ function FieldsTable({
                       className="field-note-button"
                       onClick={() => onOpenNoteList(field)}
                     >
-                      一覧
+                      {t('farms.notes.button.list')}
                     </button>
                     {noteState === 'loading' && (
-                      <span className="field-note-loading">取得中...</span>
+                      <span className="field-note-loading">{t('farms.notes.loading_inline')}</span>
                     )}
                     {noteState === 'error' && (
-                      <span className="field-note-error">{noteError || '取得失敗'}</span>
+                      <span className="field-note-error">{noteError || t('error.fetch_failed_short')}</span>
                     )}
                   </div>
                   {noteImage && (
@@ -346,7 +383,7 @@ function FieldsTable({
                       <a href={noteImage.url} target="_blank" rel="noreferrer">
                         <img
                           src={noteImage.url}
-                          alt={`${field.name} 最新ノート画像`}
+                          alt={t('farms.notes.latest_image_alt', { fieldName: field.name })}
                           loading="lazy"
                         />
                       </a>
@@ -354,7 +391,7 @@ function FieldsTable({
                     </div>
                   )}
                   {noteState === 'empty' && (
-                    <div className="field-note-empty">画像付きノートなし</div>
+                    <div className="field-note-empty">{t('farms.notes.no_image_inline')}</div>
                   )}
                 </div>
               </td>
@@ -400,6 +437,7 @@ function FieldsTable({
 
 export function FarmsPage() {
   const { auth } = useAuth();
+  const { language, t } = useLanguage();
   const { submittedFarms, fetchCombinedDataIfNeeded } = useFarms();
   const {
     combinedOut,
@@ -437,7 +475,9 @@ export function FarmsPage() {
   const [noteModalLimit, setNoteModalLimit] = useState<number>(10);
   const [noteModalFrom, setNoteModalFrom] = useState('');
   const [noteModalTo, setNoteModalTo] = useState('');
-  const [prefCityByFieldUuid, setPrefCityByFieldUuid] = useState<Record<string, Partial<NonNullable<Field['location']>>>>({});
+  const [prefCityByFieldUuid, setPrefCityByFieldUuid] = useState<Record<string, Partial<NonNullable<Field['location']>>>>(
+    () => getSessionCache<Record<string, Partial<NonNullable<Field['location']>>>>(PREF_CITY_CACHE_KEY) ?? {},
+  );
   const prefCityWorkerRef = useRef<Worker | null>(null);
   const prefCityPendingRef = useRef<Set<string>>(new Set());
   const [prefCityDatasetReady, setPrefCityDatasetReady] = useState(false);
@@ -447,6 +487,13 @@ export function FarmsPage() {
   const [tableScrollbarWidth, setTableScrollbarWidth] = useState(0);
   const [showTableScrollbar, setShowTableScrollbar] = useState(false);
   const isSyncingScrollRef = useRef(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setSessionCache(PREF_CITY_CACHE_KEY, prefCityByFieldUuid);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [prefCityByFieldUuid]);
 
   useEffect(() => {
     // when farms selection changes, reset closed view cache
@@ -466,35 +513,37 @@ export function FarmsPage() {
     setClosedLoading(true);
     setClosedError(null);
     try {
-      const res = await fetch(withApiBase('/combined-fields'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          login_token: auth.login.login_token,
-          api_token: auth.api_token,
-          farm_uuids: submittedFarms,
-          languageCode: 'ja',
-          countryCode: 'JP',
-          cropSeasonLifeCycleStates: ['CLOSED'],
-          withBoundarySvg: true,
-          stream: false,
-          includeTasks: false,
-          includeTokens: false,
-        }),
-      });
-      const out = await res.json();
-      if (!res.ok || out?.ok === false) {
-        const detail = out?.detail ?? out?.message ?? out?.error ?? `HTTP ${res.status}`;
+      const payload = {
+        login_token: auth.login.login_token,
+        api_token: auth.api_token,
+        farm_uuids: submittedFarms,
+        languageCode: language,
+        countryCode: 'JP',
+        cropSeasonLifeCycleStates: ['CLOSED'],
+        withBoundarySvg: true,
+        stream: false,
+        includeTasks: false,
+        includeTokens: false,
+      };
+      const cacheKey = getClosedCombinedCacheKey(submittedFarms, language);
+      const { ok, status, json: out } = await postJsonCached<any>(
+        withApiBase('/combined-fields'),
+        payload,
+        undefined,
+        { cacheKey, cache: 'session' },
+      );
+      if (!ok || out?.ok === false) {
+        const detail = out?.detail ?? out?.message ?? out?.error ?? `HTTP ${status}`;
         throw new Error(detail);
       }
       setClosedCombinedOut(out);
     } catch (e) {
-      const message = e instanceof Error ? e.message : '過去作期の取得に失敗しました。';
+      const message = e instanceof Error ? e.message : t('farms.closed_fetch_failed');
       setClosedError(message);
     } finally {
       setClosedLoading(false);
     }
-  }, [auth, submittedFarms]);
+  }, [auth, submittedFarms, language, t]);
 
   useEffect(() => {
     if (seasonView !== 'closed') return;
@@ -543,9 +592,14 @@ export function FarmsPage() {
 
     const request = (async () => {
       const out = await fetchFieldNotesApi({ auth: authInfo, farmUuids: [farmUuid] });
+      if (out?.ok === false) {
+        const detail = out?.detail ?? out?.message ?? out?.error ?? 'fieldNotes fetch failed';
+        throw new Error(String(detail));
+      }
       const fields = out?.response?.data?.fieldsV2;
       if (!Array.isArray(fields)) {
-        throw new Error('fieldNotes response missing');
+        const statusHint = typeof out?.status === 'number' ? ` (HTTP ${out.status})` : '';
+        throw new Error(`fieldNotes response missing${statusHint}`);
       }
       const map: Record<string, FieldNote[]> = {};
       fields.forEach((f: { uuid: string; fieldNotes?: FieldNote[] | null }) => {
@@ -570,14 +624,14 @@ export function FarmsPage() {
 
     if (!auth) {
       setNoteImageStateByField((prev) => ({ ...prev, [fieldId]: 'error' }));
-      setNoteImageErrorByField((prev) => ({ ...prev, [fieldId]: '未ログイン' }));
+      setNoteImageErrorByField((prev) => ({ ...prev, [fieldId]: t('auth.not_logged_in_short') }));
       return;
     }
 
     const farmUuid = field.farmV2?.uuid ?? field.farm?.uuid ?? null;
     if (!farmUuid) {
       setNoteImageStateByField((prev) => ({ ...prev, [fieldId]: 'error' }));
-      setNoteImageErrorByField((prev) => ({ ...prev, [fieldId]: 'Farm UUIDなし' }));
+      setNoteImageErrorByField((prev) => ({ ...prev, [fieldId]: t('error.no_farm_uuid') }));
       return;
     }
 
@@ -587,7 +641,7 @@ export function FarmsPage() {
         fieldNotesMap = await fetchFieldNotesMap(farmUuid, auth);
       } catch (error) {
         setNoteImageStateByField((prev) => ({ ...prev, [fieldId]: 'error' }));
-        const message = error instanceof Error ? error.message : '取得失敗';
+        const message = error instanceof Error ? error.message : t('error.fetch_failed_short');
         setNoteImageErrorByField((prev) => ({ ...prev, [fieldId]: message }));
         return;
       }
@@ -615,14 +669,14 @@ export function FarmsPage() {
 
     if (!auth) {
       setNoteModalState('error');
-      setNoteModalError('未ログイン');
+      setNoteModalError(t('auth.not_logged_in_short'));
       return;
     }
 
     const farmUuid = field.farmV2?.uuid ?? field.farm?.uuid ?? null;
     if (!farmUuid) {
       setNoteModalState('error');
-      setNoteModalError('Farm UUIDなし');
+      setNoteModalError(t('error.no_farm_uuid'));
       return;
     }
 
@@ -637,7 +691,7 @@ export function FarmsPage() {
       setNoteModalItems(items);
     } catch (error) {
       setNoteModalState('error');
-      const message = error instanceof Error ? error.message : '取得失敗';
+      const message = error instanceof Error ? error.message : t('error.fetch_failed_short');
       setNoteModalError(message);
     }
   };
@@ -777,10 +831,21 @@ export function FarmsPage() {
   };
 
   const buildStyleKey = (pair: FieldSeasonPair) => {
-    const crop = pair.season?.crop.name ?? '不明作物';
+    const crop = pair.season?.crop.name ?? t('crop.unknown');
     const variety = pair.season?.variety.name ?? '';
     return variety ? `${crop} / ${variety}` : crop;
   };
+
+  const myMapsColumns = useMemo(
+    () => ({
+      fieldName: t('mymaps.field_name'),
+      cropName: t('mymaps.crop_name'),
+      varietyName: t('mymaps.variety_name'),
+      plantingDate: t('mymaps.planting_date'),
+      fieldId: t('mymaps.field_id'),
+    }),
+    [t],
+  );
 
   const buildMyMapsFeature = (pair: FieldSeasonPair, index: number) => {
     const fieldAny = pair.field as Field & { boundary?: any; center?: any; centroid?: any };
@@ -795,11 +860,11 @@ export function FarmsPage() {
     return {
       type: 'Feature',
       properties: {
-        '圃場名': pair.field.name,
-        '作物名': pair.season?.crop.name ?? '',
-        '品種名': pair.season?.variety.name ?? '',
-        '作付日': pair.season?.startDate ? getLocalDateString(pair.season.startDate) : '',
-        '圃場ID': pair.field.uuid,
+        [myMapsColumns.fieldName]: pair.field.name,
+        [myMapsColumns.cropName]: pair.season?.crop.name ?? '',
+        [myMapsColumns.varietyName]: pair.season?.variety.name ?? '',
+        [myMapsColumns.plantingDate]: pair.season?.startDate ? getLocalDateString(pair.season.startDate) : '',
+        [myMapsColumns.fieldId]: pair.field.uuid,
         __styleKey: buildStyleKey(pair),
         __row: index + 1,
       },
@@ -954,7 +1019,7 @@ export function FarmsPage() {
 
   const buildPlacemark = (feature: any) => {
     const props = feature.properties ?? {};
-    const name = escapeXml(String(props['圃場名'] ?? '圃場'));
+    const name = escapeXml(String(props[myMapsColumns.fieldName] ?? t('field.generic')));
     const styleKey = String(props.__styleKey ?? '');
     const dataEntries = Object.entries(props)
       .filter(([key]) => !String(key).startsWith('__'))
@@ -1019,15 +1084,18 @@ export function FarmsPage() {
     [allFieldSeasonPairsWithNextStage],
   );
 
-  const pageFieldIds = useMemo(
-    () => Array.from(new Set(paginatedFieldSeasonPairs.map(pair => pair.field.uuid))),
-    [paginatedFieldSeasonPairs],
-  );
-
+  // "Select all" checkbox is for all currently shown (filtered) fields, not just the current page.
+  const shownFieldIds = uniqueFieldIds;
   const isAllSelectedOnPage =
-    pageFieldIds.length > 0 && pageFieldIds.every(id => selectedFieldIds.has(id));
+    shownFieldIds.length > 0 && shownFieldIds.every(id => selectedFieldIds.has(id));
   const isSomeSelectedOnPage =
-    pageFieldIds.some(id => selectedFieldIds.has(id)) && !isAllSelectedOnPage;
+    shownFieldIds.some(id => selectedFieldIds.has(id)) && !isAllSelectedOnPage;
+
+  const selectedShownCount = useMemo(
+    () => shownFieldIds.reduce((acc, id) => acc + (selectedFieldIds.has(id) ? 1 : 0), 0),
+    [shownFieldIds, selectedFieldIds],
+  );
+  const hiddenSelectedCount = Math.max(0, selectedFieldIds.size - selectedShownCount);
 
   const handleToggleFieldSelection = (fieldId: string) => {
     setSelectedFieldIds(prev => {
@@ -1044,7 +1112,7 @@ export function FarmsPage() {
   const handleToggleSelectAllOnPage = (nextValue: boolean) => {
     setSelectedFieldIds(prev => {
       const next = new Set(prev);
-      pageFieldIds.forEach((id) => {
+      shownFieldIds.forEach((id) => {
         if (nextValue) {
           next.add(id);
         } else {
@@ -1057,9 +1125,9 @@ export function FarmsPage() {
 
   const showLoading = combinedLoading || closedLoading;
   const loadingMessage = closedLoading
-    ? '過去作期の圃場データを取得しています...'
+    ? t('farms.loading.closed_fields')
     : formatCombinedLoadingMessage(
-        '圃場データ',
+        t('label.fields_data'),
         combinedFetchAttempt,
         combinedFetchMaxAttempts,
         combinedRetryCountdown,
@@ -1103,7 +1171,7 @@ export function FarmsPage() {
     }> }>();
 
     sortedFieldSeasonPairs.forEach(({ field, season }) => {
-      const farmName = field.farmV2?.name ?? field.farm?.name ?? '農場情報なし';
+      const farmName = field.farmV2?.name ?? field.farm?.name ?? t('farm.info_missing');
       const items = farmMap.get(farmName) ?? { farmName, items: [] };
       const alerts = getAlertsForSeason(season, 14);
       alerts.forEach((alert) => {
@@ -1114,7 +1182,7 @@ export function FarmsPage() {
         if (statusClass === 'high' || statusClass === 'medium-high') tier = 'high';
         else if (statusClass === 'medium') tier = 'medium';
         else if (statusClass === 'medium-low' || statusClass === 'low') tier = 'low';
-        const alertName = alert.alertName || 'アラート';
+        const alertName = alert.alertName || t('alert.default');
         const range = alert.range || 'N/A';
         const existing = items.items.find(item =>
           item.alertName === alertName && item.status === statusLabel && item.range === range
@@ -1145,12 +1213,14 @@ export function FarmsPage() {
     if (prefCityWorkerRef.current) return;
     const worker = new Worker(new URL('../workers/prefCityReverseGeocode.ts', import.meta.url), { type: 'module' });
     prefCityWorkerRef.current = worker;
-    const datasetUrl = `${window.location.origin.replace(/\/$/, '')}/pref_city_p5.topo.json.gz`;
-    worker.postMessage({ type: 'init', baseUrl: window.location.origin });
+    let cancelled = false;
+
+    const supportsGzip = typeof (window as any).DecompressionStream !== 'undefined';
+    const datasetPath = supportsGzip ? '/pref_city_p5.topo.json.gz' : '/pref_city_p5.topo.json';
+    const datasetUrl = `${window.location.origin.replace(/\/$/, '')}${datasetPath}`;
     // In dev, some browsers restrict fetch from workers depending on origin/blob URLs.
     // Preload the dataset on the main thread and transfer it to the worker as a fallback.
-    let cancelled = false;
-    const preloadDataset = async (attempt: number) => {
+    async function preloadDataset(attempt: number) {
       try {
         const res = await fetch(datasetUrl, { cache: 'no-store' });
         if (cancelled) return;
@@ -1168,8 +1238,8 @@ export function FarmsPage() {
           window.setTimeout(() => preloadDataset(attempt + 1), 800 * attempt);
         }
       }
-    };
-    preloadDataset(1);
+    }
+
     worker.onmessage = (event: MessageEvent<any>) => {
       const data = event.data;
       if (!data) return;
@@ -1180,6 +1250,9 @@ export function FarmsPage() {
       if (data.type === 'warmup_done') {
         if (!data.ok) {
           setPrefCityDatasetReady(false);
+          if (import.meta.env.DEV) {
+            console.warn('[pref-city] warmup failed', String(data.error ?? 'unknown error'));
+          }
           return;
         }
         setPrefCityDatasetReady(true);
@@ -1211,7 +1284,29 @@ export function FarmsPage() {
         },
       }));
     };
+
+    worker.onerror = (e: any) => {
+      const msg = String(e?.message ?? e ?? 'unknown worker error');
+      setPrefCityDatasetReady(false);
+      if (import.meta.env.DEV) {
+        console.warn('[pref-city] worker error', msg);
+      }
+    };
+
+    worker.postMessage({ type: 'init', baseUrl: window.location.origin });
+    // Always request warmup as a fallback so the worker can fetch the dataset by itself
+    // even if main-thread preload fails.
+    worker.postMessage({ type: 'warmup' });
+    preloadDataset(1);
+    // In some environments, the initial warmup message can be dropped during HMR reloads.
+    // Nudge once more if still not ready shortly after.
+    const warmupNudgeTimer = window.setTimeout(() => {
+      if (!cancelled && !prefCityDatasetReady) {
+        worker.postMessage({ type: 'warmup' });
+      }
+    }, 1500);
     return () => {
+      window.clearTimeout(warmupNudgeTimer);
       worker.terminate();
       prefCityWorkerRef.current = null;
       prefCityPendingRef.current.clear();
@@ -1234,23 +1329,22 @@ export function FarmsPage() {
       const lon = center?.longitude;
       if (typeof lat !== 'number' || typeof lon !== 'number') return;
       prefCityPendingRef.current.add(field.uuid);
-      worker.postMessage({ type: 'lookup', id: field.uuid, lat, lon });
+      const normalized = normalizeLatLon(lat, lon);
+      worker.postMessage({ type: 'lookup', id: field.uuid, lat: normalized.lat, lon: normalized.lon });
     });
   }, [allFieldSeasonPairsWithNextStage, prefCityByFieldUuid, prefCityDatasetReady]);
 
   const { prefectures: availablePrefectures, crops: availableCrops } = useMemo(() => {
     const prefSet = new Set<string>();
     const cropSet = new Set<string>();
-    allFieldSeasonPairsWithNextStage.forEach(({ field, season }) => {
-      const locationOverride = prefCityByFieldUuid[field.uuid];
-      const effectiveLocation = locationOverride
-        ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
-        : field.location;
-      const pref = formatPrefectureDisplay(effectiveLocation).replace(/[＊*]/g, '').trim();
-      if (pref) prefSet.add(pref);
-      const crop = (season?.crop?.name ?? '').trim();
-      if (crop) cropSet.add(crop);
-    });
+	    allFieldSeasonPairsWithNextStage.forEach(({ field, season }) => {
+	      const locationOverride = prefCityByFieldUuid[field.uuid];
+	      const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
+	      const pref = formatPrefectureDisplay(effectiveLocation).replace(/[＊*]/g, '').trim();
+	      if (pref) prefSet.add(pref);
+	      const crop = (season?.crop?.name ?? '').trim();
+	      if (crop) cropSet.add(crop);
+	    });
     const prefectures = Array.from(prefSet).sort((a, b) => a.localeCompare(b, 'ja'));
     const crops = Array.from(cropSet).sort((a, b) => a.localeCompare(b, 'ja'));
     return { prefectures, crops };
@@ -1265,7 +1359,7 @@ export function FarmsPage() {
     setCurrentPage(1);
   };
 
-  const downloadAsCsv = () => {
+  const downloadAsCsv = (pairs: FieldSeasonPair[], scopeLabel: string) => {
     const csvEscape = (value: unknown) => {
       const text = String(value ?? '')
         .replace(/\r\n/g, '\n')
@@ -1276,21 +1370,37 @@ export function FarmsPage() {
 
     const buildCsvRow = (cells: unknown[]) => cells.map(csvEscape).join(',');
 
-    const headers = [
-      '圃場', '農場', 'ユーザー', '都道府県', '市区町村', '緯度', '経度', '面積(a)', '作物', '品種', '作付日', 'BBCH89到達日', '目標収量(kg/10a)', '作付時の生育ステージ', '作付方法',
-      '現在の生育ステージ', '次の生育ステージ', '施肥推奨', '水管理',
-      '雑草管理', 'リスクアラート',
-    ];
+		    const headers = [
+		      t('table.field'),
+		      t('table.farm'),
+		      t('table.user'),
+	      t('table.prefecture'),
+	      t('table.municipality'),
+	      t('table.latitude'),
+	      t('table.longitude'),
+	      t('table.area_a'),
+	      t('table.crop'),
+	      t('gsp.filter.variety'),
+	      t('table.planting_date'),
+	      t('table.bbch89'),
+	      t('table.target_yield'),
+	      t('table.stage_at_planting'),
+	      t('table.planting_method'),
+	      t('table.current_stage'),
+	      t('table.next_stage'),
+	      t('table.nutrition_rec'),
+	      t('table.water_rec'),
+	      t('table.weed_rec'),
+		      t('table.risk_alert'),
+		    ];
 
-    const rows = sortedFieldSeasonPairs.map(({ field, season, nextStage }) => {
-      const locationOverride = prefCityByFieldUuid[field.uuid];
-      const effectiveLocation = locationOverride
-        ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
-        : field.location;
-      const center = getFieldCenter(field);
-      const latitude = center?.latitude ?? null;
-      const longitude = center?.longitude ?? null;
-      const farmName = getFarmName(field);
+		    const rows = pairs.map(({ field, season, nextStage }) => {
+		      const locationOverride = prefCityByFieldUuid[field.uuid];
+		      const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
+		      const center = getFieldCenter(field);
+		      const latitude = center?.latitude ?? null;
+		      const longitude = center?.longitude ?? null;
+		      const farmName = getFarmName(field);
       const ownerName = getFarmOwnerName(field);
       const bbch89Date = getBbch89Date(season);
       const targetYield = getTargetYieldLabel(season);
@@ -1319,27 +1429,27 @@ export function FarmsPage() {
       ]);
     });
 
-    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
-    const csvContent = [buildCsvRow(headers), ...rows].join('\r\n');
-    const blob = new Blob([bom, csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `farm_data_${new Date().toISOString().split('T')[0]}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+	    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+	    const csvContent = [buildCsvRow(headers), ...rows].join('\r\n');
+	    const blob = new Blob([bom, csvContent], { type: 'text/csv;charset=utf-8;' });
+	    const url = URL.createObjectURL(blob);
+	    const link = document.createElement('a');
+	    link.href = url;
+	    link.download = `farm_data_${scopeLabel}_${new Date().toISOString().split('T')[0]}.csv`;
+	    document.body.appendChild(link);
+	    link.click();
+	    document.body.removeChild(link);
+	    URL.revokeObjectURL(url);
   };
 
-  if (!auth) return <p>認証情報がありません。ログインしてください。</p>;
+  if (!auth) return <p>{t('farms.no_auth')}</p>;
 
   return (
     <div className="farms-page-container">
       {showLoading && <LoadingOverlay message={loadingMessage} />}
-      <h2>圃場情報</h2>
+      <h2>{t('farms.title')}</h2>
       <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.75rem' }}>
-        <span style={{ color: '#b9b9c6' }}>作期表示:</span>
+        <span style={{ color: '#b9b9c6' }}>{t('farms.season_view')}</span>
         <button
           type="button"
           className={`fields-action-btn${seasonView === 'active' ? ' fields-action-btn--accent' : ''}`}
@@ -1349,7 +1459,7 @@ export function FarmsPage() {
             setSelectedFieldIds(new Set());
           }}
         >
-          現在/予定
+          {t('farms.season_view.active')}
         </button>
         <button
           type="button"
@@ -1359,26 +1469,26 @@ export function FarmsPage() {
             setSelectedFieldIds(new Set());
           }}
         >
-          過去(完了)
+          {t('farms.season_view.closed')}
         </button>
         {seasonView === 'closed' && (
           <button type="button" className="fields-action-btn" onClick={fetchClosedCombined} disabled={closedLoading}>
-            再取得
+            {closedLoading ? t('action.refreshing') : t('action.refresh')}
           </button>
         )}
         {seasonView === 'closed' && closedError && (
-          <span style={{ color: '#ff9e9e' }}>過去作期の取得に失敗: {closedError}</span>
+          <span style={{ color: '#ff9e9e' }}>{t('farms.closed_failed', { error: closedError })}</span>
         )}
       </div>
       <div className="risk-summary-card">
         <div className="risk-summary-header">
           <div>
-            <div className="risk-summary-title">2週間以内のリスクアラート</div>
+            <div className="risk-summary-title">{t('farms.risk_14d.title')}</div>
             <div className="risk-summary-sub">
-              対象圃場: {upcomingRiskSummary.fieldCount} / リスク件数: {upcomingRiskSummary.total}
+              {t('farms.risk_14d.subtitle', { fields: upcomingRiskSummary.fieldCount, total: upcomingRiskSummary.total })}
             </div>
           </div>
-          <div className="risk-summary-range">今日から14日</div>
+          <div className="risk-summary-range">{t('farms.risk_14d.range')}</div>
         </div>
         <div className="risk-summary-metrics">
           <button
@@ -1386,28 +1496,28 @@ export function FarmsPage() {
             className={`risk-pill risk-pill--all${riskFilter === 'all' ? ' active' : ''}`}
             onClick={() => setRiskFilter('all')}
           >
-            すべて {upcomingRiskSummary.total}
+            {t('risk.filter.all')} {upcomingRiskSummary.total}
           </button>
           <button
             type="button"
             className={`risk-pill risk-pill--high${riskFilter === 'high' ? ' active' : ''}`}
             onClick={() => setRiskFilter('high')}
           >
-            高 {upcomingRiskSummary.counts.high}
+            {t('risk.filter.high')} {upcomingRiskSummary.counts.high}
           </button>
           <button
             type="button"
             className={`risk-pill risk-pill--medium${riskFilter === 'medium' ? ' active' : ''}`}
             onClick={() => setRiskFilter('medium')}
           >
-            中 {upcomingRiskSummary.counts.medium}
+            {t('risk.filter.medium')} {upcomingRiskSummary.counts.medium}
           </button>
           <button
             type="button"
             className={`risk-pill risk-pill--low${riskFilter === 'low' ? ' active' : ''}`}
             onClick={() => setRiskFilter('low')}
           >
-            低 {upcomingRiskSummary.counts.low}
+            {t('risk.filter.low')} {upcomingRiskSummary.counts.low}
           </button>
           {upcomingRiskSummary.counts.other > 0 && (
             <button
@@ -1415,18 +1525,28 @@ export function FarmsPage() {
               className={`risk-pill risk-pill--other${riskFilter === 'other' ? ' active' : ''}`}
               onClick={() => setRiskFilter('other')}
             >
-              他 {upcomingRiskSummary.counts.other}
+              {t('risk.filter.other')} {upcomingRiskSummary.counts.other}
             </button>
           )}
         </div>
-        <div className="risk-detail-card">
-          <div className="risk-detail-header">
-            <div className="risk-detail-title">農場別の内訳</div>
-            <div className="risk-detail-filter">表示: {riskFilter === 'all' ? 'すべて' : riskFilter.toUpperCase()}</div>
-          </div>
-          {riskDetailData.length === 0 ? (
-            <div className="risk-detail-empty">2週間以内のリスクはありません。</div>
-          ) : (
+	        <div className="risk-detail-card">
+	          <div className="risk-detail-header">
+	            <div className="risk-detail-title">{t('farms.risk_breakdown.title')}</div>
+	            <div className="risk-detail-filter">
+		              {t('farms.risk_breakdown.showing', {
+		                value:
+		                  riskFilter === 'all' ? t('risk.filter.all')
+		                  : riskFilter === 'high' ? t('risk.filter.high')
+		                  : riskFilter === 'medium' ? t('risk.filter.medium')
+		                  : riskFilter === 'low' ? t('risk.filter.low')
+		                  : riskFilter === 'other' ? t('risk.filter.other')
+		                  : t('risk.filter.all')
+		              })}
+		            </div>
+		          </div>
+	          {riskDetailData.length === 0 ? (
+	            <div className="risk-detail-empty">{t('farms.risk_breakdown.empty')}</div>
+	          ) : (
             <div className="risk-detail-list">
               {riskDetailData.map(group => {
                 const filteredItems = riskFilter === 'all'
@@ -1434,10 +1554,10 @@ export function FarmsPage() {
                   : group.items.filter(item => item.tier === riskFilter);
                 if (filteredItems.length === 0) return null;
                 return (
-                  <details key={group.farmName} className="risk-farm-group">
-                    <summary>
-                      {group.farmName} <span className="risk-farm-count">{filteredItems.length} 件</span>
-                    </summary>
+	                  <details key={group.farmName} className="risk-farm-group">
+	                    <summary>
+	                      {group.farmName} <span className="risk-farm-count">{t('count.items', { count: filteredItems.length })}</span>
+	                    </summary>
                     <ul className="risk-item-list">
                       {filteredItems.map((item, index) => {
                         const uniqueFields = Array.from(
@@ -1471,27 +1591,29 @@ export function FarmsPage() {
           )}
         </div>
       </div>
-      {submittedFarms.length > 0 ? (
-        <p>
-          ヘッダーで選択された {submittedFarms.length} 件の農場の圃場データを表示しています。 
-          {combinedOut?.source && (
-            <span style={{ marginLeft: '1em', color: combinedOut.source === 'cache' ? '#4caf50' : '#2196f3', fontWeight: 'bold' }}>({combinedOut.source === 'cache' ? 'キャッシュから取得' : 'APIから取得'})</span>
-          )}
-        </p>
-      ) : <p>ヘッダーのドロップダウンから農場を選択してください。</p>}
+	      {submittedFarms.length > 0 ? (
+	        <p>
+	          {t('farms.summary', { count: submittedFarms.length })}{' '}
+	          {combinedOut?.source && (
+	            <span style={{ marginLeft: '1em', color: combinedOut.source === 'cache' ? '#4caf50' : '#2196f3', fontWeight: 'bold' }}>
+	              ({combinedOut.source === 'cache' ? t('source.cache') : t('source.api')})
+	            </span>
+	          )}
+	        </p>
+	      ) : <p>{t('risk.select_farm_hint')}</p>}
 
       {allFieldSeasonPairsWithNextStage.length > 0 && (
         <div className="fields-filters">
-          <div className="fields-filters__row">
-            <input
-              className="fields-filter-input"
+	          <div className="fields-filters__row">
+	            <input
+	              className="fields-filter-input"
               value={fieldQuery}
               onChange={(event) => {
                 setFieldQuery(event.target.value);
                 setCurrentPage(1);
               }}
-              placeholder="検索: 圃場名/UUID/農場/作物/住所…"
-            />
+	              placeholder={t('farms.filter.search_placeholder')}
+	            />
             <select
               className="fields-filter-select"
               value={fieldPrefecture}
@@ -1500,7 +1622,7 @@ export function FarmsPage() {
                 setCurrentPage(1);
               }}
             >
-              <option value="">都道府県: すべて</option>
+	              <option value="">{t('farms.filter.prefecture_all')}</option>
               {availablePrefectures.map((pref) => (
                 <option key={pref} value={pref}>
                   {pref}
@@ -1515,7 +1637,7 @@ export function FarmsPage() {
                 setCurrentPage(1);
               }}
             >
-              <option value="">作物: すべて</option>
+	              <option value="">{t('farms.filter.crop_all')}</option>
               {availableCrops.map((crop) => (
                 <option key={crop} value={crop}>
                   {crop}
@@ -1530,13 +1652,13 @@ export function FarmsPage() {
                 setCurrentPage(1);
               }}
             >
-              <option value="all">2週間リスク: すべて</option>
-              <option value="high">高</option>
-              <option value="medium">中</option>
-              <option value="low">低</option>
-              <option value="other">他</option>
-              <option value="none">なし</option>
-            </select>
+	              <option value="all">{t('farms.filter.risk14_all')}</option>
+	              <option value="high">{t('risk.filter.high')}</option>
+	              <option value="medium">{t('risk.filter.medium')}</option>
+	              <option value="low">{t('risk.filter.low')}</option>
+	              <option value="other">{t('risk.filter.other')}</option>
+	              <option value="none">{t('risk.filter.none')}</option>
+	            </select>
             <label className="fields-filter-checkbox">
               <input
                 type="checkbox"
@@ -1547,18 +1669,21 @@ export function FarmsPage() {
                   setCurrentPage(1);
                 }}
               />
-              作付なしを除外
-            </label>
-            <button type="button" className="fields-action-btn" onClick={clearFieldFilters}>
-              クリア
-            </button>
-          </div>
-          <div className="fields-filters__meta">
-            表示: <strong>{uniqueFieldIds.length}</strong> 圃場 / 全体: <strong>{allUniqueFieldIds.length}</strong> 圃場 ・行数:{' '}
-            <strong>{sortedFieldSeasonPairs.length}</strong> / <strong>{allFieldSeasonPairsWithNextStage.length}</strong>
-          </div>
-        </div>
-      )}
+	              {t('farms.filter.exclude_no_season')}
+	            </label>
+	            <button type="button" className="fields-action-btn" onClick={clearFieldFilters}>
+	              {t('action.clear')}
+	            </button>
+	          </div>
+		          <div className="fields-filters__meta">
+		            {t('farms.filters.meta', {
+		              shownFields: uniqueFieldIds.length,
+		              totalFields: allUniqueFieldIds.length,
+		              shownRows: sortedFieldSeasonPairs.length,
+		            })}
+		          </div>
+		        </div>
+		      )}
 
       {filteredFieldSeasonPairsWithNextStage.length > 0 && (
         <PlantingStackedChart fieldSeasonPairs={sortedFieldSeasonPairs} />
@@ -1566,23 +1691,31 @@ export function FarmsPage() {
 
       {/* 圃場データ取得結果表示エリア */}
       <div style={{ marginTop: '2rem' }}>
-        {combinedErr && (
-          <div>
-            <h3 style={{ color: '#ff6b6b' }}>圃場データの取得に失敗しました</h3>
-            <pre style={{ color: '#ff6b6b', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-              {combinedErr}
-            </pre>
-          </div>
-        )}
+	        {combinedErr && (
+	          <div>
+	            <h3 style={{ color: '#ff6b6b' }}>{t('farms.error.load_failed')}</h3>
+	            <pre style={{ color: '#ff6b6b', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+	              {combinedErr}
+	            </pre>
+	          </div>
+	        )}
         {sortedFieldSeasonPairs.length > 0 && (
           <div className="fields-actions">
-            <div className="fields-actions__meta">
-              <div>
-                選択: <strong>{selectedFieldIds.size}</strong> 圃場 / 表示: <strong>{uniqueFieldIds.length}</strong> 圃場 / 全体:{' '}
-                <strong>{allUniqueFieldIds.length}</strong> 圃場
-              </div>
+	            <div className="fields-actions__meta">
+	              <div>
+	                {t('farms.actions.meta', {
+	                  selected: selectedShownCount,
+	                  shown: uniqueFieldIds.length,
+	                  total: allUniqueFieldIds.length,
+	                })}
+                  {hiddenSelectedCount > 0 && (
+                    <span style={{ marginLeft: 8, color: '#b9b9c6' }}>
+                      {t('farms.actions.hidden_selected', { count: hiddenSelectedCount })}
+                    </span>
+                  )}
+	              </div>
               <div className="fields-actions__hint">
-                Google My Maps 取り込み用のGeoJSONを出力します。
+                {t('farms.actions.mymaps_hint')}
               </div>
             </div>
             <div className="fields-actions__buttons">
@@ -1591,23 +1724,31 @@ export function FarmsPage() {
                 className="fields-action-btn fields-action-btn--primary"
                 onClick={() => downloadForMyMaps(sortedFieldSeasonPairs, 'displayed')}
               >
-                My Mapsダウンロード（表示中）
-              </button>
+	                {t('farms.download.mymaps_displayed')}
+	              </button>
               <button
                 type="button"
                 className="fields-action-btn fields-action-btn--accent"
                 onClick={() => downloadForMyMaps(selectedFieldSeasonPairs, 'selected')}
                 disabled={selectedFieldIds.size === 0}
               >
-                My Mapsダウンロード（選択圃場）
-              </button>
+	                {t('farms.download.mymaps_selected')}
+	              </button>
               <button
                 type="button"
                 className="fields-action-btn"
-                onClick={downloadAsCsv}
+                onClick={() => downloadAsCsv(sortedFieldSeasonPairs, 'displayed')}
               >
-                CSVダウンロード
-              </button>
+	                {t('farms.download.csv_displayed')}
+	              </button>
+              <button
+                type="button"
+                className="fields-action-btn"
+                onClick={() => downloadAsCsv(selectedFieldSeasonPairs, 'selected')}
+                disabled={selectedFieldIds.size === 0}
+              >
+	                {t('farms.download.csv_selected')}
+	              </button>
             </div>
           </div>
         )}
@@ -1637,9 +1778,9 @@ export function FarmsPage() {
           </div>
         )}
         {sortedFieldSeasonPairs.length > 0 && (
-          <div className="pagination-controls">
-            <div>
-              <label htmlFor="rows-per-page">表示件数: </label>
+	          <div className="pagination-controls">
+	            <div>
+	              <label htmlFor="rows-per-page">{t('rows_per_page')} </label>
               <select
                 id="rows-per-page"
                 value={rowsPerPage}
@@ -1654,57 +1795,57 @@ export function FarmsPage() {
                 <option value={200}>200</option>
               </select>
             </div>
-            <div>
-              <button onClick={() => handlePageChange(currentPage - 1)} disabled={currentPage === 1}>
-                前へ
-              </button>
-              <span> {currentPage} / {totalPages} </span>
-              <button onClick={() => handlePageChange(currentPage + 1)} disabled={currentPage === totalPages}>
-                次へ
-              </button>
-            </div>
-          </div>
-        )}
+	            <div>
+	              <button onClick={() => handlePageChange(currentPage - 1)} disabled={currentPage === 1}>
+	                {t('pagination.prev')}
+	              </button>
+	              <span> {currentPage} / {totalPages} </span>
+	              <button onClick={() => handlePageChange(currentPage + 1)} disabled={currentPage === totalPages}>
+	                {t('pagination.next')}
+	              </button>
+	            </div>
+	          </div>
+	        )}
       </div>
       {noteModalField && (
         <div className="field-notes-modal-backdrop" onClick={closeNoteModal}>
           <div className="field-notes-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="field-notes-modal-header">
-              <div>
-                <h3>ノート画像一覧</h3>
-                <div className="field-notes-modal-sub">
+	            <div className="field-notes-modal-header">
+	              <div>
+	                <h3>{t('farms.notes_modal.title')}</h3>
+	                <div className="field-notes-modal-sub">
                   {noteModalField.name}
                   {noteModalField.farmV2?.name || noteModalField.farm?.name
                     ? ` / ${noteModalField.farmV2?.name ?? noteModalField.farm?.name}`
                     : ''}
                 </div>
-              </div>
-              <button type="button" className="field-notes-modal-close" onClick={closeNoteModal}>
-                閉じる
-              </button>
-            </div>
-            <div className="field-notes-modal-filters">
-              <div className="field-notes-modal-filter">
-                <label htmlFor="note-date-from">開始</label>
-                <input
+	              </div>
+	              <button type="button" className="field-notes-modal-close" onClick={closeNoteModal}>
+	                {t('farms.notes_modal.close')}
+	              </button>
+	            </div>
+	            <div className="field-notes-modal-filters">
+	              <div className="field-notes-modal-filter">
+	                <label htmlFor="note-date-from">{t('farms.notes_modal.from')}</label>
+	                <input
                   id="note-date-from"
                   type="date"
                   value={noteModalFrom}
                   onChange={(event) => setNoteModalFrom(event.target.value)}
                 />
-              </div>
-              <div className="field-notes-modal-filter">
-                <label htmlFor="note-date-to">終了</label>
-                <input
+	              </div>
+	              <div className="field-notes-modal-filter">
+	                <label htmlFor="note-date-to">{t('farms.notes_modal.to')}</label>
+	                <input
                   id="note-date-to"
                   type="date"
                   value={noteModalTo}
                   onChange={(event) => setNoteModalTo(event.target.value)}
                 />
-              </div>
-              <div className="field-notes-modal-filter">
-                <label htmlFor="note-limit">表示件数</label>
-                <select
+	              </div>
+	              <div className="field-notes-modal-filter">
+	                <label htmlFor="note-limit">{t('farms.notes_modal.limit')}</label>
+	                <select
                   id="note-limit"
                   value={Number.isFinite(noteModalLimit) ? String(noteModalLimit) : 'all'}
                   onChange={(event) => {
@@ -1714,24 +1855,24 @@ export function FarmsPage() {
                 >
                   <option value={1}>1</option>
                   <option value={3}>3</option>
-                  <option value={10}>10</option>
-                  <option value={30}>30</option>
-                  <option value={50}>50</option>
-                  <option value="all">全て</option>
-                </select>
-              </div>
-              <div className="field-notes-modal-count">
-                表示 {filteredNoteModalItems.length} / 全 {noteModalItems.length}
-              </div>
-            </div>
-            <div className="field-notes-modal-body">
-              {noteModalState === 'loading' && <div className="field-notes-modal-empty">読み込み中...</div>}
-              {noteModalState === 'error' && (
-                <div className="field-notes-modal-error">{noteModalError || '取得に失敗しました。'}</div>
-              )}
-              {noteModalState !== 'loading' && noteModalState !== 'error' && filteredNoteModalItems.length === 0 && (
-                <div className="field-notes-modal-empty">画像付きノートがありません。</div>
-              )}
+	                  <option value={10}>10</option>
+	                  <option value={30}>30</option>
+	                  <option value={50}>50</option>
+	                  <option value="all">{t('option.all')}</option>
+	                </select>
+	              </div>
+	              <div className="field-notes-modal-count">
+	                {t('farms.notes_modal.count', { shown: filteredNoteModalItems.length, total: noteModalItems.length })}
+	              </div>
+	            </div>
+	            <div className="field-notes-modal-body">
+	              {noteModalState === 'loading' && <div className="field-notes-modal-empty">{t('farms.notes_modal.loading')}</div>}
+	              {noteModalState === 'error' && (
+	                <div className="field-notes-modal-error">{noteModalError || t('farms.notes_modal.error_fallback')}</div>
+	              )}
+	              {noteModalState !== 'loading' && noteModalState !== 'error' && filteredNoteModalItems.length === 0 && (
+	                <div className="field-notes-modal-empty">{t('farms.notes_modal.empty')}</div>
+	              )}
               {noteModalState !== 'loading' && noteModalState !== 'error' && filteredNoteModalItems.length > 0 && (
                 <div className="field-notes-modal-grid">
                   {filteredNoteModalItems.map((item) => (
@@ -1907,16 +2048,14 @@ function usePaginatedFields(
       return hasOther ? 'other' : 'none';
     };
 
-    return allFieldSeasonPairsWithNextStage.filter(({ field, season }) => {
-      const locationOverride = locationByFieldUuid[field.uuid];
-      const effectiveLocation = locationOverride
-        ? ({ ...(field.location ?? {}), ...locationOverride } as Field['location'])
-        : field.location;
+	    return allFieldSeasonPairsWithNextStage.filter(({ field, season }) => {
+	      const locationOverride = locationByFieldUuid[field.uuid];
+	      const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
 
-      if (selectedPrefecture) {
-        const pref = normalizeValue(formatPrefectureDisplay(effectiveLocation));
-        if (pref !== selectedPrefecture) return false;
-      }
+	      if (selectedPrefecture) {
+	        const pref = normalizeValue(formatPrefectureDisplay(effectiveLocation));
+	        if (pref !== selectedPrefecture) return false;
+	      }
 
       if (selectedCrop) {
         const crop = normalizeValue(season?.crop?.name ?? '');
@@ -2055,20 +2194,20 @@ const getStatusBadgeClass = (status: string | null | undefined) => {
 const actionStatusLabel = (value?: string | null) => {
   if (!value) return '';
   const key = value.toUpperCase();
-  if (key === 'HIGH') return '高';
-  if (key === 'MEDIUM') return '中';
-  if (key === 'CURRENT') return '現在';
-  if (key === 'MISSED') return '未対応';
-  if (key === 'NOT_PRESENT') return '対象外';
-  if (key === 'SCHEDULED') return '予定';
+  if (key === 'HIGH') return tr('risk.action_status.high');
+  if (key === 'MEDIUM') return tr('risk.action_status.medium');
+  if (key === 'CURRENT') return tr('risk.action_status.current');
+  if (key === 'MISSED') return tr('risk.action_status.missed');
+  if (key === 'NOT_PRESENT') return tr('risk.action_status.not_present');
+  if (key === 'SCHEDULED') return tr('risk.action_status.scheduled');
   return value;
 };
 
 const cropSeasonStatusLabel = (value?: string | null) => {
-  if (!value) return '作期ステータス';
+  if (!value) return tr('table.season_status');
   const key = value.toUpperCase();
-  if (key === 'DISEASE') return '病害';
-  if (key === 'INSECT') return '害虫';
+  if (key === 'DISEASE') return tr('fmt.status_type.disease');
+  if (key === 'INSECT') return tr('fmt.status_type.insect');
   return value;
 };
 
@@ -2155,7 +2294,7 @@ function getAlertsForSeason(season: CropSeason | null, days: number) {
   const combined = getCombinedAlerts(season, days);
   if (combined.length > 0) {
     return combined.map(alert => ({
-      alertName: alert.alertName || 'アラート',
+      alertName: alert.alertName || tr('alert.default'),
       status: alert.status ?? '',
       range: alert.startDate && alert.endDate
         ? `${getLocalDateString(alert.startDate)} - ${formatInclusiveEndDate(alert.endDate)}`
@@ -2164,7 +2303,8 @@ function getAlertsForSeason(season: CropSeason | null, days: number) {
   }
 
   return buildRiskAlerts(season).map(item => ({
-    alertName: item.names.filter(Boolean).join('、') || 'リスク',
+    alertName:
+      item.names.filter(Boolean).join(getCurrentLanguage() === 'ja' ? '、' : ', ') || tr('risk.default'),
     status: item.status,
     range: item.range,
   }));
@@ -2230,7 +2370,7 @@ const formatActionWindowSummary = (season: CropSeason | null, days: number) => {
   if (alerts.length === 0) return 'N/A';
   return alerts
     .map((win) => {
-      const label = win.alertName ?? 'アラート';
+      const label = win.alertName ?? tr('alert.default');
       const status = actionStatusLabel(win.status ?? '');
       const range = win.startDate && win.endDate
         ? `${getLocalDateString(win.startDate)} - ${formatInclusiveEndDate(win.endDate)}`
@@ -2315,6 +2455,7 @@ const colorFromString = (value: string) => {
 };
 
 const PlantingStackedChart = ({ fieldSeasonPairs }: PlantingStackedChartProps) => {
+  const { t } = useLanguage();
   const [mode, setMode] = useState<'crop' | 'variety'>('crop');
   const getBucketKey = useMemo(
     () => (pair: FieldSeasonPair) =>
@@ -2394,7 +2535,7 @@ const PlantingStackedChart = ({ fieldSeasonPairs }: PlantingStackedChartProps) =
           label: (context: any) => {
             const label = context.dataset.label || '';
             const value = context.parsed.y ?? 0;
-            return `${label}: ${value}圃場`;
+            return t('farms.plantingChart.tooltip', { label, value });
           },
         },
       },
@@ -2463,21 +2604,21 @@ const PlantingStackedChart = ({ fieldSeasonPairs }: PlantingStackedChartProps) =
   return (
     <div className="tasks-chart-card planting-stacked">
       <div className="tasks-chart-header">
-        <h3>作付日ごとの圃場数</h3>
+        <h3>{t('farms.plantingChart.title')}</h3>
         <div className="tasks-chart-toggle planting-stacked__actions">
           <button
             type="button"
             className={mode === 'crop' ? 'active' : ''}
             onClick={() => setMode('crop')}
           >
-            作物別
+            {t('farms.plantingChart.by_crop')}
           </button>
           <button
             type="button"
             className={mode === 'variety' ? 'active' : ''}
             onClick={() => setMode('variety')}
           >
-            品種別
+            {t('farms.plantingChart.by_variety')}
           </button>
         </div>
       </div>
@@ -2485,7 +2626,7 @@ const PlantingStackedChart = ({ fieldSeasonPairs }: PlantingStackedChartProps) =
       <div className="planting-stacked__scroll">
         <div className="tasks-chart-wrapper planting-stacked__chart">
           {labels.length === 0 ? (
-            <div className="tasks-chart-empty">表示できる作付データがありません。</div>
+            <div className="tasks-chart-empty">{t('farms.plantingChart.empty')}</div>
           ) : (
             <Bar data={{ labels, datasets }} options={chartOptions as any} />
           )}
@@ -2493,7 +2634,12 @@ const PlantingStackedChart = ({ fieldSeasonPairs }: PlantingStackedChartProps) =
       </div>
       {maxTotal > 0 && (
         <div className="tasks-chart-footnote planting-stacked__hint">
-          縦棒の高さが当日の総圃場数、色が{mode === 'crop' ? '作物' : '品種'}別内訳です。
+          {t('farms.plantingChart.hint', {
+            dimension:
+              mode === 'crop'
+                ? t('farms.plantingChart.dimension.crop')
+                : t('farms.plantingChart.dimension.variety'),
+          })}
         </div>
       )}
     </div>

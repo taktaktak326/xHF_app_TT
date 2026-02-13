@@ -20,6 +20,54 @@
 
 3. ブラウザで `http://localhost:5173` を開き、本番同様に機能を確認する。
 
+## フロントエンドのセッションキャッシュ（同一セッションで二重取得しない）
+
+フロント側では **同一ブラウザタブのセッション中**、同じ内容の API レスポンスを再取得しないために `sessionStorage` を使ったキャッシュを利用しています（タブを閉じると消えます）。
+
+- 共通ユーティリティ: `apps/web/src/utils/cachedJsonFetch.ts`
+  - `sessionStorage` キャッシュ（キー一致で即返却）
+  - 同一キーの **in-flight (進行中) リクエストを共有**して二重 fetch を抑止（React StrictMode の effect 再実行対策にも有効）
+- キャッシュ対象は主に「読み取り系」API（GraphQL ライクな POST も含む）で、ログイン・更新系・ポーリング・添付 ZIP / 画像 blob などは都度取得のままです。
+
+## 都道府県・市区町村を緯度経度から取得する仕組み（JP）
+
+圃場の「都道府県」「市区町村」は、API から常に返ってくるとは限らないため、フロントエンド側で **緯度経度から逆ジオコード**（推定）するフォールバックを持っています。
+
+### データソース
+
+- `apps/web/public/pref_city_p5.topo.json.gz`
+  - 日本の行政界ポリゴン（TopoJSON / gzip）
+  - geometry の `properties` に `prefecture` / `municipality` / `subMunicipality` / `cityCode` を保持
+
+### 実装（Worker）
+
+- `apps/web/src/workers/prefCityReverseGeocode.ts`
+  - gzip を `DecompressionStream('gzip')` で展開して TopoJSON を読み込み
+  - ポリゴンをタイルインデックス化して、(lat, lon) から候補ポリゴンを絞り込み → point-in-polygon でヒットを判定
+
+### UI 側の流れ（表示できた時に何が違ったか）
+
+表示が安定して出るようになったポイント（＝「出たり出なかったり」の原因潰し）:
+
+1. **Worker 初期化の順序**
+   - `worker.onmessage` を先に設定してから `dataset` を送る
+   - `dataset_ack` を取り逃がすと `warmup` が走らず `prefCityDatasetReady=false` のままになり、`lookup` が一切走らない（緯度経度は出ていても都道府県/市区町村だけ空になる）
+2. **location のマージ**
+   - Worker で得た `prefecture/municipality` を `field.location` に重ねるとき、`null/空文字` が既存値を潰さないように「空でない値だけ上書き」する
+3. **緯度経度の補正**
+   - まれに緯度経度が入れ替わっているデータがあるため、範囲チェックして入れ替えられそうなら補正して `lookup` する
+
+### 動作確認（開発）
+
+- 圃場ページ（`apps/web/src/pages/FarmsPage.tsx`）には開発用の確認 UI があり、
+  - `pref-city: ready/not_ready`
+  - `resolved / pending`
+  - `Test reverse geocode (Tokyo)`（固定座標の逆ジオコード）
+  を見て「逆ジオコード自体が動いているか / 初期化が完了しているか」を切り分けできます。
+
+### 期待する結果例
+
+- 緯度 `37.70739` / 経度 `138.83850` → `新潟県 西蒲原郡 弥彦村`（`cityCode: 15342`）
 
 ## 新しい GraphQL リクエストを追加する手順
 

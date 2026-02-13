@@ -1,6 +1,27 @@
 import { createContext, useContext, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import type { CombinedOut } from '../types/farm';
+
+export type CombinedFetchPartStatus = 'pending' | 'ok' | 'error';
+
+export type CombinedFetchProgress =
+  | {
+      mode: 'stream' | 'full';
+      includeTasks: boolean;
+      farmUuids?: string[];
+      parts: Record<string, { status: CombinedFetchPartStatus; error?: string }>;
+      message?: string;
+    }
+  | {
+      mode: 'chunked';
+      includeTasks: boolean;
+      farmUuids?: string[];
+      requestsDone: number;
+      requestsTotal: number | null;
+      activeFarmUuids?: string[];
+      activeFarmLabels?: string[];
+      message?: string;
+    };
 
 interface DataContextType {
   combinedOut: CombinedOut | null;
@@ -17,6 +38,8 @@ interface DataContextType {
   setCombinedFetchMaxAttempts: (max: number) => void;
   combinedRetryCountdown: number | null;
   setCombinedRetryCountdown: (value: number | null) => void;
+  combinedFetchProgress: CombinedFetchProgress | null;
+  setCombinedFetchProgress: Dispatch<SetStateAction<CombinedFetchProgress | null>>;
 }
 
 const DataContext = createContext<DataContextType | undefined>(undefined);
@@ -29,6 +52,7 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
   const [combinedFetchAttempt, setCombinedFetchAttempt] = useState(0);
   const [combinedFetchMaxAttempts, setCombinedFetchMaxAttempts] = useState(1);
   const [combinedRetryCountdown, setCombinedRetryCountdown] = useState<number | null>(null);
+  const [combinedFetchProgress, setCombinedFetchProgress] = useState<CombinedFetchProgress | null>(null);
 
   return (
     <DataContext.Provider
@@ -47,6 +71,8 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
         setCombinedFetchMaxAttempts,
         combinedRetryCountdown,
         setCombinedRetryCountdown,
+        combinedFetchProgress,
+        setCombinedFetchProgress,
       }}
     >
       {children}

@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 public/pref_city_p5.topo.json.gz
+public/pref_city_p5.topo.json
 
 # Editor directories and files
 .vscode/*

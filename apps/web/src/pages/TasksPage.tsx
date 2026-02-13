@@ -5,6 +5,7 @@ import { useData } from '../context/DataContext';
 import { useFarms } from '../context/FarmContext';
 import { useAuth } from '../context/AuthContext';
 import { formatInclusiveEndDate, getLocalDateString } from '../utils/formatters'; // このファイルで直接使われなくなりますが、サブコンポーネントで必要になる可能性があります
+import { postJsonCached } from '../utils/cachedJsonFetch';
 import type {
   Field,
   AggregatedTask,
@@ -48,6 +49,8 @@ import LoadingOverlay from '../components/LoadingOverlay';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { formatCombinedLoadingMessage } from '../utils/loadingMessage';
 import { withApiBase } from '../utils/apiBase';
+import { useLanguage } from '../context/LanguageContext';
+import { getCurrentLanguage, tr } from '../i18n/runtime';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend, zoomPlugin, ChartDataLabels);
 
@@ -70,16 +73,15 @@ const TASK_COLOR_MAP: Record<string, string> = {
 // Type Definitions for Tasks
 // =============================================================================
 
-const TASK_TYPE_MAP: { [key: string]: string } = {
-  Harvest: '収穫',
-  Spraying: '散布',
-  WaterManagement: '水管理',
-  Scouting: '圃場巡回',
-  CropEstablishment: '作付',
-  LandPreparation: '耕うん・代かき',
-  SeedTreatment: '種子処理',
-  SeedBoxTreatment: '育苗箱処理',
-  // 他のタスクタイプもここに追加
+const TASK_TYPE_LABEL_KEYS: Record<string, string> = {
+  Harvest: 'tasks.type.harvest',
+  Spraying: 'tasks.type.spraying',
+  WaterManagement: 'tasks.type.water_management',
+  Scouting: 'tasks.type.scouting',
+  CropEstablishment: 'tasks.type.crop_establishment',
+  LandPreparation: 'tasks.type.land_preparation',
+  SeedTreatment: 'tasks.type.seed_treatment',
+  SeedBoxTreatment: 'tasks.type.seed_box_treatment',
 };
 
 type SprayingChartKey =
@@ -94,63 +96,63 @@ type CropProtectionProduct = {
   categories?: Array<{ name?: string | null }> | null;
 };
 
-const SPRAYING_LABELS: Record<SprayingChartKey, string> = {
-  Spraying_CROP_PROTECTION: '散布（防除）',
-  Spraying_NUTRITION: '散布（施肥）',
-  Spraying_WEED_MANAGEMENT: '散布（雑草管理）',
-  Spraying_OTHER: '散布（その他）',
+const SPRAYING_LABEL_KEYS: Record<SprayingChartKey, string> = {
+  Spraying_CROP_PROTECTION: 'tasks.type.spraying_crop_protection',
+  Spraying_NUTRITION: 'tasks.type.spraying_nutrition',
+  Spraying_WEED_MANAGEMENT: 'tasks.type.spraying_weed_management',
+  Spraying_OTHER: 'tasks.type.spraying_other',
 };
 
-const CHART_TYPE_LABELS: Record<string, string> = {
-  ...TASK_TYPE_MAP,
-  ...SPRAYING_LABELS,
+const CHART_TYPE_LABEL_KEYS: Record<string, string> = {
+  ...TASK_TYPE_LABEL_KEYS,
+  ...SPRAYING_LABEL_KEYS,
 };
 
-const TASK_STATE_LABELS: Record<string, string> = {
-  PLANNED: '計画済',
-  IN_PROGRESS: '作業中',
-  DONE: '完了',
-  CANCELLED: 'キャンセル',
-  PENDING: '未処理',
-  NOT_STARTED: '未開始',
-  READY: '準備完了',
-  SCHEDULED: '予定済み',
-  OVERDUE: '期限超過',
-  AUTO_EXECUTED: '自動実行済み',
-  AUTO_COMPLETED: '自動完了',
-  AUTO_CANCELLED: '自動キャンセル',
-  FAILED: '失敗',
-  SKIPPED: 'スキップ',
-  MISSED: '未実施',
+const TASK_STATE_LABEL_KEYS: Record<string, string> = {
+  PLANNED: 'tasks.state.planned',
+  IN_PROGRESS: 'tasks.state.in_progress',
+  DONE: 'tasks.state.done',
+  CANCELLED: 'tasks.state.cancelled',
+  PENDING: 'tasks.state.pending',
+  NOT_STARTED: 'tasks.state.not_started',
+  READY: 'tasks.state.ready',
+  SCHEDULED: 'tasks.state.scheduled',
+  OVERDUE: 'tasks.state.overdue',
+  AUTO_EXECUTED: 'tasks.state.auto_executed',
+  AUTO_COMPLETED: 'tasks.state.auto_completed',
+  AUTO_CANCELLED: 'tasks.state.auto_cancelled',
+  FAILED: 'tasks.state.failed',
+  SKIPPED: 'tasks.state.skipped',
+  MISSED: 'tasks.state.missed',
 };
 
 const COUNTRY_UUID_JP = '0f59ff55-c86b-4b7b-4eaa-eb003d47dcd3';
 const HERBICIDE_CATEGORY_NAME = 'HERBICIDE';
 
-const STATUS_TOKEN_LABELS: Record<string, string> = {
-  AUTO: '自動',
-  EXECUTED: '実行済み',
-  EXECUTE: '実行',
-  EXECUTION: '実行',
-  COMPLETED: '完了',
-  COMPLETE: '完了',
-  CANCELLED: 'キャンセル',
-  CANCEL: 'キャンセル',
-  OVERDUE: '期限超過',
-  PENDING: '未処理',
-  PLANNED: '計画済',
+const STATUS_TOKEN_LABEL_KEYS: Record<string, string> = {
+  AUTO: 'tasks.status_token.auto',
+  EXECUTED: 'tasks.status_token.executed',
+  EXECUTE: 'tasks.status_token.execute',
+  EXECUTION: 'tasks.status_token.execute',
+  COMPLETED: 'tasks.status_token.completed',
+  COMPLETE: 'tasks.status_token.completed',
+  CANCELLED: 'tasks.status_token.cancelled',
+  CANCEL: 'tasks.status_token.cancelled',
+  OVERDUE: 'tasks.status_token.overdue',
+  PENDING: 'tasks.status_token.pending',
+  PLANNED: 'tasks.status_token.planned',
   IN: '',
-  PROGRESS: '進行中',
-  DONE: '完了',
-  READY: '準備完了',
-  SCHEDULED: '予定済み',
-  STARTED: '開始済み',
-  START: '開始',
-  ACTIVE: '実施中',
-  MISSED: '未実施',
-  FAILED: '失敗',
-  SKIPPED: 'スキップ',
-  TODAY: '本日',
+  PROGRESS: 'tasks.status_token.progress',
+  DONE: 'tasks.status_token.done',
+  READY: 'tasks.status_token.ready',
+  SCHEDULED: 'tasks.status_token.scheduled',
+  STARTED: 'tasks.status_token.started',
+  START: 'tasks.status_token.start',
+  ACTIVE: 'tasks.status_token.active',
+  MISSED: 'tasks.status_token.missed',
+  FAILED: 'tasks.status_token.failed',
+  SKIPPED: 'tasks.status_token.skipped',
+  TODAY: 'tasks.status_token.today',
 };
 
 const STATUS_CLASS_ENTRIES = [
@@ -203,8 +205,8 @@ function getStatusClass(state: string | null | undefined): string {
 function getStatusLabel(state: string | null | undefined): string {
   if (!state) return '-';
   const key = state.toUpperCase();
-  if (TASK_STATE_LABELS[key]) {
-    return TASK_STATE_LABELS[key];
+  if (TASK_STATE_LABEL_KEYS[key]) {
+    return tr(TASK_STATE_LABEL_KEYS[key]);
   }
 
   const normalized = key.replace(/[\s-]+/g, '_');
@@ -214,7 +216,9 @@ function getStatusLabel(state: string | null | undefined): string {
   }
 
   const translatedTokens = tokens.map((token, index) => {
-    const word = STATUS_TOKEN_LABELS[token];
+    const wordKey = STATUS_TOKEN_LABEL_KEYS[token];
+    if (wordKey === '') return '';
+    const word = wordKey ? tr(wordKey) : undefined;
     if (word !== undefined) {
       return word;
     }
@@ -253,9 +257,13 @@ function getFilterTypeKey(task: AggregatedTask): string {
 function getTaskLabel(task: AggregatedTask): string {
   if (task.type === 'Spraying') {
     const key = getSprayingChartKey(task);
-    return SPRAYING_LABELS[key] ?? TASK_TYPE_MAP[task.type] ?? task.type;
+    const labelKey = SPRAYING_LABEL_KEYS[key];
+    if (labelKey) return tr(labelKey);
+    const baseKey = TASK_TYPE_LABEL_KEYS[task.type];
+    return baseKey ? tr(baseKey) : task.type;
   }
-  return TASK_TYPE_MAP[task.type] ?? task.type;
+  const labelKey = TASK_TYPE_LABEL_KEYS[task.type];
+  return labelKey ? tr(labelKey) : task.type;
 }
 
 function normalizeProductUuid(value?: string | null): string {
@@ -370,9 +378,9 @@ function findBbchIndexForDate(
 
 type ChartMode = 'count' | 'area';
 
-const MODE_LABELS: Record<ChartMode, string> = {
-  count: 'タスク件数',
-  area: '圃場面積',
+const MODE_LABEL_KEYS: Record<ChartMode, string> = {
+  count: 'tasks.mode.count',
+  area: 'tasks.mode.area',
 };
 
 const TABLE_PAGE_SIZE = 50;
@@ -382,30 +390,30 @@ const WEATHER_CLUSTER_RADIUS_KM = 2;
 type RangeKey = '7d' | '30d' | '90d' | 'all';
 type DaysRangeKey = Exclude<RangeKey, 'all'>;
 type RangeOption =
-  | { key: DaysRangeKey; label: string; days: number }
-  | { key: 'all'; label: string };
+  | { key: DaysRangeKey; labelKey: string; days: number }
+  | { key: 'all'; labelKey: string };
 
 const RANGE_OPTIONS: RangeOption[] = [
-  { key: '7d', label: '1週間', days: 7 },
-  { key: '30d', label: '1か月', days: 30 },
-  { key: '90d', label: '3か月', days: 90 },
-  { key: 'all', label: 'すべて' },
+  { key: '7d', labelKey: 'tasks.range.7d', days: 7 },
+  { key: '30d', labelKey: 'tasks.range.30d', days: 30 },
+  { key: '90d', labelKey: 'tasks.range.90d', days: 90 },
+  { key: 'all', labelKey: 'tasks.range.all' },
 ];
 
 const SPRAYING_FILTER_OPTIONS = [
-  { key: 'Spraying', label: '散布（すべて）' },
-  { key: 'Spraying_CROP_PROTECTION', label: SPRAYING_LABELS.Spraying_CROP_PROTECTION },
-  { key: 'Spraying_NUTRITION', label: SPRAYING_LABELS.Spraying_NUTRITION },
-  { key: 'Spraying_WEED_MANAGEMENT', label: SPRAYING_LABELS.Spraying_WEED_MANAGEMENT },
-  { key: 'Spraying_OTHER', label: SPRAYING_LABELS.Spraying_OTHER },
+  { key: 'Spraying', labelKey: 'tasks.filter.spraying_all' },
+  { key: 'Spraying_CROP_PROTECTION', labelKey: SPRAYING_LABEL_KEYS.Spraying_CROP_PROTECTION },
+  { key: 'Spraying_NUTRITION', labelKey: SPRAYING_LABEL_KEYS.Spraying_NUTRITION },
+  { key: 'Spraying_WEED_MANAGEMENT', labelKey: SPRAYING_LABEL_KEYS.Spraying_WEED_MANAGEMENT },
+  { key: 'Spraying_OTHER', labelKey: SPRAYING_LABEL_KEYS.Spraying_OTHER },
 ];
 
 const TASK_TYPE_FILTER_OPTIONS = [
-  { key: 'all', label: 'すべてのタスク' },
+  { key: 'all', labelKey: 'tasks.filter.all_tasks' },
   ...SPRAYING_FILTER_OPTIONS,
-  ...Object.entries(TASK_TYPE_MAP)
+  ...Object.entries(TASK_TYPE_LABEL_KEYS)
     .filter(([key]) => key !== 'Spraying')
-    .map(([key, label]) => ({ key, label })),
+    .map(([key, labelKey]) => ({ key, labelKey })),
 ];
 
 const selectFieldsFromCombinedOut = (combinedOut: any): Field[] => {
@@ -615,6 +623,7 @@ export function TasksPage() {
     combinedRetryCountdown,
   } = useData();
   const { auth } = useAuth();
+  const { language, t } = useLanguage();
   const { submittedFarms, fetchCombinedDataIfNeeded, clearCombinedCache } = useFarms(); // fetchCombinedDataIfNeeded を useFarms から取得
   const navigate = useNavigate();
   const baseTasks = useAggregatedTasks();
@@ -663,20 +672,20 @@ export function TasksPage() {
     const fetchProducts = async () => {
       let items: Record<string, CropProtectionProduct[] | { ok?: boolean }> = {};
       try {
-        const res = await fetch(withApiBase('/crop-protection-products/bulk'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const { ok, json } = await postJsonCached<any>(
+          withApiBase('/crop-protection-products/bulk'),
+          {
             login_token: auth.login.login_token,
             api_token: auth.api_token,
             farm_uuids: farmUuids,
             country_uuid: COUNTRY_UUID_JP,
             crop_uuids: cropUuids,
             task_type_code: 'FIELDTREATMENT',
-          }),
-        });
-        const json = await res.json();
-        if (!res.ok || !json?.ok) return;
+          },
+          undefined,
+          { cacheKey: `crop-protection-products:bulk:${cacheKey}`, cache: 'session' },
+        );
+        if (!ok || !json?.ok) return;
         items = json.items ?? {};
         if (cancelled) return;
         setHerbicideProductUuidsByCrop(prev => {
@@ -867,17 +876,17 @@ export function TasksPage() {
       const label = task.farmName || '';
       if (key) {
         if (!map.has(key)) {
-          map.set(key, label || '名称なし');
+          map.set(key, label || t('tasks.farm.no_name'));
         }
       } else {
         hasUnknown = true;
       }
     });
     const options = Array.from(map.entries()).map(([key, label]) => ({ key, label }));
-    options.sort((a, b) => a.label.localeCompare(b.label, 'ja'));
-    if (hasUnknown) options.push({ key: '__unknown__', label: '農場情報なし' });
-    return [{ key: 'all', label: 'すべての農場' }, ...options];
-  }, [allTasks]);
+    options.sort((a, b) => a.label.localeCompare(b.label, language === 'ja' ? 'ja' : 'en'));
+    if (hasUnknown) options.push({ key: '__unknown__', label: t('tasks.farm.no_info') });
+    return [{ key: 'all', label: t('tasks.farm.all') }, ...options];
+  }, [allTasks, language, t]);
   const statusFilterOptions = useMemo(() => {
     const map = new Map<string, string>();
     allTasks.forEach(task => {
@@ -889,9 +898,9 @@ export function TasksPage() {
     });
     const dynamicOptions = Array.from(map.entries()).map(([key, label]) => ({ key, label }));
     // キー順ではなくラベル順で見やすく
-    dynamicOptions.sort((a, b) => a.label.localeCompare(b.label, 'ja'));
-    return [{ key: 'all', label: 'すべてのステータス' }, ...dynamicOptions];
-  }, [allTasks]);
+    dynamicOptions.sort((a, b) => a.label.localeCompare(b.label, language === 'ja' ? 'ja' : 'en'));
+    return [{ key: 'all', label: t('tasks.filter.status_all') }, ...dynamicOptions];
+  }, [allTasks, language, t]);
   const bbchFilterOptions = useMemo(() => {
     const indices = new Set<string>();
     let hasUnknown = false;
@@ -911,9 +920,9 @@ export function TasksPage() {
     });
     const sorted = Array.from(indices).sort((a, b) => parseBbchIndex(a) - parseBbchIndex(b));
     const options = sorted.map(index => ({ key: index, label: `BBCH ${index}` }));
-    if (hasUnknown) options.push({ key: '__unknown__', label: 'BBCH不明' });
-    return [{ key: 'all', label: 'すべてのBBCH' }, ...options];
-  }, [allTasks, bbchBySeason]);
+    if (hasUnknown) options.push({ key: '__unknown__', label: t('tasks.bbch.unknown') });
+    return [{ key: 'all', label: t('tasks.bbch.all') }, ...options];
+  }, [allTasks, bbchBySeason, language, t]);
   const noteFilterOptions = useMemo(() => {
     const notes = new Set<string>();
     let hasEmpty = false;
@@ -926,17 +935,17 @@ export function TasksPage() {
       notes.add(note);
     });
     const options = Array.from(notes)
-      .sort((a, b) => a.localeCompare(b, 'ja'))
+      .sort((a, b) => a.localeCompare(b, language === 'ja' ? 'ja' : 'en'))
       .map(note => ({
         key: note,
         label: note.length > 40 ? `${note.slice(0, 40)}…` : note,
       }));
     return [
-      { key: 'all', label: 'すべてのメモ' },
-      ...(hasEmpty ? [{ key: '__empty__', label: 'メモなし' }] : []),
+      { key: 'all', label: t('tasks.note.all') },
+      ...(hasEmpty ? [{ key: '__empty__', label: t('tasks.note.none') }] : []),
       ...options,
     ];
-  }, [allTasks]);
+  }, [allTasks, language, t]);
 
   useEffect(() => {
     if (farmFilter !== 'all' && !farmFilterOptions.some(opt => opt.key === farmFilter)) {
@@ -1045,8 +1054,9 @@ export function TasksPage() {
 
     const getAssigneeName = (task: AggregatedTask) =>
       task.assignee
-        ? `${task.assignee.lastName || ''} ${task.assignee.firstName || ''}`.trim() || '未割り当て'
-        : '未割り当て';
+        ? `${task.assignee.lastName || ''} ${task.assignee.firstName || ''}`.trim() ||
+          t('tasks.assignee.unassigned')
+        : t('tasks.assignee.unassigned');
 
     const getBbchIndex = (task: AggregatedTask) => {
       const dateInput = getJstDateInputValue(task.plannedDate || task.executionDate);
@@ -1063,7 +1073,7 @@ export function TasksPage() {
             entry.name,
             entry.formLabel ? `(${entry.formLabel})` : '',
             entry.per10a ? entry.per10a : '',
-            entry.total ? `合計 ${entry.total}` : '',
+            entry.total ? t('tasks.recipe.total', { total: entry.total }) : '',
           ].filter(Boolean);
           return parts.join(' ');
         })
@@ -1071,18 +1081,18 @@ export function TasksPage() {
     };
 
     const headers = [
-      '農場',
-      '圃場',
-      '面積(ha)',
-      'タスク種別',
-      '作物',
-      '計画日',
-      '実行日',
+      t('table.farm'),
+      t('table.field'),
+      t('tasks.csv.area_ha'),
+      t('tasks.csv.task_type'),
+      t('table.crop'),
+      t('tasks.csv.planned_date'),
+      t('tasks.csv.execution_date'),
       'BBCH',
-      'ステータス',
-      '担当者',
-      '施肥混用',
-      'メモ',
+      t('table.status'),
+      t('tasks.csv.assignee'),
+      t('tasks.csv.recipe'),
+      t('tasks.csv.note'),
     ];
 
     const sorted = [...filteredTasks].sort((a, b) => {
@@ -1091,8 +1101,8 @@ export function TasksPage() {
       if (dateA !== dateB) return dateA.localeCompare(dateB);
       const farmA = a.farmName || '';
       const farmB = b.farmName || '';
-      if (farmA !== farmB) return farmA.localeCompare(farmB, 'ja');
-      return (a.fieldName || '').localeCompare(b.fieldName || '', 'ja');
+      if (farmA !== farmB) return farmA.localeCompare(farmB, language === 'ja' ? 'ja' : 'en');
+      return (a.fieldName || '').localeCompare(b.fieldName || '', language === 'ja' ? 'ja' : 'en');
     });
 
     const rows = sorted.map(task => {
@@ -1195,11 +1205,11 @@ export function TasksPage() {
     async (task: AggregatedTask, nextDateInput: string, opts?: { skipInvalidate?: boolean }) => {
       if (task.type !== 'Spraying') return;
       if (!auth) {
-        throw new Error('ログイン情報がありません。再ログインしてください。');
+        throw new Error(t('tasks.error.no_auth_relogin'));
       }
       const plannedDate = toJstPlannedDateIso(nextDateInput);
       if (!plannedDate) {
-        throw new Error('予定日が不正です。');
+        throw new Error(t('tasks.error.invalid_planned_date'));
       }
       setUpdateStateByTask(prev => ({ ...prev, [task.uuid]: { loading: true } }));
       try {
@@ -1231,7 +1241,7 @@ export function TasksPage() {
           fetchCombinedDataIfNeeded({ includeTasks: true, force: true });
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : '更新に失敗しました。';
+        const message = err instanceof Error ? err.message : t('tasks.error.update_failed');
         setUpdateStateByTask(prev => ({ ...prev, [task.uuid]: { loading: false, error: message } }));
         throw err;
       }
@@ -1271,8 +1281,8 @@ export function TasksPage() {
   if (submittedFarms.length === 0) {
     return (
       <div className="tasks-page-container">
-        <h2>タスク一覧</h2>
-        <p>ヘッダーのドロップダウンから農場を選択してください。</p>
+        <h2>{t('tasks.title')}</h2>
+        <p>{t('tasks.select_farms_hint')}</p>
       </div>
     );
   }
@@ -1282,13 +1292,13 @@ export function TasksPage() {
       <div className="tasks-page-container">
         <LoadingOverlay
           message={formatCombinedLoadingMessage(
-            'タスクデータ',
+            t('label.tasks_data'),
             combinedFetchAttempt,
             combinedFetchMaxAttempts,
             combinedRetryCountdown,
           )}
         />
-        <h2>タスク一覧</h2>
+        <h2>{t('tasks.title')}</h2>
       </div>
     );
   }
@@ -1296,8 +1306,8 @@ export function TasksPage() {
   if (combinedErr) {
     return (
       <div className="tasks-page-container">
-        <h2>タスク一覧</h2>
-        <h3 style={{ color: '#ff6b6b' }}>タスクデータの取得に失敗しました</h3>
+        <h2>{t('tasks.title')}</h2>
+        <h3 style={{ color: '#ff6b6b' }}>{t('tasks.load_failed')}</h3>
         <pre style={{ color: '#ff6b6b', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
           {combinedErr}
         </pre>
@@ -1307,17 +1317,17 @@ export function TasksPage() {
 
   return (
     <div className="tasks-page-container">
-      <h2>タスク一覧</h2>
+      <h2>{t('tasks.title')}</h2>
       <p>
-        選択された {submittedFarms.length} 件の農場のタスクを表示しています。
+        {t('tasks.summary', { count: submittedFarms.length })}
         {combinedOut?.source && (
           <span style={{ marginLeft: '1em', color: combinedOut.source === 'cache' ? '#4caf50' : '#2196f3', fontWeight: 'bold' }}>
-            ({combinedOut.source === 'cache' ? 'キャッシュから取得' : 'APIから取得'})
+            ({combinedOut.source === 'cache' ? t('source.cache') : t('source.api')})
           </span>
         )}
       </p>
 
-      <div className="tasks-view-tabs" role="tablist" aria-label="タスク表示切り替え">
+      <div className="tasks-view-tabs" role="tablist" aria-label={t('tasks.view.aria')}>
         <button
           type="button"
           role="tab"
@@ -1325,7 +1335,7 @@ export function TasksPage() {
           className={`tasks-view-tab ${viewMode === 'list' ? 'active' : ''}`}
           onClick={() => setViewMode('list')}
         >
-          一覧
+          {t('tasks.view.list')}
         </button>
         <button
           type="button"
@@ -1334,14 +1344,14 @@ export function TasksPage() {
           className={`tasks-view-tab ${viewMode === 'calendar' ? 'active' : ''}`}
           onClick={() => setViewMode('calendar')}
         >
-          カレンダー
+          {t('tasks.view.calendar')}
         </button>
       </div>
 
       {viewMode === 'list' && (
         <div className="tasks-filter-bar">
           <div className="filter-control">
-            <label htmlFor="task-farm-filter">農場</label>
+            <label htmlFor="task-farm-filter">{t('tasks.filter.farm')}</label>
             <select
               id="task-farm-filter"
               value={farmFilter}
@@ -1353,19 +1363,19 @@ export function TasksPage() {
             </select>
           </div>
           <div className="filter-control">
-            <label htmlFor="task-type-filter">タスク種別</label>
+            <label htmlFor="task-type-filter">{t('tasks.filter.type')}</label>
             <select
               id="task-type-filter"
               value={typeFilter}
               onChange={(e) => setTypeFilter(e.target.value)}
             >
               {TASK_TYPE_FILTER_OPTIONS.map(opt => (
-                <option key={opt.key} value={opt.key}>{opt.label}</option>
+                <option key={opt.key} value={opt.key}>{t(opt.labelKey)}</option>
               ))}
             </select>
           </div>
           <div className="filter-control">
-            <label htmlFor="task-status-filter">ステータス</label>
+            <label htmlFor="task-status-filter">{t('tasks.filter.status')}</label>
             <select
               id="task-status-filter"
               value={statusFilter}
@@ -1389,7 +1399,7 @@ export function TasksPage() {
             </select>
           </div>
           <div className="filter-control">
-            <label htmlFor="task-plan-from">計画日 (開始)</label>
+            <label htmlFor="task-plan-from">{t('tasks.filter.plan_from')}</label>
             <input
               id="task-plan-from"
               type="date"
@@ -1398,7 +1408,7 @@ export function TasksPage() {
             />
           </div>
           <div className="filter-control">
-            <label htmlFor="task-plan-to">計画日 (終了)</label>
+            <label htmlFor="task-plan-to">{t('tasks.filter.plan_to')}</label>
             <input
               id="task-plan-to"
               type="date"
@@ -1407,7 +1417,7 @@ export function TasksPage() {
             />
           </div>
           <div className="filter-control">
-            <label htmlFor="task-note-filter">メモ</label>
+            <label htmlFor="task-note-filter">{t('tasks.filter.note')}</label>
             <select
               id="task-note-filter"
               value={noteFilter}
@@ -1426,18 +1436,18 @@ export function TasksPage() {
           <TasksChart tasks={filteredTasks} range={range} onRangeChange={setRange} />
           <div className="tasks-bulk-actions">
             <div className="tasks-bulk-summary">
-              選択中の散布タスク: {selectedTaskCount} 件
+              {t('tasks.bulk.selected_spraying', { count: selectedTaskCount })}
             </div>
             <div className="tasks-bulk-action-buttons">
               <button type="button" onClick={handleDownloadTasksCsv} disabled={filteredTasks.length === 0}>
-                CSVダウンロード
+                {t('action.csv_download')}
               </button>
               <button
                 type="button"
                 onClick={() => setIsBulkModalOpen(true)}
                 disabled={!canEditPlannedDate || selectedTaskCount === 0 || isBulkSaving}
               >
-                まとめて計画日を変更
+                {t('tasks.bulk.change_planned_dates')}
               </button>
             </div>
           </div>
@@ -1528,14 +1538,27 @@ function TasksCalendar({
   herbicideOrdersByTask: Map<string, number>;
   herbicideIntervalAlertsByTask: Map<string, boolean>;
 }) {
+  const { language, t } = useLanguage();
+  const locale = language === 'ja' ? 'ja-JP' : 'en-US';
+
   const monthStart = startOfMonth(currentMonth);
   const monthEnd = endOfMonth(monthStart);
   const gridStart = startOfWeek(monthStart);
   const gridEnd = endOfWeek(monthEnd);
   const days = eachDayOfInterval({ start: gridStart, end: gridEnd });
   const today = new Date();
-  const monthLabel = format(monthStart, 'yyyy年M月');
-  const weekdayLabels = ['日', '月', '火', '水', '木', '金', '土'];
+  const monthLabel = useMemo(
+    () =>
+      new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'long', timeZone: 'Asia/Tokyo' }).format(
+        monthStart,
+      ),
+    [locale, monthStart],
+  );
+  const weekdayLabels = useMemo(() => {
+    const formatter = new Intl.DateTimeFormat(locale, { weekday: 'short', timeZone: 'Asia/Tokyo' });
+    const base = startOfWeek(new Date(2020, 0, 5));
+    return Array.from({ length: 7 }, (_value, index) => formatter.format(addDays(base, index)));
+  }, [locale]);
   const tasksLimit = 3;
   const [hoverDateKey, setHoverDateKey] = useState<string | null>(null);
   const [movingTaskId, setMovingTaskId] = useState<string | null>(null);
@@ -1596,19 +1619,19 @@ function TasksCalendar({
       const fromDate = toJstBoundaryIsoFromDate(new Date(currentMonth.getFullYear() - 4, 0, 1), false);
       const tillDate = toJstBoundaryIsoFromDate(yearEnd, true);
       try {
-        const res = await fetch(withApiBase('/weather-by-field'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const { ok, json } = await postJsonCached<any>(
+          withApiBase('/weather-by-field'),
+          {
             login_token: auth.login.login_token,
             api_token: auth.api_token,
             field_uuid: selectedFieldUuid,
             from_date: fromDate,
             till_date: tillDate,
-          }),
-        });
-        const json = await res.json();
-        if (!res.ok || !json?.ok) return;
+          },
+          undefined,
+          { cacheKey: `weather-by-field:${selectedFieldUuid}|${fromDate}|${tillDate}`, cache: 'session' },
+        );
+        if (!ok || !json?.ok) return;
         const daily = json?.response?.data?.fieldV2?.weatherHistoricForecastDaily ?? [];
         const monthDayStats = new Map<string, {
           precipSum: number;
@@ -1773,23 +1796,23 @@ function TasksCalendar({
     <div className="tasks-calendar">
       <div className="tasks-calendar-header">
         <button type="button" onClick={() => onChangeMonth(subMonths(monthStart, 1))}>
-          前月
+          {t('tasks.calendar.prev_month')}
         </button>
         <h3>{monthLabel}</h3>
         <button type="button" onClick={() => onChangeMonth(addMonths(monthStart, 1))}>
-          次月
+          {t('tasks.calendar.next_month')}
         </button>
         <button type="button" onClick={() => onChangeMonth(startOfMonth(new Date()))}>
-          今日
+          {t('tasks.calendar.today')}
         </button>
         <div className="tasks-calendar-field">
-          <label htmlFor="tasks-calendar-field-select">圃場</label>
+          <label htmlFor="tasks-calendar-field-select">{t('table.field')}</label>
           <select
             id="tasks-calendar-field-select"
             value={selectedFieldUuid}
             onChange={(event) => setSelectedFieldUuid(event.target.value)}
           >
-            {fieldOptions.length === 0 && <option value="">圃場なし</option>}
+            {fieldOptions.length === 0 && <option value="">{t('tasks.calendar.no_fields')}</option>}
             {fieldOptions.map(option => (
               <option key={option.uuid} value={option.uuid}>
                 {option.name}
@@ -1817,17 +1840,17 @@ function TasksCalendar({
           const weatherInfo = weatherByDate[dateKey];
           const weatherLabel = weatherInfo
             ? weatherInfo.tone === 'good'
-              ? '降雨: 低'
+              ? t('tasks.weather.rain.low')
               : weatherInfo.tone === 'ok'
-                ? '降雨: 中'
-                : '降雨: 高'
+                ? t('tasks.weather.rain.medium')
+                : t('tasks.weather.rain.high')
             : null;
           const soilLabel = weatherInfo
             ? weatherInfo.soil === 'dry'
-              ? '土壌: 乾燥'
+              ? t('tasks.weather.soil.dry')
               : weatherInfo.soil === 'ok'
-                ? '土壌: 適湿'
-                : '土壌: 湿潤'
+                ? t('tasks.weather.soil.ok')
+                : t('tasks.weather.soil.wet')
             : null;
           return (
             <div
@@ -1855,7 +1878,10 @@ function TasksCalendar({
               {weatherInfo && weatherLabel && (
                 <div
                   className={`tasks-calendar-weather tasks-calendar-weather--${weatherInfo.tone}`}
-                  title={`過去${weatherInfo.years}年平均の降水量 ${weatherInfo.precipAvg.toFixed(1)} mm。判定ルール: <=1mm 低 / <=5mm 中 / >5mm 高`}
+                  title={t('tasks.weather.rain.tooltip', {
+                    years: weatherInfo.years,
+                    mm: weatherInfo.precipAvg.toFixed(1),
+                  })}
                 >
                   {weatherLabel}
                 </div>
@@ -1863,7 +1889,19 @@ function TasksCalendar({
               {weatherInfo && soilLabel && (
                 <div
                   className={`tasks-calendar-soil tasks-calendar-soil--${weatherInfo.soil}`}
-                  title={`過去${weatherInfo.years}年平均: 降水 ${weatherInfo.precipAvg.toFixed(1)} mm、湿度 ${weatherInfo.humidityAvg !== null ? weatherInfo.humidityAvg.toFixed(0) : '-'}%、気温 ${weatherInfo.tempAvg !== null ? weatherInfo.tempAvg.toFixed(1) : '-'}°C、風速 ${weatherInfo.windAvg !== null ? weatherInfo.windAvg.toFixed(1) : '-'} m/s、日照 ${weatherInfo.sunshineAvg !== null ? weatherInfo.sunshineAvg.toFixed(1) : '-'} h。乾燥指数=気温*0.3+風*1.5+日照*0.8-湿度*0.2。土壌バランス=降水-乾燥指数。<-2乾燥 / 2以上湿潤`}
+                  title={t('tasks.weather.soil.tooltip', {
+                    years: weatherInfo.years,
+                    precip: weatherInfo.precipAvg.toFixed(1),
+                    humidity:
+                      weatherInfo.humidityAvg !== null ? weatherInfo.humidityAvg.toFixed(0) : '-',
+                    temp: weatherInfo.tempAvg !== null ? weatherInfo.tempAvg.toFixed(1) : '-',
+                    wind: weatherInfo.windAvg !== null ? weatherInfo.windAvg.toFixed(1) : '-',
+                    sunshine: weatherInfo.sunshineAvg !== null ? weatherInfo.sunshineAvg.toFixed(1) : '-',
+                    dryingIndex:
+                      weatherInfo.dryingIndex !== null ? weatherInfo.dryingIndex.toFixed(1) : '-',
+                    soilBalance:
+                      weatherInfo.soilBalance !== null ? weatherInfo.soilBalance.toFixed(1) : '-',
+                  })}
                 >
                   {soilLabel}
                 </div>
@@ -1884,7 +1922,9 @@ function TasksCalendar({
                   const herbicideOrder = herbicideOrdersByTask.get(task.uuid);
                   const intervalAlert = herbicideIntervalAlertsByTask.get(task.uuid);
                   const baseLabel = getTaskLabel(task);
-                  const badgeText = herbicideOrder ? `（除草${herbicideOrder}回目）` : '';
+                  const badgeText = herbicideOrder
+                    ? t('tasks.herbicide.badge_paren', { order: herbicideOrder })
+                    : '';
                   const title = `${baseLabel}${badgeText} / ${task.fieldName}`;
                   const canDrag = task.type === 'Spraying';
                   const isMoving = movingTaskId === task.uuid;
@@ -1892,7 +1932,11 @@ function TasksCalendar({
                     <div
                       key={task.uuid}
                       className={`tasks-calendar-item ${canDrag ? 'is-draggable' : 'is-locked'} ${isMoving ? 'is-moving' : ''}`}
-                      title={canDrag ? `${title}（ドラッグで日付変更）` : `${title}（変更不可）`}
+                      title={
+                        canDrag
+                          ? `${title} ${t('tasks.calendar.drag_hint')}`
+                          : `${title} ${t('tasks.calendar.locked_hint')}`
+                      }
                       draggable={canDrag}
                       onClick={() => canDrag && openDatePicker(task)}
                       onDragStart={(event) => {
@@ -1910,12 +1954,12 @@ function TasksCalendar({
                           {baseLabel}
                           {herbicideOrder && (
                             <span className="tasks-calendar-badge tasks-calendar-badge--herbicide">
-                              除草{herbicideOrder}回目
+                              {t('tasks.herbicide.badge', { order: herbicideOrder })}
                             </span>
                           )}
                           {intervalAlert && (
                             <span className="tasks-calendar-badge tasks-calendar-badge--alert">
-                              20日未満
+                              {t('tasks.herbicide.interval_lt_20d')}
                             </span>
                           )}
                         </span>
@@ -1923,7 +1967,7 @@ function TasksCalendar({
                         {isMoving && (
                           <span className="tasks-calendar-item__loading">
                             <LoadingSpinner size={12} />
-                            更新中...
+                            {t('action.updating')}
                           </span>
                         )}
                       </span>
@@ -1936,7 +1980,7 @@ function TasksCalendar({
                     className="tasks-calendar-more"
                     onClick={() => setSelectedDateTasks({ dateKey, tasks })}
                   >
-                    +{extra} 件
+                    {t('tasks.calendar.more', { count: extra })}
                   </button>
                 )}
               </div>
@@ -1948,15 +1992,15 @@ function TasksCalendar({
         <div className="tasks-calendar-modal-backdrop" onClick={closeDatePicker}>
           <div className="tasks-calendar-modal" onClick={(event) => event.stopPropagation()}>
             <div className="tasks-calendar-modal-header">
-              <h4>散布タスクの予定日を変更</h4>
-              <button type="button" onClick={closeDatePicker}>閉じる</button>
+              <h4>{t('tasks.calendar.edit_spraying_title')}</h4>
+              <button type="button" onClick={closeDatePicker}>{t('action.close')}</button>
             </div>
             <div className="tasks-calendar-modal-body">
               <p className="tasks-calendar-modal-title">
                 {getTaskLabel(selectedTask)} / {selectedTask.fieldName}
               </p>
               <label>
-                新しい日付
+                {t('tasks.calendar.new_date')}
                 <input
                   type="date"
                   value={selectedDateInput}
@@ -1970,7 +2014,7 @@ function TasksCalendar({
                 onClick={handleApplyDate}
                 disabled={!selectedDateInput || Boolean(movingTaskId)}
               >
-                変更を保存
+                {t('tasks.calendar.save_changes')}
               </button>
             </div>
           </div>
@@ -1983,8 +2027,12 @@ function TasksCalendar({
         >
           <div className="tasks-calendar-modal tasks-calendar-modal--wide" onClick={(event) => event.stopPropagation()}>
             <div className="tasks-calendar-modal-header">
-              <h4>{format(new Date(selectedDateTasks.dateKey), 'yyyy/MM/dd')} のタスク</h4>
-              <button type="button" onClick={() => setSelectedDateTasks(null)}>閉じる</button>
+              <h4>
+                {t('tasks.calendar.tasks_on_date', {
+                  date: format(new Date(selectedDateTasks.dateKey), 'yyyy/MM/dd'),
+                })}
+              </h4>
+              <button type="button" onClick={() => setSelectedDateTasks(null)}>{t('action.close')}</button>
             </div>
             <div className="tasks-calendar-modal-body">
               <div className="tasks-calendar-task-list">
@@ -1998,12 +2046,12 @@ function TasksCalendar({
                         {baseLabel}
                         {herbicideOrder && (
                           <span className="tasks-calendar-badge tasks-calendar-badge--herbicide">
-                            除草{herbicideOrder}回目
+                            {t('tasks.herbicide.badge', { order: herbicideOrder })}
                           </span>
                         )}
                         {intervalAlert && (
                           <span className="tasks-calendar-badge tasks-calendar-badge--alert">
-                            20日未満
+                            {t('tasks.herbicide.interval_lt_20d')}
                           </span>
                         )}
                       </span>
@@ -2035,7 +2083,7 @@ function TasksCalendar({
                                 }}
                                 disabled={!inlineEditDateInput || Boolean(movingTaskId)}
                               >
-                                保存
+                                {t('action.save')}
                               </button>
                               <button
                                 type="button"
@@ -2044,7 +2092,7 @@ function TasksCalendar({
                                   setInlineEditDateInput('');
                                 }}
                               >
-                                キャンセル
+                                {t('action.cancel')}
                               </button>
                             </>
                           ) : (
@@ -2055,7 +2103,7 @@ function TasksCalendar({
                                 setInlineEditDateInput(getJstDateInputValue(task.plannedDate || task.executionDate));
                               }}
                             >
-                              日付変更
+                              {t('tasks.calendar.change_date')}
                             </button>
                           )}
                         </div>
@@ -2081,6 +2129,7 @@ function TasksChart({
   range: RangeKey;
   onRangeChange: (key: RangeKey) => void;
 }) {
+  const { language, t } = useLanguage();
   const [mode, setMode] = useState<ChartMode>('count');
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const chartRef = useRef<ChartJSInstance | null>(null);
@@ -2114,13 +2163,14 @@ function TasksChart({
     const labelsAll = Array.from(dateSet).sort();
     const orderedTypes = Array.from(
       new Set([
-        ...Object.keys(CHART_TYPE_LABELS),
+        ...Object.keys(CHART_TYPE_LABEL_KEYS),
         ...tasks.map(task => getChartTypeKey(task)),
       ])
     );
 
     const datasetsAll = orderedTypes.reduce<ChartDataset<'bar', number[]>[]>((acc, typeKey) => {
-      const label = CHART_TYPE_LABELS[typeKey] ?? TASK_TYPE_MAP[typeKey] ?? typeKey;
+      const labelKey = CHART_TYPE_LABEL_KEYS[typeKey] ?? TASK_TYPE_LABEL_KEYS[typeKey];
+      const label = labelKey ? t(labelKey) : typeKey;
       const color = TASK_COLOR_MAP[typeKey] ?? '#9e9e9e';
       const data = labelsAll.map(date => {
         const byType = mode === 'area' ? areaByDate : countByDate;
@@ -2158,7 +2208,7 @@ function TasksChart({
 
     let datasets = datasetsAll;
     return { labels, datasets, totalsByDate };
-  }, [tasks, mode]);
+  }, [tasks, mode, language, t]);
 
   useEffect(() => {
     if (selectedDate && !labels.includes(selectedDate)) {
@@ -2197,7 +2247,13 @@ function TasksChart({
         .replace(/\n/g, ' ');
       return `"${text.replace(/"/g, '""')}"`;
     };
-    const header = ['日付', '名称', '剤型', '合計', '単位'];
+    const header = [
+      t('tasks.usage_csv.date'),
+      t('tasks.usage_csv.name'),
+      t('tasks.usage_csv.form'),
+      t('tasks.usage_csv.total'),
+      t('tasks.usage_csv.unit'),
+    ];
     const rows = usageCsvRows.map(item => [
       item.date,
       item.name,
@@ -2255,9 +2311,12 @@ function TasksChart({
               if (!rawValue) return undefined;
               const datasetLabel = context.dataset.label || '';
               if (isArea) {
-                return `${datasetLabel}: ${rawValue.toFixed(2)} ha`;
+                return t('tasks.chart.tooltip.area', {
+                  label: datasetLabel,
+                  value: rawValue.toFixed(2),
+                });
               }
-              return `${datasetLabel}: ${rawValue} 件`;
+              return t('tasks.chart.tooltip.count', { label: datasetLabel, value: rawValue });
             },
             footer: (items: any[]) => {
               if (!items?.length) return '';
@@ -2266,7 +2325,9 @@ function TasksChart({
               const totals = date ? totalsByDate[date] : undefined;
               const totalValue = totals ? (isArea ? totals.area : totals.count) : 0;
               if (!totalValue) return '';
-              return isArea ? `合計: ${totalValue.toFixed(2)} ha` : `合計: ${totalValue} 件`;
+              return isArea
+                ? t('tasks.chart.tooltip.total_area', { value: totalValue.toFixed(2) })
+                : t('tasks.chart.tooltip.total_count', { value: totalValue });
             },
           },
         },
@@ -2358,17 +2419,17 @@ function TasksChart({
   return (
     <div className="tasks-chart-card">
       <div className="tasks-chart-header">
-        <h3>タスク予定</h3>
+        <h3>{t('tasks.chart.title')}</h3>
       </div>
       {usageSummary.length > 0 && (
         <div className="usage-summary-card">
           <div className="usage-summary-head">
             <div>
-              <div className="usage-summary-title">使用薬剤サマリ</div>
-              <div className="usage-summary-sub">散布タスクの合計量</div>
+              <div className="usage-summary-title">{t('tasks.usage.title')}</div>
+              <div className="usage-summary-sub">{t('tasks.usage.subtitle')}</div>
             </div>
             <button type="button" className="usage-download-btn" onClick={handleDownloadUsageCsv}>
-              薬剤エクスポート
+              {t('tasks.usage.export')}
             </button>
           </div>
           <div className="usage-summary-list">
@@ -2391,22 +2452,22 @@ function TasksChart({
               className={range === option.key ? 'active' : ''}
               onClick={() => onRangeChange(option.key)}
             >
-              {option.label}
+              {t(option.labelKey)}
             </button>
           ))}
         </div>
         <div className="tasks-chart-toggle">
           <button type="button" className="tasks-chart-reset" onClick={handleResetZoom}>
-            ズームリセット
+            {t('tasks.chart.reset_zoom')}
           </button>
-          {(Object.keys(MODE_LABELS) as ChartMode[]).map(modeKey => (
+          {(Object.keys(MODE_LABEL_KEYS) as ChartMode[]).map(modeKey => (
             <button
               key={modeKey}
               type="button"
               className={mode === modeKey ? 'active' : ''}
               onClick={() => setMode(modeKey)}
             >
-              {MODE_LABELS[modeKey]}
+              {t(MODE_LABEL_KEYS[modeKey])}
             </button>
           ))}
         </div>
@@ -2414,7 +2475,7 @@ function TasksChart({
       <div className="tasks-chart-wrapper">
         {noData ? (
           <div className="tasks-chart-empty" style={{ textAlign: 'center', paddingTop: '4rem' }}>
-            対象の期間にタスク登録がありません。
+            {t('tasks.chart.empty_range')}
           </div>
         ) : (
           <Bar
@@ -2429,19 +2490,19 @@ function TasksChart({
       </div>
       <div className="tasks-chart-footnote">
         {mode === 'area'
-          ? '※ 面積は ha（ヘクタール）換算で集計しています。'
-          : '※ 同日に計画された各タスク件数をスタック表示しています。'}
+          ? t('tasks.chart.footnote_area')
+          : t('tasks.chart.footnote_count')}
       </div>
       {selectedDate && (
         <div className="tasks-detail-card">
           <div className="tasks-detail-header">
-            <h4>{selectedDate} のタスク</h4>
-            <button type="button" onClick={() => setSelectedDate(null)}>閉じる</button>
+            <h4>{t('tasks.chart.tasks_on_date', { date: selectedDate })}</h4>
+            <button type="button" onClick={() => setSelectedDate(null)}>{t('action.close')}</button>
           </div>
           {totalsForSelected && (
             <div className="tasks-detail-summary">
               <span className="summary-chip">
-                合計 {totalsForSelected.count} 件
+                {t('tasks.chart.total_tasks', { count: totalsForSelected.count })}
               </span>
               <span className="summary-chip">
                 {totalsForSelected.area.toFixed(2)} ha
@@ -2454,7 +2515,7 @@ function TasksChart({
             </div>
           )}
           {selectedTasks.length === 0 ? (
-            <p className="tasks-chart-empty">詳細を表示できるタスクがありません。</p>
+            <p className="tasks-chart-empty">{t('tasks.chart.no_details')}</p>
           ) : (
             <ul className="tasks-detail-list">
               {selectedTasks.map(task => {
@@ -2462,8 +2523,9 @@ function TasksChart({
                 const statusLabel = getStatusLabel(task.state);
                 const statusClass = getStatusClass(task.state);
                 const assigneeName = task.assignee
-                  ? `${task.assignee.lastName || ''} ${task.assignee.firstName || ''}`.trim() || '未割り当て'
-                  : '未割り当て';
+                  ? `${task.assignee.lastName || ''} ${task.assignee.firstName || ''}`.trim() ||
+                    t('tasks.assignee.unassigned')
+                  : t('tasks.assignee.unassigned');
                 const recipes = buildRecipeDisplay(task);
                 return (
                   <li key={task.uuid}>
@@ -2476,18 +2538,18 @@ function TasksChart({
                         <span className="tasks-detail-area">{formatAreaHa(task.fieldArea)}</span>
                       </div>
                       <div className="tasks-detail-subtitle">
-                        <span>{task.cropName || '作物情報なし'}</span>
+                        <span>{task.cropName || t('tasks.crop.no_info')}</span>
                       </div>
                     </div>
                     <div className="tasks-detail-grid">
                       <div>
-                        <p className="tasks-detail-label">計画日 / 実行日</p>
+                        <p className="tasks-detail-label">{t('tasks.detail.planned_execution')}</p>
                         <p className="tasks-detail-value">
                           {getLocalDateString(task.plannedDate) || '-'} / {getLocalDateString(task.executionDate) || '-'}
                         </p>
                       </div>
                       <div>
-                        <p className="tasks-detail-label">ステータス</p>
+                        <p className="tasks-detail-label">{t('tasks.detail.status')}</p>
                         <p className="tasks-detail-value">
                           <span className={`task-status-badge ${statusClass}`}>
                             {statusLabel}
@@ -2495,21 +2557,21 @@ function TasksChart({
                         </p>
                       </div>
                       <div>
-                        <p className="tasks-detail-label">リードタイム</p>
+                        <p className="tasks-detail-label">{t('tasks.detail.lead_time')}</p>
                         <p className={`tasks-detail-value ${lead.className ?? ''}`}>
                           {lead.text}
                         </p>
                       </div>
                       <div>
-                        <p className="tasks-detail-label">担当</p>
+                        <p className="tasks-detail-label">{t('tasks.detail.assignee')}</p>
                         <p className={`tasks-detail-value ${task.assignee ? '' : 'unassigned'}`}>
-                          {assigneeName}
+                          {task.assignee ? assigneeName : t('tasks.assignee.unassigned')}
                         </p>
                       </div>
                     </div>
                     {recipes.length > 0 && (
                       <div className="tasks-detail-recipes">
-                        <p className="tasks-detail-label">施肥混用</p>
+                        <p className="tasks-detail-label">{t('tasks.detail.recipe')}</p>
                         <div className="recipe-list">
                           {recipes.map((entry, idx) => (
                             <div key={`${task.uuid}-detail-recipe-${idx}`} className="recipe-item">
@@ -2517,7 +2579,11 @@ function TasksChart({
                               <div className="recipe-meta">
                                 {entry.formLabel && <span className="recipe-chip">{entry.formLabel}</span>}
                                 {entry.per10a && <span className="recipe-chip recipe-chip-10a">{entry.per10a}</span>}
-                                {entry.total && <span className="recipe-chip recipe-chip-total">合計 {entry.total}</span>}
+                                {entry.total && (
+                                  <span className="recipe-chip recipe-chip-total">
+                                    {t('tasks.recipe.total', { total: entry.total })}
+                                  </span>
+                                )}
                               </div>
                             </div>
                           ))}
@@ -2570,23 +2636,23 @@ function calculateLeadTimeInfo(task: AggregatedTask): LeadTimeInfo {
   if (plannedDate && executionDate) {
     const diff = differenceInCalendarDays(new Date(executionDate), new Date(plannedDate));
     if (diff === 0) {
-      return { text: '予定通り', className: 'leadtime-on-time' };
+      return { text: tr('tasks.lead_time.on_time'), className: 'leadtime-on-time' };
     }
     if (diff > 0) {
-      return { text: `遅れ +${diff}日`, className: 'leadtime-late' };
+      return { text: tr('tasks.lead_time.late', { days: diff }), className: 'leadtime-late' };
     }
-    return { text: `前倒し ${Math.abs(diff)}日`, className: 'leadtime-early' };
+    return { text: tr('tasks.lead_time.early', { days: Math.abs(diff) }), className: 'leadtime-early' };
   }
 
   if (plannedDate) {
     const diff = differenceInCalendarDays(new Date(plannedDate), today);
     if (diff > 0) {
-      return { text: `あと ${diff}日` };
+      return { text: tr('tasks.lead_time.in_days', { days: diff }) };
     }
     if (diff === 0) {
-      return { text: '今日の予定', className: 'leadtime-today' };
+      return { text: tr('tasks.lead_time.today'), className: 'leadtime-today' };
     }
-    return { text: `遅延 ${Math.abs(diff)}日`, className: 'leadtime-late' };
+    return { text: tr('tasks.lead_time.overdue', { days: Math.abs(diff) }), className: 'leadtime-late' };
   }
 
   return { text: '-' };
@@ -2601,7 +2667,8 @@ function formatAreaHa(areaM2?: number | null): string {
 
 function formatAmount(value: number): string {
   const hasFraction = Math.abs(value - Math.round(value)) > 1e-6;
-  return new Intl.NumberFormat('ja-JP', {
+  const locale = getCurrentLanguage() === 'ja' ? 'ja-JP' : 'en-US';
+  return new Intl.NumberFormat(locale, {
     maximumFractionDigits: 1,
     minimumFractionDigits: hasFraction ? 1 : 0,
   }).format(value);
@@ -2610,7 +2677,8 @@ function formatAmount(value: number): string {
 function formatAmountUpTo2(value: number): string {
   const hasFraction = Math.abs(value - Math.round(value)) > 1e-6;
   const needsTwo = Math.abs(value * 10 - Math.round(value * 10)) > 1e-6;
-  return new Intl.NumberFormat('ja-JP', {
+  const locale = getCurrentLanguage() === 'ja' ? 'ja-JP' : 'en-US';
+  return new Intl.NumberFormat(locale, {
     maximumFractionDigits: 2,
     minimumFractionDigits: hasFraction ? (needsTwo ? 2 : 1) : 0,
   }).format(value);
@@ -2658,16 +2726,16 @@ function formatTotalAmount(total: number | null | undefined, unit?: string | nul
 function mapFormulationLabel(formulation?: string | null): string | undefined {
   if (!formulation) return undefined;
   const upper = formulation.toUpperCase();
-  if (upper === 'SOLID') return '固体';
-  if (upper === 'LIQUID') return '液体';
-  if (upper === 'GRANULAR') return '粒状';
+  if (upper === 'SOLID') return tr('tasks.formulation.solid');
+  if (upper === 'LIQUID') return tr('tasks.formulation.liquid');
+  if (upper === 'GRANULAR') return tr('tasks.formulation.granular');
   return formulation;
 }
 
 function mapIngredientName(item: SubstanceApplicationRate): string {
   if (item.name) return item.name;
-  if ((item.type || '').toUpperCase() === 'WATER') return '水';
-  return '名称不明';
+  if ((item.type || '').toUpperCase() === 'WATER') return tr('tasks.ingredient.water');
+  return tr('tasks.ingredient.unknown');
 }
 
 function getRateForPer10a(item: SubstanceApplicationRate, taskAreaM2?: number | null): number | null {
@@ -2792,9 +2860,10 @@ const TaskRow: FC<{
   onOpenWeather?: (task: AggregatedTask) => void;
   isWeatherEnabled?: boolean;
 }> = ({ task, canEditPlannedDate, onUpdatePlannedDate, updateState, isSelected, onToggleSelect, onOpenWeather, isWeatherEnabled }) => {
+  const { t } = useLanguage();
   const assigneeName = task.assignee
-    ? `${task.assignee.lastName || ''} ${task.assignee.firstName || ''}`.trim()
-    : '未割り当て';
+    ? `${task.assignee.lastName || ''} ${task.assignee.firstName || ''}`.trim() || t('tasks.assignee.unassigned')
+    : t('tasks.assignee.unassigned');
   const leadInfo = calculateLeadTimeInfo(task);
   const statusLabel = getStatusLabel(task.state);
   const statusClass = getStatusClass(task.state);
@@ -2824,7 +2893,7 @@ const TaskRow: FC<{
       await onUpdatePlannedDate(task, draftDate);
       setIsEditing(false);
     } catch (err) {
-      const message = err instanceof Error ? err.message : '更新に失敗しました。';
+      const message = err instanceof Error ? err.message : t('tasks.error.update_failed');
       setLocalError(message);
     }
   };
@@ -2843,7 +2912,7 @@ const TaskRow: FC<{
             type="checkbox"
             checked={Boolean(isSelected)}
             onChange={(e) => onToggleSelect?.(task.uuid, e.currentTarget.checked)}
-            aria-label="タスクを選択"
+            aria-label={t('tasks.table.select_task_aria')}
           />
         ) : (
           <span className="tasks-select-placeholder">-</span>
@@ -2867,7 +2936,7 @@ const TaskRow: FC<{
                   className="planned-date-btn"
                   onClick={() => setIsEditing(true)}
                 >
-                  変更
+                  {t('action.edit')}
                 </button>
               )}
             </div>
@@ -2886,7 +2955,7 @@ const TaskRow: FC<{
                   onClick={handleSave}
                   disabled={isSaving || !draftDate}
                 >
-                  保存
+                  {t('action.save')}
                 </button>
                 <button
                   type="button"
@@ -2894,7 +2963,7 @@ const TaskRow: FC<{
                   onClick={handleCancel}
                   disabled={isSaving}
                 >
-                  取消
+                  {t('action.cancel')}
                 </button>
               </div>
             </div>
@@ -2928,7 +2997,11 @@ const TaskRow: FC<{
                   <div className="recipe-meta">
                     {entry.formLabel && <span className="recipe-chip">{entry.formLabel}</span>}
                     {entry.per10a && <span className="recipe-chip recipe-chip-10a">{entry.per10a}</span>}
-                    {entry.total && <span className="recipe-chip recipe-chip-total">合計 {entry.total}</span>}
+                    {entry.total && (
+                      <span className="recipe-chip recipe-chip-total">
+                        {t('tasks.recipe.total', { total: entry.total })}
+                      </span>
+                    )}
                   </div>
                 </div>
               ))}
@@ -2952,7 +3025,7 @@ const TaskRow: FC<{
           onClick={() => onOpenWeather?.(task)}
           disabled={!isWeatherEnabled}
         >
-          散布天気
+          {t('tasks.weather.link')}
         </button>
       </td>
     </tr>
@@ -2970,6 +3043,7 @@ const TasksTable: FC<{
   onOpenWeather?: (task: AggregatedTask) => void;
   isWeatherEnabled?: (task: AggregatedTask) => boolean;
 }> = ({ tasks, canEditPlannedDate, onUpdatePlannedDate, updateStateByTask, selectedTaskUuids, onToggleSelect, onToggleSelectAll, onOpenWeather, isWeatherEnabled }) => {
+  const { language, t } = useLanguage();
   const [page, setPage] = useState(1);
   type SortKey =
     | 'type'
@@ -3048,12 +3122,12 @@ const TasksTable: FC<{
       if (typeof valA === 'number' && typeof valB === 'number') {
         result = valA - valB;
       } else {
-        result = String(valA).localeCompare(String(valB), 'ja');
+        result = String(valA).localeCompare(String(valB), language === 'ja' ? 'ja' : 'en');
       }
       return sortState.direction === 'asc' ? result : -result;
     };
     return [...tasks].sort(compare);
-  }, [tasks, sortState]);
+  }, [tasks, sortState, language]);
 
   const totalPages = Math.max(1, Math.ceil(tasks.length / TABLE_PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
@@ -3084,60 +3158,66 @@ const TasksTable: FC<{
                 checked={allSelected}
                 onChange={(e) => onToggleSelectAll?.(selectableUuids, e.currentTarget.checked)}
                 disabled={selectableUuids.length === 0}
-                aria-label="表示中の散布タスクをまとめて選択"
+                aria-label={t('tasks.table.select_all_visible_spraying_aria')}
               />
             </th>
             <th className="sortable">
               <button type="button" onClick={() => handleSort('type')} className="tasks-table-sort">
-                タスク種別 <span className="sort-indicator">{renderSortIndicator('type')}</span>
+                {t('tasks.table.task_type')}{' '}
+                <span className="sort-indicator">{renderSortIndicator('type')}</span>
               </button>
             </th>
             <th className="sortable">
               <button type="button" onClick={() => handleSort('field')} className="tasks-table-sort">
-                圃場 <span className="sort-indicator">{renderSortIndicator('field')}</span>
+                {t('table.field')} <span className="sort-indicator">{renderSortIndicator('field')}</span>
               </button>
             </th>
             <th className="sortable">
               <button type="button" onClick={() => handleSort('crop')} className="tasks-table-sort">
-                作物 <span className="sort-indicator">{renderSortIndicator('crop')}</span>
+                {t('table.crop')} <span className="sort-indicator">{renderSortIndicator('crop')}</span>
               </button>
             </th>
             <th className="sortable">
               <button type="button" onClick={() => handleSort('plannedDate')} className="tasks-table-sort">
-                計画日 <span className="sort-indicator">{renderSortIndicator('plannedDate')}</span>
+                {t('tasks.table.planned_date')}{' '}
+                <span className="sort-indicator">{renderSortIndicator('plannedDate')}</span>
               </button>
             </th>
             <th className="sortable">
               <button type="button" onClick={() => handleSort('executionDate')} className="tasks-table-sort">
-                実行日 <span className="sort-indicator">{renderSortIndicator('executionDate')}</span>
+                {t('tasks.table.execution_date')}{' '}
+                <span className="sort-indicator">{renderSortIndicator('executionDate')}</span>
               </button>
             </th>
             <th className="sortable">
               <button type="button" onClick={() => handleSort('leadTime')} className="tasks-table-sort">
-                リードタイム <span className="sort-indicator">{renderSortIndicator('leadTime')}</span>
+                {t('tasks.table.lead_time')}{' '}
+                <span className="sort-indicator">{renderSortIndicator('leadTime')}</span>
               </button>
             </th>
             <th className="sortable">
               <button type="button" onClick={() => handleSort('status')} className="tasks-table-sort">
-                ステータス <span className="sort-indicator">{renderSortIndicator('status')}</span>
+                {t('table.status')} <span className="sort-indicator">{renderSortIndicator('status')}</span>
               </button>
             </th>
             <th className="sortable">
               <button type="button" onClick={() => handleSort('assignee')} className="tasks-table-sort">
-                担当者 <span className="sort-indicator">{renderSortIndicator('assignee')}</span>
+                {t('tasks.table.assignee')}{' '}
+                <span className="sort-indicator">{renderSortIndicator('assignee')}</span>
               </button>
             </th>
             <th className="sortable">
               <button type="button" onClick={() => handleSort('recipe')} className="tasks-table-sort">
-                施肥混用 <span className="sort-indicator">{renderSortIndicator('recipe')}</span>
+                {t('tasks.table.recipe')}{' '}
+                <span className="sort-indicator">{renderSortIndicator('recipe')}</span>
               </button>
             </th>
             <th className="sortable">
               <button type="button" onClick={() => handleSort('note')} className="tasks-table-sort">
-                メモ <span className="sort-indicator">{renderSortIndicator('note')}</span>
+                {t('tasks.table.note')} <span className="sort-indicator">{renderSortIndicator('note')}</span>
               </button>
             </th>
-            <th>散布天気</th>
+            <th>{t('tasks.table.spraying_weather')}</th>
           </tr>
         </thead>
         <tbody>
@@ -3156,21 +3236,25 @@ const TasksTable: FC<{
           ))}
         </tbody>
       </table>
-      {tasks.length === 0 && <p style={{ padding: '1rem' }}>表示するタスクがありません。</p>}
+      {tasks.length === 0 && <p style={{ padding: '1rem' }}>{t('tasks.table.empty')}</p>}
       {tasks.length > 0 && (
         <div className="tasks-pagination">
           <div className="tasks-pagination-info">
-            {startIndex + 1}-{Math.min(endIndex, tasks.length)} / {tasks.length} 件
+            {t('tasks.pagination.info', {
+              from: startIndex + 1,
+              to: Math.min(endIndex, tasks.length),
+              total: tasks.length,
+            })}
           </div>
           <div className="tasks-pagination-buttons">
             <button type="button" onClick={() => handlePageChange(currentPage - 1)} disabled={currentPage === 1}>
-              前へ
+              {t('pagination.prev')}
             </button>
             <span className="tasks-pagination-page">
               {currentPage} / {totalPages}
             </span>
             <button type="button" onClick={() => handlePageChange(currentPage + 1)} disabled={currentPage === totalPages}>
-              次へ
+              {t('pagination.next')}
             </button>
           </div>
         </div>
@@ -3186,6 +3270,7 @@ const BulkPlannedDateModal: FC<{
   onClose: () => void;
   onApply: (updates: { task: AggregatedTask; dateInput: string }[]) => Promise<void>;
 }> = ({ tasks, bbchBySeason, isSaving, onClose, onApply }) => {
+  const { t } = useLanguage();
   const [bulkDate, setBulkDate] = useState('');
   const [bulkBbchIndex, setBulkBbchIndex] = useState('');
   const [taskDateMap, setTaskDateMap] = useState<Record<string, string>>({});
@@ -3299,7 +3384,7 @@ const BulkPlannedDateModal: FC<{
       return next;
     });
     if (missing > 0) {
-      setError(`BBCH ${bulkBbchIndex} の開始日がない圃場が ${missing} 件あります。必要に応じて手入力してください。`);
+      setError(t('tasks.bulk.bbch_missing', { index: bulkBbchIndex, missing }));
     } else {
       setError(null);
     }
@@ -3311,14 +3396,14 @@ const BulkPlannedDateModal: FC<{
       .map(task => ({ task, dateInput: taskDateMap[task.uuid] || '' }))
       .filter(entry => entry.dateInput);
     if (updates.length !== tasks.length) {
-      setError('すべてのタスクに計画日を入力してください。');
+      setError(t('tasks.bulk.require_all_dates'));
       return;
     }
     try {
       await onApply(updates);
       onClose();
     } catch (err) {
-      const message = err instanceof Error ? err.message : '更新に失敗しました。';
+      const message = err instanceof Error ? err.message : t('tasks.error.update_failed');
       setError(message);
     }
   };
@@ -3327,15 +3412,15 @@ const BulkPlannedDateModal: FC<{
     <div className="tasks-modal-backdrop" onClick={onClose}>
       <div className="tasks-modal" onClick={(e) => e.stopPropagation()}>
         <div className="tasks-modal-header">
-          <h3>計画日をまとめて変更</h3>
+          <h3>{t('tasks.bulk.title')}</h3>
           <button type="button" onClick={onClose}>
-            閉じる
+            {t('action.close')}
           </button>
         </div>
         <div className="tasks-modal-body">
           <div className="tasks-modal-bulk">
             <div className="tasks-modal-bulk-input">
-              <label>一括設定日</label>
+              <label>{t('tasks.bulk.bulk_date')}</label>
               <input
                 type="date"
                 value={bulkDate}
@@ -3348,16 +3433,16 @@ const BulkPlannedDateModal: FC<{
               onClick={applyBulkDate}
               disabled={!bulkDate || isSaving || tasks.length === 0}
             >
-              全件に反映
+              {t('tasks.bulk.apply_all')}
             </button>
             <div className="tasks-modal-bulk-input">
-              <label>BBCHで一括設定</label>
+              <label>{t('tasks.bulk.bbch_bulk')}</label>
               <select
                 value={bulkBbchIndex}
                 onChange={(e) => setBulkBbchIndex(e.currentTarget.value)}
                 disabled={isSaving || availableBbchIndices.length === 0}
               >
-                <option value="">BBCHを選択</option>
+                <option value="">{t('tasks.bulk.bbch_select')}</option>
                 {availableBbchIndices.map(index => (
                   <option key={index} value={index}>BBCH {index}</option>
                 ))}
@@ -3368,11 +3453,11 @@ const BulkPlannedDateModal: FC<{
               onClick={applyBulkBbch}
               disabled={!bulkBbchIndex || isSaving || tasks.length === 0}
             >
-              BBCHを反映
+              {t('tasks.bulk.apply_bbch')}
             </button>
           </div>
           {tasks.length === 0 ? (
-            <p className="tasks-modal-empty">変更対象の散布タスクが選択されていません。</p>
+            <p className="tasks-modal-empty">{t('tasks.bulk.empty')}</p>
           ) : (
             <div className="tasks-modal-list">
               {tasks.map(task => {
@@ -3388,12 +3473,12 @@ const BulkPlannedDateModal: FC<{
                         {task.fieldName} / {task.cropName} - {getTaskLabel(task)}
                       </div>
                       <div className="tasks-modal-item-meta">
-                        現在: {getLocalDateString(task.plannedDate) || '-'}
+                        {t('tasks.bulk.current', { date: getLocalDateString(task.plannedDate) || '-' })}
                       </div>
                     </div>
                     <div className="tasks-modal-item-body">
                       <div className="tasks-modal-date">
-                        <label>計画日</label>
+                        <label>{t('tasks.table.planned_date')}</label>
                         <input
                           type="date"
                           value={taskDateMap[task.uuid] || ''}
@@ -3414,13 +3499,13 @@ const BulkPlannedDateModal: FC<{
                           disabled={isSaving}
                         />
                         <div className="tasks-modal-selected-bbch">
-                          選択BBCH: {taskBbchMap[task.uuid] || '-'}
+                          {t('tasks.bulk.selected_bbch', { value: taskBbchMap[task.uuid] || '-' })}
                         </div>
                       </div>
                       <div className="tasks-modal-bbch">
-                        <div className="tasks-modal-bbch-title">BBCH 予測</div>
+                        <div className="tasks-modal-bbch-title">{t('tasks.bulk.bbch_predictions_title')}</div>
                         {sortedPredictions.length === 0 ? (
-                          <div className="tasks-modal-bbch-empty">BBCH 予測がありません。</div>
+                          <div className="tasks-modal-bbch-empty">{t('tasks.bulk.bbch_predictions_empty')}</div>
                         ) : (
                           <ul>
                             {sortedPredictions.map(pred => {
@@ -3465,14 +3550,14 @@ const BulkPlannedDateModal: FC<{
         </div>
         <div className="tasks-modal-footer">
           <button type="button" onClick={onClose} disabled={isSaving}>
-            キャンセル
+            {t('action.cancel')}
           </button>
           <button
             type="button"
             onClick={handleSave}
             disabled={isSaving || tasks.length === 0}
           >
-            変更を保存
+            {t('action.save_changes')}
           </button>
         </div>
       </div>

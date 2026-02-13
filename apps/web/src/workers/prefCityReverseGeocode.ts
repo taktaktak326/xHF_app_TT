@@ -63,7 +63,7 @@ let geomList: any[] = [];
 let geomBboxes: Float64Array | null = null; // [minx,miny,maxx,maxy] * n
 let arcBboxes: Float64Array | null = null; // [minx,miny,maxx,maxy] * arcs
 let tileIndex: Map<string, Uint32Array> | null = null;
-let datasetUrl: string | null = null;
+let datasetUrl: string | null = null; // preferred (gzip) URL
 let datasetGz: ArrayBuffer | null = null;
 
 const arcPointCache = new Map<number, Float64Array>();
@@ -302,6 +302,43 @@ function computeGeomBboxesAndTileIndex() {
 async function loadTopologyOnce() {
   if (topology) return;
 
+  const hasDecompressionStream = typeof (globalThis as any).DecompressionStream !== "undefined";
+
+  const applyParsedTopology = (parsed: Topology) => {
+    topology = parsed;
+    const objectName = parsed.objects?.pref_city_minimal ? 'pref_city_minimal' : Object.keys(parsed.objects ?? {})[0];
+    if (!objectName) throw new Error('topology.objects missing');
+    const object = parsed.objects[objectName];
+    if (object?.type !== 'GeometryCollection' || !Array.isArray(object.geometries)) {
+      throw new Error(`unexpected object format: ${objectName}`);
+    }
+    geomList = object.geometries;
+    computeArcBboxes();
+    computeGeomBboxesAndTileIndex();
+    postMessage({ type: 'ready', loaded: true, geoms: geomList.length } satisfies ReadyResponse);
+  };
+
+  const fetchJsonTextFallback = async (): Promise<string> => {
+    const urlGz =
+      datasetUrl ??
+      (() => {
+        try {
+          // eslint-disable-next-line no-undef
+          const origin = (self as any)?.location?.origin;
+          if (origin && origin !== 'null') {
+            return `${origin}/pref_city_p5.topo.json.gz`;
+          }
+        } catch {
+          // ignore
+        }
+        return '/pref_city_p5.topo.json.gz';
+      })();
+    const urlJson = urlGz.endsWith('.gz') ? urlGz.slice(0, -3) : '/pref_city_p5.topo.json';
+    const res = await fetch(urlJson);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  };
+
   // If we were handed bytes directly from the main thread, accept either:
   // - gzip-compressed TopoJSON (.gz)
   // - already-decompressed JSON bytes (some servers may serve .gz with Content-Encoding: gzip)
@@ -311,56 +348,57 @@ async function loadTopologyOnce() {
     if (!isGzip) {
       try {
         const text = new TextDecoder('utf-8').decode(bytes);
-        topology = JSON.parse(text) as Topology;
+        const parsed = JSON.parse(text) as Topology;
+        applyParsedTopology(parsed);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new Error(`loadTopologyOnce: failed to parse provided bytes: ${msg}`);
       }
-      const objectName = topology.objects?.pref_city_minimal ? 'pref_city_minimal' : Object.keys(topology.objects ?? {})[0];
-      if (!objectName) throw new Error('topology.objects missing');
-      const object = topology.objects[objectName];
-      if (object?.type !== 'GeometryCollection' || !Array.isArray(object.geometries)) {
-        throw new Error(`unexpected object format: ${objectName}`);
-      }
-      geomList = object.geometries;
-      computeArcBboxes();
-      computeGeomBboxesAndTileIndex();
-      postMessage({ type: 'ready', loaded: true, geoms: geomList.length } satisfies ReadyResponse);
       return;
     }
 
     // gzip-compressed bytes
     let text: string;
-    try {
-      // eslint-disable-next-line no-undef
-      const stream = new Blob([datasetGz]).stream().pipeThrough(new DecompressionStream('gzip'));
-      text = await new Response(stream).text();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(`loadTopologyOnce: failed to decompress provided gzip: ${msg}`);
+    if (hasDecompressionStream) {
+      try {
+        // eslint-disable-next-line no-undef
+        const stream = new Blob([datasetGz]).stream().pipeThrough(new DecompressionStream('gzip'));
+        text = await new Response(stream).text();
+      } catch (e) {
+        // If gzip decompression fails even though the API exists, fall back to plain JSON fetch.
+        try {
+          text = await fetchJsonTextFallback();
+        } catch (fallbackErr) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const fb = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+          throw new Error(`loadTopologyOnce: failed to decompress provided gzip: ${msg} (json fallback failed: ${fb})`);
+        }
+      }
+    } else {
+      // No DecompressionStream support: fall back to plain JSON fetch.
+      try {
+        text = await fetchJsonTextFallback();
+      } catch (fallbackErr) {
+        const fb = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        throw new Error(`loadTopologyOnce: DecompressionStream('gzip') is not available (json fallback failed: ${fb})`);
+      }
     }
     try {
-      topology = JSON.parse(text) as Topology;
+      const parsed = JSON.parse(text) as Topology;
+      applyParsedTopology(parsed);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(`loadTopologyOnce: failed to parse JSON: ${msg}`);
     }
-    const objectName = topology.objects?.pref_city_minimal ? 'pref_city_minimal' : Object.keys(topology.objects ?? {})[0];
-    if (!objectName) throw new Error('topology.objects missing');
-    const object = topology.objects[objectName];
-    if (object?.type !== 'GeometryCollection' || !Array.isArray(object.geometries)) {
-      throw new Error(`unexpected object format: ${objectName}`);
-    }
-    geomList = object.geometries;
-    computeArcBboxes();
-    computeGeomBboxesAndTileIndex();
-    postMessage({ type: 'ready', loaded: true, geoms: geomList.length } satisfies ReadyResponse);
     return;
   }
 
   let gzStream: ReadableStream;
+  let fetchedUrlGz: string | null = null;
   {
-    const url =
+    const fallbackJsonUrl = (url: string) =>
+      url.endsWith(".gz") ? url.slice(0, -3) : url;
+    const urlGz =
       datasetUrl ??
       (() => {
         try {
@@ -378,14 +416,25 @@ async function loadTopologyOnce() {
 
     let res: Response;
     try {
-      res = await fetch(url);
+      if (!hasDecompressionStream) {
+        const jsonRes = await fetch(fallbackJsonUrl(urlGz));
+        if (!jsonRes.ok) {
+          throw new Error(`HTTP ${jsonRes.status}`);
+        }
+        const text = await jsonRes.text();
+        const parsed = JSON.parse(text) as Topology;
+        applyParsedTopology(parsed);
+        return;
+      }
+      res = await fetch(urlGz);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(`loadTopologyOnce: failed to fetch dataset (${url}): ${msg}`);
+      throw new Error(`loadTopologyOnce: failed to fetch dataset (${urlGz}): ${msg}`);
     }
-    if (!res.ok) throw new Error(`loadTopologyOnce: failed to fetch dataset (${url}): HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`loadTopologyOnce: failed to fetch dataset (${urlGz}): HTTP ${res.status}`);
     if (!res.body) throw new Error('loadTopologyOnce: dataset response has no body');
     gzStream = res.body;
+    fetchedUrlGz = urlGz;
   }
 
   // Browser-native gzip decompression (fetch branch should always be gzip bytes)
@@ -395,8 +444,18 @@ async function loadTopologyOnce() {
     const stream = gzStream.pipeThrough(new DecompressionStream('gzip'));
     text = await new Response(stream).text();
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`loadTopologyOnce: failed to decompress: ${msg}`);
+    // Some environments still fail gzip streaming; fall back to plain JSON dataset.
+    try {
+      const urlJson =
+        fetchedUrlGz && fetchedUrlGz.endsWith(".gz") ? fetchedUrlGz.slice(0, -3) : "/pref_city_p5.topo.json";
+      const jsonRes = await fetch(urlJson);
+      if (!jsonRes.ok) throw new Error(`HTTP ${jsonRes.status}`);
+      text = await jsonRes.text();
+    } catch (fallbackErr) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const fb = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+      throw new Error(`loadTopologyOnce: failed to decompress: ${msg} (json fallback failed: ${fb})`);
+    }
   }
 
   let parsed: Topology;
@@ -406,17 +465,7 @@ async function loadTopologyOnce() {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(`loadTopologyOnce: failed to parse JSON: ${msg}`);
   }
-  topology = parsed;
-  const objectName = parsed.objects?.pref_city_minimal ? 'pref_city_minimal' : Object.keys(parsed.objects ?? {})[0];
-  if (!objectName) throw new Error('topology.objects missing');
-  const object = parsed.objects[objectName];
-  if (object?.type !== 'GeometryCollection' || !Array.isArray(object.geometries)) {
-    throw new Error(`unexpected object format: ${objectName}`);
-  }
-  geomList = object.geometries;
-  computeArcBboxes();
-  computeGeomBboxesAndTileIndex();
-  postMessage({ type: 'ready', loaded: true, geoms: geomList.length } satisfies ReadyResponse);
+  applyParsedTopology(parsed);
 }
 
 function pickLocationFromGeom(geom: any): PrefCityLocation | null {

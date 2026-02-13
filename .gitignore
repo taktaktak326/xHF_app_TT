@@ -77,3 +77,6 @@ apps/api/venv/
 
 # Frontend build output
 apps/web/dist/
+
+# macOS
+.DS_Store

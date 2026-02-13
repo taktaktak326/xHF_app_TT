@@ -36,6 +36,38 @@
   margin: 0.1rem 0;
 }
 
+.combined-toast__progress {
+  position: relative;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 0.4rem;
+}
+
+.combined-toast__progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(100, 108, 255, 0.9), rgba(121, 134, 255, 0.9));
+  width: 0%;
+}
+
+.combined-toast__progress-label {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  color: rgba(224, 231, 255, 0.85);
+}
+
+.combined-toast__details {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+  color: rgba(224, 231, 255, 0.9);
+}
+
+.combined-toast__details li {
+  margin: 0.15rem 0;
+}
+
 @keyframes combined-toast-fade-in {
   from {
     transform: translateY(16px);

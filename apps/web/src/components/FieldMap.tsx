@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { tr } from '../i18n/runtime';
 
 type FieldLocation = { latitude: number; longitude: number };
 type Geometry = { type: 'Polygon' | 'MultiPolygon'; coordinates: any };
@@ -148,7 +149,7 @@ export function FieldMap({ fields, onFieldClick }: { fields: any[]; onFieldClick
           fillColor: '#ff9800',
           fillOpacity: 0.9,
         });
-        marker.bindTooltip(field?.name ?? '圃場', { direction: 'top' });
+        marker.bindTooltip(field?.name ?? tr('field.default_name'), { direction: 'top' });
         marker.addTo(layerGroup);
       }
     });

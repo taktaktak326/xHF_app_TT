@@ -1,6 +1,7 @@
 import { createElement, Fragment } from 'react';
 import type { ReactNode } from 'react';
 import type { CropSeason, CountryCropGrowthStagePrediction } from '../types/farm';
+import { getCurrentLanguage, tr } from '../i18n/runtime';
 import { getLocalDateString, formatInclusiveEndDate, groupConsecutiveItems } from './formatters';
 
 const STATUS_PRIORITY = ['HIGH', 'MEDIUM_HIGH', 'MEDIUM', 'MEDIUM_LOW', 'LOW', 'PROTECTED'];
@@ -26,9 +27,9 @@ export const formatCropEstablishmentStage = (season: CropSeason | null): string 
 export const formatCropEstablishmentMethod = (season: CropSeason | null): string => {
   const method = season?.cropEstablishmentMethodCode;
   if (!method) return 'N/A';
-  if (method === 'TRANSPLANTING') return '移植';
-  if (method === 'DIRECT_SEEDING') return '直播';
-  if (method === 'MYKOS_DRY_DIRECT_SEEDING') return '節水型乾田直播';
+  if (method === 'TRANSPLANTING') return tr('fmt.crop_method.transplanting');
+  if (method === 'DIRECT_SEEDING') return tr('fmt.crop_method.direct_seeding');
+  if (method === 'MYKOS_DRY_DIRECT_SEEDING') return tr('fmt.crop_method.mykos_dry_direct_seeding');
   return method;
 };
 
@@ -54,10 +55,10 @@ export const formatCropEstablishmentInfo = (season: CropSeason | null): string =
 
   const parts: string[] = [];
   if (stageText !== 'N/A') {
-    parts.push(`生育ステージ: ${stageText}`);
+    parts.push(`${tr('fmt.crop_stage')}: ${stageText}`);
   }
   if (methodText !== 'N/A') {
-    parts.push(`作付方法: ${methodText}`);
+    parts.push(`${tr('fmt.crop_method')}: ${methodText}`);
   }
   return parts.join(', ');
 };
@@ -68,12 +69,14 @@ export const formatCropEstablishmentInfo = (season: CropSeason | null): string =
 export const formatNextStageInfo = (nextStage: CountryCropGrowthStagePrediction | null): string => {
   if (!nextStage) return 'N/A';
   const stagePrefix = `BBCH${nextStage.gsOrder}`;
-  return `${stagePrefix} : ${nextStage.cropGrowthStageV2?.name ?? 'Unknown Stage'} (${getLocalDateString(nextStage.startDate)}〜)`;
+  const lang = getCurrentLanguage();
+  const dateSuffix = lang === 'ja' ? '〜' : '';
+  return `${stagePrefix} : ${nextStage.cropGrowthStageV2?.name ?? 'Unknown Stage'} (${getLocalDateString(nextStage.startDate)}${dateSuffix})`;
 };
 
 const translateStatusType = (type: string): string => {
-  if (type === 'DISEASE') return '病害';
-  if (type === 'INSECT') return '害虫';
+  if (type === 'DISEASE') return tr('fmt.status_type.disease');
+  if (type === 'INSECT') return tr('fmt.status_type.insect');
   return type;
 };
 
@@ -166,9 +169,14 @@ export const formatCurrentWaterRecommendations = (recommendations: CropSeason['w
         ? `(${getLocalDateString(rec.startDate)} - ${formatInclusiveEndDate(rec.endDate)})`
         : '';
     const text = `${description}${dateRange ? ` ${dateRange}` : ''}`;
-    const sentences = text.split('。').filter(s => s);
+    const lang = getCurrentLanguage();
+    const sentences = (lang === 'ja' ? text.split('。') : text.split('.')).filter(s => s);
     const sentenceElements = sentences.map((sentence, sentenceIndex) =>
-      createElement('div', { key: sentenceIndex }, `${sentence.trim()}${sentenceIndex < sentences.length - 1 ? '。' : ''}`)
+      createElement(
+        'div',
+        { key: sentenceIndex },
+        `${sentence.trim()}${sentenceIndex < sentences.length - 1 ? (lang === 'ja' ? '。' : '.') : ''}`
+      )
     );
     return createElement(Fragment, { key: recIndex }, sentenceElements);
   });
@@ -188,7 +196,7 @@ export const formatRecommendations = (recommendations: CropSeason['nutritionReco
     'actionType',
   )
     .map(rec => {
-      const label = rec.description || rec.actionType || '推奨';
+      const label = rec.description || rec.actionType || tr('fmt.recommendation');
       const dateRange =
         rec.startDate && rec.endDate
           ? `${getLocalDateString(rec.startDate)} - ${formatInclusiveEndDate(rec.endDate)}`

@@ -3,9 +3,12 @@ import './FarmsPage.css';
 import './SatelliteMapPage.css';
 import { useData } from '../context/DataContext';
 import { useAuth } from '../context/AuthContext';
+import { useLanguage } from '../context/LanguageContext';
 import LoadingOverlay from '../components/LoadingOverlay';
 import { formatCombinedLoadingMessage } from '../utils/loadingMessage';
 import { withApiBase } from '../utils/apiBase';
+import { postJsonCached } from '../utils/cachedJsonFetch';
+import { getCurrentLanguage, tr } from '../i18n/runtime';
 
 const TYPE_OPTIONS = [
   'BIOMASS_SINGLE_IMAGE_LAI',
@@ -16,26 +19,24 @@ const TYPE_OPTIONS = [
   'BIOMASS_MULTI_IMAGE_LAI',
 ];
 
-const TYPE_LABEL_MAP: Record<string, string> = {
-  BIOMASS_SINGLE_IMAGE_LAI: '生育マップ',
-  BIOMASS_NDVI: 'NDVIマップ',
-  TRUE_COLOR_ANALYSIS: '圃場の実画像',
-  BIOMASS_PROXY_MONITORING_VECTOR_ANALYSIS: 'クラウドフリーマップ',
-  WEED_CLASSIFICATION_NDVI: '雑草マップ',
-  BIOMASS_MULTI_IMAGE_LAI: '地力マップ',
+const labelForType = (type?: string) => {
+  if (!type) return tr('satellite.type.unnamed');
+  if (type === 'BIOMASS_SINGLE_IMAGE_LAI') return tr('satellite.type.biomass_single_image_lai');
+  if (type === 'BIOMASS_NDVI') return tr('satellite.type.biomass_ndvi');
+  if (type === 'TRUE_COLOR_ANALYSIS') return tr('satellite.type.true_color');
+  if (type === 'BIOMASS_PROXY_MONITORING_VECTOR_ANALYSIS') return tr('satellite.type.cloud_free');
+  if (type === 'WEED_CLASSIFICATION_NDVI') return tr('satellite.type.weed_ndvi');
+  if (type === 'BIOMASS_MULTI_IMAGE_LAI') return tr('satellite.type.biomass_multi_image_lai');
+  return type;
 };
-
-const labelForType = (type?: string) => TYPE_LABEL_MAP[type ?? ''] ?? type ?? '名称未設定';
 const labelForMagnitudeType = (type?: string) => {
   if (!type) return '';
-  const map: Record<string, string> = {
-    LAI: 'LAI（絶対表示）',
-    LAI_CONTRAST: 'LAI（相対表示）',
-    NDVI: 'NDVI（絶対表示）',
-    NDVI_CONTRAST: 'NDVI（相対表示）',
-    AVERAGE_NDVI: 'NDVI（平均植生）',
-  };
-  return map[type] ?? type;
+  if (type === 'LAI') return tr('satellite.mag.lai_abs');
+  if (type === 'LAI_CONTRAST') return tr('satellite.mag.lai_rel');
+  if (type === 'NDVI') return tr('satellite.mag.ndvi_abs');
+  if (type === 'NDVI_CONTRAST') return tr('satellite.mag.ndvi_rel');
+  if (type === 'AVERAGE_NDVI') return tr('satellite.mag.ndvi_avg');
+  return type;
 };
 const shouldShowMagnitudeLabel = (layerType?: string) =>
   layerType === 'BIOMASS_SINGLE_IMAGE_LAI' || layerType === 'BIOMASS_NDVI';
@@ -53,7 +54,9 @@ const formatDateJst = (value?: string) => {
   if (!value) return '-';
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return '-';
-  return d.toLocaleDateString('ja-JP', {
+  const lang = getCurrentLanguage();
+  const locale = lang === 'en' ? 'en-US' : 'ja-JP';
+  return d.toLocaleDateString(locale, {
     timeZone: 'Asia/Tokyo',
     year: 'numeric',
     month: '2-digit',
@@ -70,8 +73,9 @@ export function SatelliteMapPage() {
     combinedRetryCountdown,
   } = useData();
   const { auth } = useAuth();
+  const { language, t } = useLanguage();
   const fields = useMemo(() => combinedOut?.response?.data?.fieldsV2 ?? [], [combinedOut]);
-  const collator = useMemo(() => new Intl.Collator('ja'), []);
+  const collator = useMemo(() => new Intl.Collator(language === 'en' ? 'en' : 'ja'), [language]);
   const [selectedField, setSelectedField] = useState<any | null>(null);
   const [layers, setLayers] = useState<any[] | null>(null);
   const [layerSource, setLayerSource] = useState<'api' | 'cache' | null>(null);
@@ -197,7 +201,7 @@ export function SatelliteMapPage() {
     const compare = (a: any, b: any) => {
       switch (latestSort.key) {
         case 'field':
-          return a.fieldName.localeCompare(b.fieldName, 'ja');
+          return a.fieldName.localeCompare(b.fieldName, language === 'en' ? 'en' : 'ja');
         case 'groundCount':
           return (a.groundCount ?? 0) - (b.groundCount ?? 0);
         case 'growthCount':
@@ -219,10 +223,10 @@ export function SatelliteMapPage() {
     arr.sort(compare);
     if (latestSort.direction === 'desc') arr.reverse();
     return arr;
-  }, [latestByField, latestSort]);
+  }, [latestByField, latestSort, language]);
 
   const loadingMessage = formatCombinedLoadingMessage(
-    '衛星マップ用データ',
+    t('satellite.loading_label'),
     combinedFetchAttempt,
     combinedFetchMaxAttempts,
     combinedRetryCountdown,
@@ -232,11 +236,11 @@ export function SatelliteMapPage() {
 
   const fetchLayers = useCallback(async (field: any, type: string = selectedType) => {
     if (!auth) {
-      setLayerError('ログイン情報がありません');
+      setLayerError(t('satellite.error.no_auth'));
       return;
     }
     if (!field?.uuid) {
-      setLayerError('圃場を選択してください');
+      setLayerError(t('satellite.error.no_field'));
       return;
     }
     setLayerLoading(true);
@@ -244,29 +248,30 @@ export function SatelliteMapPage() {
     setLayers(null);
     setLayerSource(null);
     try {
-      const res = await fetch(withApiBase('/field-data-layers'), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const types = type === 'all' ? undefined : [type];
+      const { ok, status, json: data } = await postJsonCached<any>(
+        withApiBase('/field-data-layers'),
+        {
           login_token: auth.login.login_token,
           api_token: auth.api_token,
           field_uuid: field?.uuid,
-          types: type === 'all' ? undefined : [type],
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || data?.ok === false) {
-        const detail = data?.detail || data?.response_text || `status ${data?.status ?? res.status}`;
-        throw new Error(`衛星レイヤ取得に失敗しました: ${detail}`);
+          types,
+        },
+        undefined,
+        { cacheKey: `field-data-layers:${field?.uuid ?? 'none'}:${type}`, cache: 'session' },
+      );
+      if (!ok || data?.ok === false) {
+        const detail = data?.detail || data?.response_text || `status ${data?.status ?? status}`;
+        throw new Error(t('satellite.error.fetch_layers_failed_detail', { detail }));
       }
       setLayers(data?.response?.data?.fieldV2?.fieldDataLayers ?? []);
       setLayerSource(data?.source ?? null);
     } catch (e: any) {
-      setLayerError(e?.message || '衛星レイヤの取得に失敗しました');
+      setLayerError(e?.message || t('satellite.error.fetch_layers_failed'));
     } finally {
       setLayerLoading(false);
     }
-  }, [auth]);
+  }, [auth, selectedType, t]);
 
   const onFieldChange = useCallback((uuid: string) => {
     setSelectedFieldUuid(uuid);
@@ -347,32 +352,32 @@ export function SatelliteMapPage() {
 
   const fetchLatestAllFields = useCallback(async () => {
     if (!auth) {
-      setLatestError('ログイン情報がありません');
+      setLatestError(t('satellite.error.no_auth'));
       return;
     }
     if (!fields.length) {
-      setLatestError('圃場がありません。先に農場を取得してください。');
+      setLatestError(t('satellite.error.no_fields_yet'));
       return;
     }
     setLatestLoading(true);
     setLatestError(null);
-    setLatestSummaries([]);
-    setLatestOnly(true);
+      setLatestSummaries([]);
+      setLatestOnly(true);
     try {
       const entries: Array<{ fieldName: string; fieldUuid: string; type: string; count: number; latestDate: string; source?: string }> = [];
       for (const field of fields) {
-        const res = await fetch(withApiBase('/field-data-layers'), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+        const { ok, json: data } = await postJsonCached<any>(
+          withApiBase('/field-data-layers'),
+          {
             login_token: auth.login.login_token,
             api_token: auth.api_token,
             field_uuid: field?.uuid,
             types: TYPE_OPTIONS,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok || data?.ok === false) {
+          },
+          undefined,
+          { cacheKey: `field-data-layers:${field?.uuid ?? 'none'}:TYPE_OPTIONS`, cache: 'session' },
+        );
+        if (!ok || data?.ok === false) {
           continue;
         }
         const layersRes = data?.response?.data?.fieldV2?.fieldDataLayers ?? [];
@@ -408,11 +413,11 @@ export function SatelliteMapPage() {
       }
       setLatestSummaries(entries);
     } catch (e: any) {
-      setLatestError(e?.message || '最新マップ取得に失敗しました');
+      setLatestError(e?.message || t('satellite.error.fetch_latest_failed'));
     } finally {
       setLatestLoading(false);
     }
-  }, [auth, fields]);
+  }, [auth, fields, t]);
 
   return (
     <div className="farms-page-container satellite-page">
@@ -420,9 +425,9 @@ export function SatelliteMapPage() {
       <div className="satellite-map-panel">
         <div className="satellite-map-panel__header">
           <div>
-            <h3 style={{ margin: 0 }}>圃場とレイヤの選択</h3>
+            <h3 style={{ margin: 0 }}>{t('satellite.panel.select_title')}</h3>
             <p style={{ margin: '4px 0 0', color: '#aab2c8' }}>
-              圃場を選択し、表示したいタイプを選ぶと該当する画像のみ取得します。
+              {t('satellite.panel.select_desc')}
             </p>
           </div>
           <div className="satellite-selector-row">
@@ -431,31 +436,31 @@ export function SatelliteMapPage() {
               onClick={fetchLatestAllFields}
               disabled={latestLoading}
             >
-              {latestLoading ? '取得中...' : '全マップの生成状況を確認'}
+              {latestLoading ? t('satellite.button.loading') : t('satellite.button.check_all')}
             </button>
             {latestLoading && (
               <div className="satellite-progress" aria-live="polite">
                 <div className="satellite-progress__bar" />
-                <span className="satellite-progress__text">全マップ情報を集計中です。少し時間がかかります。</span>
+                <span className="satellite-progress__text">{t('satellite.progress.checking_all')}</span>
               </div>
             )}
           </div>
         </div>
         <div className="satellite-selector-row">
           <label className="satellite-selector">
-            圃場:
+            {t('satellite.label.field')}
             <select
               value={selectedFieldUuid ?? ''}
               onChange={(e) => onFieldChange(e.target.value)}
             >
-              <option value="">選択してください</option>
+              <option value="">{t('satellite.option.select')}</option>
               {filtered.map((f: any) => (
                 <option key={f?.uuid} value={f?.uuid}>{f?.name ?? '(no name)'}</option>
               ))}
             </select>
           </label>
           <label className="satellite-selector">
-            タイプ:
+            {t('satellite.label.type')}
             <select
               value={selectedType}
               onChange={(e) => {
@@ -465,22 +470,22 @@ export function SatelliteMapPage() {
                 if (next !== 'BIOMASS_NDVI') setNdviVariant('NDVI');
               }}
             >
-              <option value="all">すべて</option>
+              <option value="all">{t('satellite.option.all')}</option>
               {layerTypeOptions.map((t) => (
                 <option key={t} value={t}>{labelForType(t)}</option>
               ))}
             </select>
           </label>
           <label className="satellite-selector">
-            画像表示件数:
+            {t('satellite.label.preview_limit')}
             <select
               value={previewLimit}
               onChange={(e) => setPreviewLimit(e.target.value === 'all' ? 'all' : Number(e.target.value))}
             >
-              <option value={8}>8枚</option>
-              <option value={12}>12枚</option>
-              <option value={24}>24枚</option>
-              <option value="all">すべて</option>
+              <option value={8}>{t('satellite.option.images_n', { count: 8 })}</option>
+              <option value={12}>{t('satellite.option.images_n', { count: 12 })}</option>
+              <option value={24}>{t('satellite.option.images_n', { count: 24 })}</option>
+              <option value="all">{t('satellite.option.all_images')}</option>
             </select>
           </label>
           {selectedType === 'BIOMASS_SINGLE_IMAGE_LAI' && (
@@ -493,7 +498,7 @@ export function SatelliteMapPage() {
                   checked={laiVariant === 'LAI'}
                   onChange={() => setLaiVariant('LAI')}
                 />
-                生育マップ（絶対表示）
+                {t('satellite.type.biomass_single_image_lai')} ({t('satellite.mag.lai_abs')})
               </label>
               <label className="satellite-selector-inline">
                 <input
@@ -503,7 +508,7 @@ export function SatelliteMapPage() {
                   checked={laiVariant === 'LAI_CONTRAST'}
                   onChange={() => setLaiVariant('LAI_CONTRAST')}
                 />
-                生育マップ（相対表示）
+                {t('satellite.type.biomass_single_image_lai')} ({t('satellite.mag.lai_rel')})
               </label>
             </div>
           )}
@@ -517,7 +522,7 @@ export function SatelliteMapPage() {
                   checked={ndviVariant === 'NDVI'}
                   onChange={() => setNdviVariant('NDVI')}
                 />
-                NDVIマップ（絶対表示）
+                {t('satellite.type.biomass_ndvi')} ({t('satellite.mag.ndvi_abs')})
               </label>
               <label className="satellite-selector-inline">
                 <input
@@ -527,7 +532,7 @@ export function SatelliteMapPage() {
                   checked={ndviVariant === 'NDVI_CONTRAST'}
                   onChange={() => setNdviVariant('NDVI_CONTRAST')}
                 />
-                NDVIマップ（相対表示）
+                {t('satellite.type.biomass_ndvi')} ({t('satellite.mag.ndvi_rel')})
               </label>
               <label className="satellite-selector-inline">
                 <input
@@ -537,7 +542,7 @@ export function SatelliteMapPage() {
                   checked={ndviVariant === 'AVERAGE_NDVI'}
                   onChange={() => setNdviVariant('AVERAGE_NDVI')}
                 />
-                NDVIマップ（平均植生）
+                {t('satellite.type.biomass_ndvi')} ({t('satellite.mag.ndvi_avg')})
               </label>
             </div>
           )}
@@ -546,7 +551,7 @@ export function SatelliteMapPage() {
             onClick={() => {
               const field = selectedField ?? fields.find((f: any) => f?.uuid === selectedFieldUuid);
               if (!field) {
-                setLayerError('圃場を選択してください');
+                setLayerError(t('satellite.error.no_field'));
                 return;
               }
               setLayerError(null);
@@ -556,24 +561,24 @@ export function SatelliteMapPage() {
             disabled={layerLoading}
             style={{ marginLeft: 'auto' }}
           >
-            {layerLoading ? '取得中...' : '衛星レイヤを取得'}
+            {layerLoading ? t('satellite.button.loading') : t('satellite.button.fetch_layers')}
           </button>
         </div>
-        {noData && <p className="satellite-empty map-empty">農場を選択してデータを取得してください。</p>}
+        {noData && <p className="satellite-empty map-empty">{t('satellite.empty.no_data')}</p>}
       </div>
 
       <div className="satellite-summary-panel">
-        {latestLoading && <p className="satellite-meta">最新マップ取得中...</p>}
+        {latestLoading && <p className="satellite-meta">{t('satellite.summary.loading_latest')}</p>}
         {latestError && <p className="satellite-error">{latestError}</p>}
         {latestSummaries.length > 0 && (
           <div className="satellite-layers">
             <div className="satellite-layer-filter">
-              <span>フィールド数: {new Set(latestSummaries.map(s => s.fieldUuid)).size} / レイヤ合計: {latestSummaries.length}</span>
+              <span>{t('satellite.summary.fields_layers', { fields: new Set(latestSummaries.map(s => s.fieldUuid)).size, layers: latestSummaries.length })}</span>
               <button
                 className="map-button map-button--tiny"
                 onClick={() => setLatestCollapsed((c) => !c)}
               >
-                {latestCollapsed ? '展開' : '折りたたむ'}
+                {latestCollapsed ? t('satellite.button.expand') : t('satellite.button.collapse')}
               </button>
             </div>
             {!latestCollapsed && (
@@ -581,19 +586,19 @@ export function SatelliteMapPage() {
                 <thead>
                   <tr>
                     <th onClick={() => setLatestSort(prev => ({ key: 'field', direction: prev.key === 'field' && prev.direction === 'asc' ? 'desc' : 'asc' }))}>
-                      圃場
+                      {t('table.field')}
                     </th>
                     <th onClick={() => setLatestSort(prev => ({ key: 'groundCount', direction: prev.key === 'groundCount' && prev.direction === 'asc' ? 'desc' : 'asc' }))}>
-                      地力マップ
+                      {t('satellite.table.ground_map')}
                     </th>
                     <th onClick={() => setLatestSort(prev => ({ key: 'groundDate', direction: prev.key === 'groundDate' && prev.direction === 'asc' ? 'desc' : 'asc' }))}>
-                      最新日
+                      {t('satellite.table.latest_date')}
                     </th>
                     <th onClick={() => setLatestSort(prev => ({ key: 'growthCount', direction: prev.key === 'growthCount' && prev.direction === 'asc' ? 'desc' : 'asc' }))}>
-                      生育マップ
+                      {t('satellite.table.growth_map')}
                     </th>
                     <th onClick={() => setLatestSort(prev => ({ key: 'growthDate', direction: prev.key === 'growthDate' && prev.direction === 'asc' ? 'desc' : 'asc' }))}>
-                      最新日
+                      {t('satellite.table.latest_date')}
                     </th>
                   </tr>
                 </thead>
@@ -604,15 +609,15 @@ export function SatelliteMapPage() {
                     return (
                       <tr key={`${item.fieldName}-${idx}`}>
                         <td>{item.fieldName}</td>
-                        <td className={item.groundCount === 0 ? 'latest-zero' : ''}>{item.groundCount}件</td>
+                        <td className={item.groundCount === 0 ? 'latest-zero' : ''}>{t('satellite.table.count_suffix', { count: item.groundCount })}</td>
                         <td className={item.groundCount === 0 ? 'latest-zero' : ''}>
-                          {item.groundDate === '-' ? '未取得' : formatDateJst(item.groundDate)}
-                          {groundDays !== null ? `（${groundDays}日）` : ''}
+                          {item.groundDate === '-' ? t('satellite.table.not_fetched') : formatDateJst(item.groundDate)}
+                          {groundDays !== null ? t('satellite.table.days_ago', { days: groundDays }) : ''}
                         </td>
-                        <td className={item.growthCount === 0 ? 'latest-zero' : ''}>{item.growthCount}件</td>
+                        <td className={item.growthCount === 0 ? 'latest-zero' : ''}>{t('satellite.table.count_suffix', { count: item.growthCount })}</td>
                         <td className={item.growthCount === 0 ? 'latest-zero' : ''}>
-                          {item.growthDate === '-' ? '未取得' : formatDateJst(item.growthDate)}
-                          {growthDays !== null ? `（${growthDays}日）` : ''}
+                          {item.growthDate === '-' ? t('satellite.table.not_fetched') : formatDateJst(item.growthDate)}
+                          {growthDays !== null ? t('satellite.table.days_ago', { days: growthDays }) : ''}
                         </td>
                       </tr>
                     );
@@ -627,14 +632,14 @@ export function SatelliteMapPage() {
       <div className="satellite-detail-panel">
         <div className="satellite-detail-header">
           <div>
-            <h3 style={{ margin: 0 }}>衛星レイヤ</h3>
+            <h3 style={{ margin: 0 }}>{t('satellite.detail.title')}</h3>
             <p style={{ margin: '4px 0 0', color: '#aab2c8' }}>
-              地図上の圃場をクリックすると、その圃場の衛星レイヤ一覧がここに表示されます。
+              {t('satellite.detail.hint')}
             </p>
           </div>
           {selectedField && (
             <div className="satellite-detail-meta">
-              <span className="satellite-chip">{selectedField?.name ?? '圃場'}</span>
+              <span className="satellite-chip">{selectedField?.name ?? t('field.default_name')}</span>
               {layerSource && (
                 <span className="satellite-chip satellite-chip--source">
                   {layerSource === 'cache' ? 'Cache' : 'API'}
@@ -645,26 +650,26 @@ export function SatelliteMapPage() {
                 onClick={() => fetchLayers(selectedField)}
                 disabled={layerLoading}
               >
-                {layerLoading ? '再取得中...' : '再取得'}
+                {layerLoading ? t('satellite.button.refreshing') : t('satellite.button.refresh')}
               </button>
             </div>
           )}
         </div>
-        {layerLoading && <p className="satellite-meta">衛星レイヤ取得中...</p>}
+        {layerLoading && <p className="satellite-meta">{t('satellite.loading.layers')}</p>}
         {layerError && <p className="satellite-error">{layerError}</p>}
         {!layerLoading && !layerError && !selectedField && (
-          <p className="satellite-empty">圃場をクリックして衛星レイヤを表示してください。</p>
+          <p className="satellite-empty">{t('satellite.empty.select_field')}</p>
         )}
         {!latestOnly && !layerLoading && layers && layers.length === 0 && selectedField && (
-          <p className="satellite-empty">レイヤがありません。</p>
+          <p className="satellite-empty">{t('satellite.empty.no_layers')}</p>
         )}
         {!latestOnly && !layerLoading && layers && layers.length > 0 && (
           <div className="satellite-layers">
             <div className="satellite-layer-filter">
-              <span>表示画像: {displayMagnitudes.length} 枚 / レイヤ {limitedLayers.length} 件</span>
+              <span>{t('satellite.summary.images_layers', { images: displayMagnitudes.length, layers: limitedLayers.length })}</span>
             </div>
             {displayMagnitudes.length === 0 && (
-              <p className="satellite-empty">表示できる画像がありません。</p>
+              <p className="satellite-empty">{t('satellite.empty.no_images')}</p>
             )}
             {displayMagnitudes.length > 0 && (
               <div className="satellite-magnitudes-grid">
@@ -682,7 +687,7 @@ export function SatelliteMapPage() {
                               onClick={() => openImage(mag.imageUrl)}
                             />
                           ) : (
-                            <div className="satellite-image-placeholder">読み込み中...</div>
+                            <div className="satellite-image-placeholder">{t('satellite.image.loading')}</div>
                           )}
                         </div>
                       </div>
@@ -698,12 +703,12 @@ export function SatelliteMapPage() {
                     </div>
                     {mag.vectorTilesUrl && (
                       <a className="map-button map-button--tiny" href={mag.vectorTilesUrl} target="_blank" rel="noreferrer">
-                        タイル
+                        {t('satellite.link.tiles')}
                       </a>
                     )}
                     {mag.vectorTilesStyleUrl && (
                       <a className="map-button map-button--tiny" href={mag.vectorTilesStyleUrl} target="_blank" rel="noreferrer">
-                        スタイル
+                        {t('satellite.link.style')}
                       </a>
                     )}
                   </div>

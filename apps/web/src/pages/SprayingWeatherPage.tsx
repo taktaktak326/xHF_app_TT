@@ -10,7 +10,7 @@ import './FarmsPage.css'; // Reuse common styles
 import './SprayingWeatherPage.css';
 import { withApiBase } from '../utils/apiBase';
 import LoadingOverlay from '../components/LoadingOverlay';
-import { getSessionCache, setSessionCache } from '../utils/sessionCache';
+import { postJsonCached } from '../utils/cachedJsonFetch';
 
 // =============================================================================
 // Type Definitions
@@ -310,24 +310,24 @@ type PlannedTaskBadge = {
 
 async function fetchWeatherByFieldApi(params: { auth: LoginAndTokenResp; fieldUuid: string }): Promise<any> {
   const cacheKey = `weather-by-field:${params.fieldUuid}:default`;
-  const cached = getSessionCache<any>(cacheKey);
-  if (cached) return { ...cached, source: 'cache' };
   const requestBody = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
     field_uuid: params.fieldUuid,
   };
-
-  const res = await fetch(withApiBase('/weather-by-field'), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  });
-  const out = await res.json();
-  if (out?.ok) {
-    setSessionCache(cacheKey, { ...out, source: 'api' });
+  const { json: out, status, source } = await postJsonCached<any>(
+    withApiBase('/weather-by-field'),
+    requestBody,
+    undefined,
+    { cacheKey, cache: 'session' },
+  );
+  if (!out) {
+    return { ok: true, status, response: { data: { fieldV2: {} } }, source };
   }
-  return { ...out, source: 'api' };
+  if (typeof out === 'string') {
+    return { ok: false, status, detail: out, source };
+  }
+  return { ...out, source };
 }
 
 async function fetchWeatherByFieldApiWithRange(params: {
@@ -337,8 +337,6 @@ async function fetchWeatherByFieldApiWithRange(params: {
   tillDate?: string;
 }): Promise<any> {
   const cacheKey = `weather-by-field:${params.fieldUuid}:${params.fromDate ?? 'default'}:${params.tillDate ?? 'default'}`;
-  const cached = getSessionCache<any>(cacheKey);
-  if (cached) return { ...cached, source: 'cache' };
   const requestBody: Record<string, string> = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
@@ -346,17 +344,19 @@ async function fetchWeatherByFieldApiWithRange(params: {
   };
   if (params.fromDate) requestBody.from_date = params.fromDate;
   if (params.tillDate) requestBody.till_date = params.tillDate;
-
-  const res = await fetch(withApiBase('/weather-by-field'), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  });
-  const out = await res.json();
-  if (out?.ok) {
-    setSessionCache(cacheKey, { ...out, source: 'api' });
+  const { json: out, status, source } = await postJsonCached<any>(
+    withApiBase('/weather-by-field'),
+    requestBody,
+    undefined,
+    { cacheKey, cache: 'session' },
+  );
+  if (!out) {
+    return { ok: true, status, response: { data: { fieldV2: {} } }, source };
   }
-  return { ...out, source: 'api' };
+  if (typeof out === 'string') {
+    return { ok: false, status, detail: out, source };
+  }
+  return { ...out, source };
 }
 
 export function SprayingWeatherPage() {

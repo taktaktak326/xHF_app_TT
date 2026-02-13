@@ -8,9 +8,11 @@ import './FarmsPage.css'; // FarmsPageのスタイルを再利用
 import './FieldMemoPage.css';
 import { withApiBase } from '../utils/apiBase';
 import { createDownloadUrl } from '../utils/apiUtils';
-import { getSessionCache, setSessionCache } from '../utils/sessionCache';
+import { postJsonCached } from '../utils/cachedJsonFetch';
 import LoadingOverlay from '../components/LoadingOverlay';
 import LoadingSpinner from '../components/LoadingSpinner';
+import { useLanguage } from '../context/LanguageContext';
+import { getCurrentLanguage, tr } from '../i18n/runtime';
 
 // =============================================================================
 // Type Definitions
@@ -33,26 +35,28 @@ const getFieldNotesCacheKey = (farmUuids: string[]) =>
 
 async function fetchFieldNotesApi(params: { auth: LoginAndTokenResp; farmUuids: string[] }): Promise<any> {
   const cacheKey = getFieldNotesCacheKey(params.farmUuids);
-  if (params.farmUuids.length > 0) {
-    const cached = getSessionCache<any>(cacheKey);
-    if (cached) return { ...cached, source: 'cache' };
-  }
   const requestBody = {
     login_token: params.auth.login.login_token,
     api_token: params.auth.api_token,
     farm_uuids: params.farmUuids,
   };
-
-  const res = await fetch(withApiBase('/field-notes'), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  });
-  const out = await res.json();
-  if (res.ok && params.farmUuids.length > 0) {
-    setSessionCache(cacheKey, { ...out, source: 'api' });
+  const { ok, status, json: out, source } = await postJsonCached<any>(
+    withApiBase('/field-notes'),
+    requestBody,
+    undefined,
+    { cacheKey, cache: params.farmUuids.length > 0 ? 'session' : 'none' },
+  );
+  if (!ok) {
+    const detail = typeof out === 'string' ? out : out?.detail ?? out?.message ?? out?.error ?? `HTTP ${status}`;
+    return { ok: false, status, detail, source };
   }
-  return { ...out, source: 'api' };
+  if (!out) {
+    return { ok: false, status, detail: 'Empty response from server', source };
+  }
+  if (typeof out === 'string') {
+    return { ok: false, status, detail: out, source };
+  }
+  return { ...out, source };
 }
 
 // =============================================================================
@@ -115,15 +119,17 @@ const getDisplayName = (att: { fileName?: string | null; url: string }) => {
   try {
     const parsed = new URL(att.url);
     const last = parsed.pathname.split("/").filter(Boolean).pop();
-    return last ? decodeURIComponent(last) : "添付ファイル";
+    return last ? decodeURIComponent(last) : tr('field_memo.attachment.default');
   } catch {
-    return "添付ファイル";
+    return tr('field_memo.attachment.default');
   }
 };
 
 const toJstDateParts = (dateString: string) => {
   const d = new Date(dateString);
-  const fmt = new Intl.DateTimeFormat('ja-JP', {
+  const lang = getCurrentLanguage();
+  const locale = lang === 'en' ? 'en-US' : 'ja-JP';
+  const fmt = new Intl.DateTimeFormat(locale, {
     timeZone: 'Asia/Tokyo',
     year: 'numeric',
     month: '2-digit',
@@ -241,6 +247,7 @@ const filterNotes = (notes: AggregatedNote[], filters: FiltersState) => {
 export function FieldMemoPage() {
   const { auth } = useAuth();
   const { submittedFarms } = useFarms();
+  const { t } = useLanguage();
   const [notesOut, setNotesOut] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -276,16 +283,16 @@ export function FieldMemoPage() {
     const fetchFarms = async () => {
       if (!auth || submittedFarms.length === 0) return;
       try {
-        const res = await fetch(withApiBase('/farms'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const { json } = await postJsonCached<any>(
+          withApiBase('/farms'),
+          {
             login_token: auth.login.login_token,
             api_token: auth.api_token,
             includeTokens: false,
-          }),
-        });
-        const json = await res.json();
+          },
+          undefined,
+          { cacheKey: `farms:list:${auth?.login?.gigya_uuid ?? 'unknown'}`, cache: 'session' },
+        );
         const farms = json?.response?.data?.farms;
         if (Array.isArray(farms)) {
           const map: Record<string, string> = {};
@@ -356,7 +363,7 @@ export function FieldMemoPage() {
       const contentLength = Number(res.headers.get('content-length') || 0);
       const reader = res.body?.getReader();
       if (!reader) {
-        throw new Error('レスポンスを読み取れませんでした');
+        throw new Error(t('field_memo.error.read_response'));
       }
       setZipStep('downloading');
       const chunks: Uint8Array[] = [];
@@ -382,7 +389,7 @@ export function FieldMemoPage() {
       link.remove();
       URL.revokeObjectURL(url);
     } catch (e: any) {
-      setZipError(e?.message || '添付ダウンロードに失敗しました');
+      setZipError(e?.message || t('field_memo.error.download_failed'));
     } finally {
       setZipLoading(false);
       setZipProgress(null);
@@ -408,9 +415,9 @@ export function FieldMemoPage() {
 
   return (
     <div className="farms-page-container">
-      {loading && <LoadingOverlay message="圃場メモを取得しています..." />}
-      <h2>圃場メモ一覧</h2>
-      {submittedFarms.length === 0 && <p>ヘッダーのドロップダウンから農場を選択してください。</p>}
+      {loading && <LoadingOverlay message={t('field_memo.loading')} />}
+      <h2>{t('field_memo.title')}</h2>
+      {submittedFarms.length === 0 && <p>{t('risk.select_farm_hint')}</p>}
       {submittedFarms.length > 0 && (
         <>
           <div className="controls-panel" style={{ justifyContent: 'flex-start' }}>
@@ -418,23 +425,23 @@ export function FieldMemoPage() {
               {loading ? (
                 <span className="button-loading-inline">
                   <LoadingSpinner size={18} />
-                  <span>取得中...</span>
+                  <span>{t('field_memo.fetching')}</span>
                 </span>
               ) : (
-                '圃場メモを取得'
+                t('field_memo.fetch')
               )}
             </button>
           </div>
 
-          {error && <h3 style={{ color: '#ff6b6b' }}>データの取得に失敗しました: {error}</h3>}
+          {error && <h3 style={{ color: '#ff6b6b' }}>{t('field_memo.fetch_failed', { error })}</h3>}
 
           {notesOut && (
             <>
               <p>
-                選択された {submittedFarms.length} 件の農場の圃場メモを表示しています。
+                {t('field_memo.summary', { count: submittedFarms.length })}
                 {notesOut.source && (
                   <span style={{ marginLeft: '1em', color: notesOut.source === 'cache' ? '#4caf50' : '#2196f3', fontWeight: 'bold' }}>
-                    ({notesOut.source === 'cache' ? 'キャッシュから取得' : 'APIから取得'})
+                    ({notesOut.source === 'cache' ? t('source.cache') : t('source.api')})
                   </span>
                 )}
               </p>
@@ -443,10 +450,10 @@ export function FieldMemoPage() {
                   onClick={handleDownloadAll}
                   disabled={zipLoading || downloadableAttachments.length === 0}
                 >
-                  {zipLoading ? '準備中...' : '添付をまとめてZIPダウンロード'}
+                  {zipLoading ? t('field_memo.zip.preparing') : t('field_memo.zip.download')}
                 </button>
                 <span style={{ color: '#9e9e9e', fontSize: '0.9em' }}>
-                  {`対象: ${downloadableAttachments.length} 件 / ファイル名: ${zipFileName}`}
+                  {t('field_memo.zip.meta', { count: downloadableAttachments.length, name: zipFileName })}
                 </span>
               </div>
               {zipError && <p style={{ color: '#ff6b6b' }}>{zipError}</p>}
@@ -472,8 +479,8 @@ export function FieldMemoPage() {
         <div className="attachment-preview-backdrop" onClick={() => setPreview(null)}>
           <div className="attachment-preview" onClick={(e) => e.stopPropagation()}>
             <div className="attachment-preview-header">
-              <span className="attachment-preview-title">{preview.fileName || '添付ファイル'}</span>
-              <button className="close-btn" onClick={() => setPreview(null)} aria-label="Close preview">×</button>
+              <span className="attachment-preview-title">{preview.fileName || t('field_memo.attachment.default')}</span>
+              <button className="close-btn" onClick={() => setPreview(null)} aria-label={t('action.close')}>×</button>
             </div>
             <img src={preview.url} alt={preview.fileName || 'attachment preview'} />
           </div>
@@ -486,11 +493,11 @@ export function FieldMemoPage() {
             <div className="zip-modal-text">
               <div>
                 {zipStep === 'downloading'
-                  ? 'ZIPをダウンロード中...'
-                  : `サーバー側でZIPを作成中（${downloadableAttachments.length}件）...`}
+                  ? t('field_memo.zip.downloading')
+                  : t('field_memo.zip.creating', { count: downloadableAttachments.length })}
               </div>
               <div style={{ fontSize: '0.9em', color: '#b0b0b0' }}>
-                対象: {downloadableAttachments.length} 件
+                {t('field_memo.zip.target_count', { count: downloadableAttachments.length })}
               </div>
               {zipStep === 'preparing' ? (
                 <>
@@ -501,7 +508,7 @@ export function FieldMemoPage() {
                     />
                   </div>
                   <div style={{ fontSize: '0.85em', color: '#c0c0c0' }}>
-                    サーバーで圧縮中...
+                    {t('field_memo.zip.compressing')}
                   </div>
                 </>
               ) : (
@@ -516,7 +523,7 @@ export function FieldMemoPage() {
                     {(() => {
                       const pct = zipProgress ?? 0;
                       const clampedPct = Math.min(100, Math.max(0, pct));
-                      return `${clampedPct}% ダウンロード済み`;
+                      return t('field_memo.zip.downloaded_pct', { pct: clampedPct });
                     })()}
                   </div>
                 </>
@@ -549,6 +556,7 @@ const FilterBar: FC<{
   datePreset: '7d' | '30d' | 'thisYear' | 'all' | 'custom';
   setDatePreset: (p: '7d' | '30d' | 'thisYear' | 'all' | 'custom') => void;
 }> = ({ filters, onChange, notes, datePreset, setDatePreset }) => {
+  const { language, t } = useLanguage();
   const creatorOptions = useMemo(() => {
     const names = notes
       .map(n => (n.creator ? `${n.creator.lastName} ${n.creator.firstName}`.trim() : ''))
@@ -586,7 +594,7 @@ const FilterBar: FC<{
     <div className="memo-filter-bar">
       <div className="memo-filter-row single-line">
         <div className="date-range-field">
-          <div className="date-range-label">作成日 範囲</div>
+          <div className="date-range-label">{t('field_memo.filter.date_range')}</div>
           <div className="date-range-inputs">
             <input
               type="date"
@@ -595,9 +603,9 @@ const FilterBar: FC<{
                 setDatePreset('custom');
                 update({ dateFrom: e.target.value });
               }}
-              placeholder="開始日"
+              placeholder={t('field_memo.filter.start_date')}
             />
-            <span className="date-range-sep">〜</span>
+            <span className="date-range-sep">{language === 'ja' ? '〜' : '–'}</span>
             <input
               type="date"
               value={filters.dateTo}
@@ -605,30 +613,30 @@ const FilterBar: FC<{
                 setDatePreset('custom');
                 update({ dateTo: e.target.value });
               }}
-              placeholder="終了日"
+              placeholder={t('field_memo.filter.end_date')}
             />
           </div>
           <div className="date-preset-buttons">
-            <button type="button" className={datePreset === '7d' ? 'active' : ''} onClick={() => applyPreset('7d')}>直近7日</button>
-            <button type="button" className={datePreset === '30d' ? 'active' : ''} onClick={() => applyPreset('30d')}>直近30日</button>
-            <button type="button" className={datePreset === 'thisYear' ? 'active' : ''} onClick={() => applyPreset('thisYear')}>今年</button>
-            <button type="button" className={datePreset === 'all' ? 'active' : ''} onClick={() => applyPreset('all')}>全期間</button>
+            <button type="button" className={datePreset === '7d' ? 'active' : ''} onClick={() => applyPreset('7d')}>{t('field_memo.filter.preset.7d')}</button>
+            <button type="button" className={datePreset === '30d' ? 'active' : ''} onClick={() => applyPreset('30d')}>{t('field_memo.filter.preset.30d')}</button>
+            <button type="button" className={datePreset === 'thisYear' ? 'active' : ''} onClick={() => applyPreset('thisYear')}>{t('field_memo.filter.preset.this_year')}</button>
+            <button type="button" className={datePreset === 'all' ? 'active' : ''} onClick={() => applyPreset('all')}>{t('field_memo.filter.preset.all')}</button>
           </div>
         </div>
         <label>
-          作成者
+          {t('field_memo.filter.creator')}
           <select value={filters.creator} onChange={(e) => update({ creator: e.target.value })}>
-            <option value="">全員</option>
+            <option value="">{t('field_memo.filter.creator_all')}</option>
             {creatorOptions.map(name => (
               <option key={name} value={name}>{name}</option>
             ))}
           </select>
         </label>
         <label className="memo-filter-wide">
-          フリーテキスト
+          {t('field_memo.filter.free_text')}
           <input
             type="text"
-            placeholder="メモ/カテゴリ/添付名/圃場名"
+            placeholder={t('field_memo.filter.free_text_ph')}
             value={filters.textKeyword}
             onChange={(e) => update({ textKeyword: e.target.value })}
           />
@@ -640,7 +648,7 @@ const FilterBar: FC<{
               checked={filters.onlyImages}
               onChange={(e) => update({ onlyImages: e.target.checked })}
             />
-            画像あり
+            {t('field_memo.filter.has_image')}
           </label>
           <label>
             <input
@@ -648,7 +656,7 @@ const FilterBar: FC<{
               checked={filters.onlyAudio}
               onChange={(e) => update({ onlyAudio: e.target.checked })}
             />
-            音声あり
+            {t('field_memo.filter.has_audio')}
           </label>
         </div>
       </div>
@@ -663,11 +671,14 @@ const PaginatedNotes: FC<{
   pageSize: number;
   onPreview: (att: { url: string; fileName?: string | null } | null) => void;
 }> = ({ notes, page, setPage, pageSize, onPreview }) => {
+  const { t } = useLanguage();
   const filteredNotes = notes;
   const totalPages = Math.max(1, Math.ceil(filteredNotes.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const start = (currentPage - 1) * pageSize;
   const current = filteredNotes.slice(start, start + pageSize);
+  const startDisplay = filteredNotes.length === 0 ? 0 : start + 1;
+  const endDisplay = start + current.length;
 
   const handlePrev = () => setPage(Math.max(1, currentPage - 1));
   const handleNext = () => setPage(Math.min(totalPages, currentPage + 1));
@@ -675,11 +686,11 @@ const PaginatedNotes: FC<{
   return (
     <>
       <div className="memo-pagination">
-        <span>全 {filteredNotes.length} 件中 {filteredNotes.length === 0 ? 0 : start + 1} - {start + current.length} 件を表示</span>
+        <span>{t('field_memo.pagination.summary', { total: filteredNotes.length, start: startDisplay, end: endDisplay })}</span>
         <div className="memo-pagination-controls">
-          <button onClick={handlePrev} disabled={currentPage === 1}>前へ</button>
+          <button onClick={handlePrev} disabled={currentPage === 1}>{t('pagination.prev')}</button>
           <span>{currentPage} / {totalPages}</span>
-          <button onClick={handleNext} disabled={currentPage === totalPages}>次へ</button>
+          <button onClick={handleNext} disabled={currentPage === totalPages}>{t('pagination.next')}</button>
         </div>
       </div>
       <div className="table-container">
@@ -689,30 +700,33 @@ const PaginatedNotes: FC<{
   );
 };
 
-const NotesTable: FC<{ notes: AggregatedNote[]; onPreview: (att: { url: string; fileName?: string | null } | null) => void }> = ({ notes, onPreview }) => (
-  <table className="fields-table">
-    <thead>
-      <tr>
-        <th>作成日</th>
-        <th>圃場</th>
-        <th>カテゴリ</th>
-        <th>メモ</th>
-        <th>作成者</th>
-        <th>添付画像</th>
-        <th>添付音声メモ</th>
-        <th>場所</th>
-      </tr>
-    </thead>
-    <tbody>
-      {notes.map(note => <NoteRow key={note.uuid} note={note} onPreview={onPreview} />)}
-      {notes.length === 0 && (
+const NotesTable: FC<{ notes: AggregatedNote[]; onPreview: (att: { url: string; fileName?: string | null } | null) => void }> = ({ notes, onPreview }) => {
+  const { t } = useLanguage();
+  return (
+    <table className="fields-table">
+      <thead>
         <tr>
-          <td colSpan={8} style={{ textAlign: 'center', padding: '2rem' }}>表示するメモがありません。</td>
+          <th>{t('table.created_at')}</th>
+          <th>{t('table.field')}</th>
+          <th>{t('table.category')}</th>
+          <th>{t('table.memo')}</th>
+          <th>{t('table.creator')}</th>
+          <th>{t('table.attachment_images')}</th>
+          <th>{t('table.attachment_audio')}</th>
+          <th>{t('table.location')}</th>
         </tr>
-      )}
-    </tbody>
-  </table>
-);
+      </thead>
+      <tbody>
+        {notes.map(note => <NoteRow key={note.uuid} note={note} onPreview={onPreview} />)}
+        {notes.length === 0 && (
+          <tr>
+            <td colSpan={8} style={{ textAlign: 'center', padding: '2rem' }}>{t('field_memo.empty')}</td>
+          </tr>
+        )}
+      </tbody>
+    </table>
+  );
+};
 
 const NoteRow: FC<{ note: AggregatedNote; onPreview: (att: { url: string; fileName?: string | null } | null) => void }> = ({ note, onPreview }) => (
     <tr>

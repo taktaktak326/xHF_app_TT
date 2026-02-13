@@ -8,6 +8,8 @@ import { formatCombinedLoadingMessage } from '../utils/loadingMessage';
 import './FarmsPage.css'; // FarmsPageのスタイルを再利用
 import './RiskPage.css';
 import LoadingOverlay from '../components/LoadingOverlay';
+import { useLanguage } from '../context/LanguageContext';
+import { tr } from '../i18n/runtime';
 
 // =============================================================================
 // Type Definitions
@@ -97,18 +99,18 @@ const useAggregatedRisks = (): AggregatedRisk[] => {
 
         const risksWithInfo = season.risks
           .filter(risk => ['HIGH', 'MEDIUM'].includes(risk.status))
-          .map(risk => {
-            const stressInfo = stressInfoMap.get(risk.stressV2.uuid);
-            return {
-              ...risk,
-              fieldName: field.name,
-              cropName: season.crop.name,
-              riskName: stressInfo?.stressV2.name || '不明なリスク',
-              seasonUuid: season.uuid,
-              // groupConsecutiveItemsで使うためのキー
-              groupKey: `${stressInfo?.stressV2.uuid}-${risk.status}`,
-            };
-          });
+	          .map(risk => {
+	            const stressInfo = stressInfoMap.get(risk.stressV2.uuid);
+	            return {
+	              ...risk,
+	              fieldName: field.name,
+	              cropName: season.crop.name,
+	              riskName: stressInfo?.stressV2.name || tr('risk.unknown'),
+	              seasonUuid: season.uuid,
+	              // groupConsecutiveItemsで使うためのキー
+	              groupKey: `${stressInfo?.stressV2.uuid}-${risk.status}`,
+	            };
+	          });
         
         return groupConsecutiveItems(risksWithInfo, 'groupKey');
       }) ?? [];
@@ -134,6 +136,7 @@ export function RiskPage() {
   } = useData();
   const { submittedFarms, fetchCombinedDataIfNeeded } = useFarms();
   const aggregatedRisks = useAggregatedRisks();
+  const { t } = useLanguage();
 
   useEffect(() => {
     fetchCombinedDataIfNeeded();
@@ -142,8 +145,8 @@ export function RiskPage() {
   if (submittedFarms.length === 0) {
     return (
       <div className="farms-page-container">
-        <h2>リスク一覧</h2>
-        <p>ヘッダーのドロップダウンから農場を選択してください。</p>
+        <h2>{t('risk.title')}</h2>
+        <p>{t('risk.select_farm_hint')}</p>
       </div>
     );
   }
@@ -151,10 +154,10 @@ export function RiskPage() {
   if (combinedLoading) {
     return (
       <div className="farms-page-container">
-        <h2>リスク一覧</h2>
+        <h2>{t('risk.title')}</h2>
         <LoadingOverlay
           message={formatCombinedLoadingMessage(
-            'リスクデータ',
+            t('risk.loading_label'),
             combinedFetchAttempt,
             combinedFetchMaxAttempts,
             combinedRetryCountdown,
@@ -167,8 +170,8 @@ export function RiskPage() {
   if (combinedErr) {
     return (
       <div className="farms-page-container">
-        <h2>リスク一覧</h2>
-        <h3 style={{ color: '#ff6b6b' }}>リスクデータの取得に失敗しました</h3>
+        <h2>{t('risk.title')}</h2>
+        <h3 style={{ color: '#ff6b6b' }}>{t('risk.load_failed')}</h3>
         <pre style={{ color: '#ff6b6b', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
           {combinedErr}
         </pre>
@@ -178,12 +181,12 @@ export function RiskPage() {
 
   return (
     <div className="farms-page-container">
-      <h2>リスク一覧</h2>
+      <h2>{t('risk.title')}</h2>
       <p>
-        選択された {submittedFarms.length} 件の農場のリスク情報を表示しています。
+        {t('risk.summary', { count: submittedFarms.length })}
         {combinedOut?.source && (
           <span style={{ marginLeft: '1em', color: combinedOut.source === 'cache' ? '#4caf50' : '#2196f3', fontWeight: 'bold' }}>
-            ({combinedOut.source === 'cache' ? 'キャッシュから取得' : 'APIから取得'})
+            ({combinedOut.source === 'cache' ? t('risk.source.cache') : t('risk.source.api')})
           </span>
         )}
       </p>
@@ -201,6 +204,7 @@ export function RiskPage() {
 const RisksTable: FC<{ risks: AggregatedRisk[] }> = ({ risks }) => {
   const [rowsPerPage, setRowsPerPage] = useState<number>(20);
   const [currentPage, setCurrentPage] = useState<number>(1);
+  const { t } = useLanguage();
 
   useEffect(() => {
     setCurrentPage(1);
@@ -241,7 +245,7 @@ const RisksTable: FC<{ risks: AggregatedRisk[] }> = ({ risks }) => {
         <div className="risk-pagination">
           <div className="risk-pagination__left">
             <label htmlFor="risk-rows-per-page">
-              表示件数:{' '}
+              {t('risk.rows_per_page')}{' '}
               <select
                 id="risk-rows-per-page"
                 value={rowsPerPage}
@@ -255,13 +259,13 @@ const RisksTable: FC<{ risks: AggregatedRisk[] }> = ({ risks }) => {
           </div>
           <div className="risk-pagination__right">
             <button type="button" onClick={() => handlePageChange(-1)} disabled={currentPage <= 1}>
-              前へ
+              {t('pagination.prev')}
             </button>
             <span className="risk-pagination__page">
               {currentPage} / {totalPages}
             </span>
             <button type="button" onClick={() => handlePageChange(1)} disabled={currentPage >= totalPages}>
-              次へ
+              {t('pagination.next')}
             </button>
           </div>
         </div>
@@ -270,11 +274,11 @@ const RisksTable: FC<{ risks: AggregatedRisk[] }> = ({ risks }) => {
       <table className="fields-table">
         <thead>
           <tr>
-            <th>圃場</th>
-            <th>作物</th>
-            <th>リスク</th>
-            <th>ステータス</th>
-            <th>期間</th>
+            <th>{t('table.field')}</th>
+            <th>{t('table.crop')}</th>
+            <th>{t('table.risk')}</th>
+            <th>{t('table.status')}</th>
+            <th>{t('table.period')}</th>
           </tr>
         </thead>
         <tbody>
@@ -283,7 +287,7 @@ const RisksTable: FC<{ risks: AggregatedRisk[] }> = ({ risks }) => {
           ))}
           {risks.length === 0 && (
             <tr>
-              <td colSpan={5} style={{ textAlign: 'center', padding: '2rem' }}>表示するリスク情報がありません。</td>
+              <td colSpan={5} style={{ textAlign: 'center', padding: '2rem' }}>{t('risk.empty')}</td>
             </tr>
           )}
         </tbody>
