@@ -26,6 +26,12 @@ export const messages: MessageTable = {
   'login.password_placeholder': { ja: 'password', en: 'password' },
   'login.submit': { ja: 'ログイン', en: 'Sign in' },
   'login.submitting': { ja: 'ログイン中...', en: 'Signing in...' },
+  'login.slow': { ja: '時間がかかっています…', en: 'This is taking longer than usual…' },
+  'login.slow_hint': {
+    ja: 'このまま待つか、キャンセルしてもう一度試してください。',
+    en: 'Please wait, or cancel and try again.',
+  },
+  'login.canceled': { ja: 'キャンセルしました', en: 'Canceled' },
   'login.failed': { ja: 'ログインに失敗しました', en: 'Sign-in failed' },
   'login.invalid_json': {
     ja: '応答がJSONではありません',

@@ -94,6 +94,71 @@
 
 ## 変更を本番へ反映する手順 (Render + Cloudflare Pages)
 
+### 中学生でもわかる版（まずはこれだけ）
+
+このアプリの本番反映（デプロイ）は、ざっくり **2つ** です。
+
+- **バックエンド(API)**: Render が担当（GitHub に push すると自動で更新される）
+- **フロント(画面)**: Cloudflare Pages が担当（コマンドでアップロードして更新する）
+
+#### 0) 事前にそろっていること（最初の1回だけ）
+
+- Render に「このリポジトリを見てビルドする設定」ができている
+  - Root Directory: `apps/api`
+  - Environment: `Docker`
+- Cloudflare Pages に `xhf-app-tt` プロジェクトがある
+- ローカルPCで `wrangler` にログイン済み（`npx wrangler whoami` で確認できる）
+
+#### 1) GitHub に push（ここがスタート）
+
+まずは変更を GitHub に送ります（= push）。
+
+```bash
+cd /Users/takuya/Desktop/xhf-app
+git status
+git add -A
+git commit -m "your message"
+git push origin main
+```
+
+これで **Render 側のバックエンドは自動でデプロイが始まります**（数分かかることがあります）。
+
+#### 2) フロントをビルド（= 公開用ファイルを作る）
+
+フロントは「どの API にアクセスするか」を決めてからビルドします。
+本番 API は Render の URL なので、`VITE_API_BASE` にそれを入れます。
+
+```bash
+cd /Users/takuya/Desktop/xhf-app
+VITE_API_BASE=https://xhf-app-tt.onrender.com/api npm run build --workspace web
+```
+
+#### 3) Cloudflare Pages にアップロード（= 画面の更新）
+
+```bash
+cd /Users/takuya/Desktop/xhf-app
+npx wrangler pages deploy apps/web/dist --project-name xhf-app-tt --branch main
+```
+
+#### 4) 動作確認（最低これだけ）
+
+1. バックエンドが生きているか確認:
+   ```bash
+   curl https://xhf-app-tt.onrender.com/api/healthz
+   ```
+   `{ "ok": true }` が返ればOK。
+2. 画面を開いてログインしてみる:
+   - `https://xhf-app-tt.pages.dev`
+
+#### 困ったとき（よくある原因）
+
+- `wrangler` がログイン切れ: `npx wrangler login` を実行してからやり直す
+- 画面は更新されたのに API が失敗する:
+  - `VITE_API_BASE` が間違っている（`.../api` まで含める）
+  - Render のデプロイがまだ終わっていない（少し待って再確認）
+
+---
+
 1. **バックエンド (Render Web Service)**
 
    - Root Directory: `apps/api`
