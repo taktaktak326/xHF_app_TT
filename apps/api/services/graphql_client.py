@@ -17,7 +17,8 @@ async def call_graphql(payload: Dict[str, Any], login_token: str, api_token: str
     }
 
     try:
-        timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
+        # Keep this >= combined-fields wait_for timeouts.
+        timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
             r = await c.post(endpoint, json=payload, headers=headers)
     except httpx.HTTPError as e:

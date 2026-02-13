@@ -696,6 +696,13 @@ async def combined_fields(req: CombinedFieldsReq):
 
         async def streamer():
             # キャッシュは使わず都度取得
+            async def _run_labeled(label: str, payload: Any):
+                try:
+                    res = await call_graphql(payload, req.login_token, req.api_token)
+                    return label, res
+                except Exception as exc:  # pylint: disable=broad-except
+                    return label, {"ok": False, "error": str(exc)}
+
             tasks_map = {}
             for label, cfg in request_configs.items():
                 if cfg.get("condition") and not cfg["condition"](req):
@@ -713,13 +720,13 @@ async def combined_fields(req: CombinedFieldsReq):
 
             # 残りは完了した順に返す
             stream_results = {"base": base_res}
-            task_label_map = {v: k for k, v in tasks_map.items()}
-            for task in asyncio.as_completed([t for k, t in tasks_map.items() if k != "base"]):
-                label = task_label_map.get(task, "unknown")
-                try:
-                    res = await task
-                except Exception as exc:  # pylint: disable=broad-except
-                    res = {"ok": False, "error": str(exc)}
+            other_tasks = [
+                asyncio.create_task(_run_labeled(label, cfg["payload"]))
+                for label, cfg in request_configs.items()
+                if label != "base" and (not cfg.get("condition") or cfg["condition"](req))
+            ]
+            for task in asyncio.as_completed(other_tasks):
+                label, res = await task
                 _log_stream_result(label, res)
                 stream_results[label] = res
                 yield json.dumps({"type": label, "data": res}) + "\n"
@@ -777,42 +784,73 @@ async def combined_fields(req: CombinedFieldsReq):
         if label not in prepared_cache:
             fetch_plan.append((label, call_graphql(cfg["payload"], req.login_token, req.api_token)))
 
-    # optional ラベルは一定時間で諦めて部分成功に回す
+    # タイムアウト設定（7秒は短すぎて base まで落ちやすいので、用途別に分ける）
+    # - base: 必須なので長め（デフォルト 30s）
+    # - optional: 部分成功に回すため短め（デフォルト 20s）
+    base_timeout_sec = float(os.getenv("COMBINED_FIELDS_BASE_TIMEOUT_SEC", "100"))
+    optional_timeout_sec = float(os.getenv("COMBINED_FIELDS_OPTIONAL_TIMEOUT_SEC", "100"))
     optional_labels_with_timeout = {label for label, cfg in request_configs.items() if cfg.get("optional")}
-    timeout_sec = 10.0
-
-    async def _maybe_timeout(label: str, coro):
-        if label not in optional_labels_with_timeout:
-            return await coro
-        try:
-            return await asyncio.wait_for(coro, timeout=timeout_sec)
-        except Exception as exc:  # pylint: disable=broad-except
-            return exc
 
     fetched: Dict[str, Any] = {}
     if fetch_plan:
-        # ラベル → Task のマップを作り、タイムアウト付きで「揃ったものから」回収
-        tasks_map = {label: asyncio.create_task(_maybe_timeout(label, coro)) for label, coro in fetch_plan}
-        timeout_sec = 7.0
-        done, pending = await asyncio.wait(tasks_map.values(), timeout=timeout_sec)
-        # 回収できたもの
-        for task in done:
+        # Reliability-first:
+        # Start with base only (critical). Optional sub-requests are started after base
+        # so upstream isn't hit by a burst of concurrent GraphQL calls per request.
+        loop = asyncio.get_running_loop()
+        start_t = loop.time()
+        plan_map: Dict[str, Any] = {label: coro for label, coro in fetch_plan}
+
+        # base は必須：base だけは base_timeout_sec まで待つ
+        if "base" in plan_map:
             try:
-                result = task.result()
+                fetched["base"] = await asyncio.wait_for(plan_map["base"], timeout=base_timeout_sec)
             except Exception as exc:  # pylint: disable=broad-except
-                result = exc
-            label = next((k for k, v in tasks_map.items() if v is task), None)
-            if label:
-                fetched[label] = result
-        # タイムアウトして残ったものはキャンセルして TimeoutError を格納（optionalのみ想定）
-        for task in pending:
-            task.cancel()
-            label = next((k for k, v in tasks_map.items() if v is task), None)
-            if label:
-                fetched[label] = asyncio.TimeoutError(f"{label} timed out after {timeout_sec}s")
+                fetched["base"] = exc
+
+            # If base fails (often timeout) and boundary was requested, retry once without boundary.
+            if isinstance(fetched.get("base"), Exception) and req.withBoundarySvg:
+                try:
+                    retry_payload = make_payload("CombinedDataBase", COMBINED_DATA_BASE, {
+                        "farmUuids": req.farm_uuids,
+                        "languageCode": req.languageCode,
+                        "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+                        "withBoundary": False,
+                    })
+                    fetched["base"] = await asyncio.wait_for(
+                        call_graphql(retry_payload, req.login_token, req.api_token),
+                        timeout=max(base_timeout_sec, 60.0),
+                    )
+                except Exception as exc:  # pylint: disable=broad-except
+                    fetched["base"] = exc
+
+        # optional は optional_timeout_sec の残り時間で順番に取得し、残りは部分成功として打ち切る
+        for label, cfg in request_configs.items():
+            if label == "base":
+                continue
+            if label not in plan_map:
+                continue
+            if cfg.get("condition") and not cfg["condition"](req):
+                continue
+            remaining = optional_timeout_sec - (loop.time() - start_t)
+            if remaining <= 0:
+                if label in optional_labels_with_timeout:
+                    fetched[label] = asyncio.TimeoutError(f"{label} timed out after {optional_timeout_sec}s")
+                    continue
+                try:
+                    fetched[label] = await plan_map[label]
+                except Exception as exc:  # pylint: disable=broad-except
+                    fetched[label] = exc
+                continue
+            try:
+                fetched[label] = await asyncio.wait_for(plan_map[label], timeout=remaining)
+            except Exception as exc:  # pylint: disable=broad-except
+                fetched[label] = exc
 
     # insights だけはタイムアウトが多いので個別にリトライする
-    if "insights" not in prepared_cache:
+    def _is_error(res: Any) -> bool:
+        return isinstance(res, Exception) or (isinstance(res, dict) and res.get("ok") is False)
+
+    if "insights" not in prepared_cache and _is_error(fetched.get("insights")):
         insights_attempts = 2
         insights_delay = 3  # seconds
         insights_result: Any = None
@@ -838,9 +876,6 @@ async def combined_fields(req: CombinedFieldsReq):
     }
 
     # エラーチェック（Base は必須、他は警告を添えて部分成功を許容）
-    def _is_error(res: Any) -> bool:
-        return isinstance(res, Exception) or (isinstance(res, dict) and res.get("ok") is False)
-
     errors_by_label = {
         label: res
         for label, res in {**prepared_cache, **fetched}.items()
