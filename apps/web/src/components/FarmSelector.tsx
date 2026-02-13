@@ -208,8 +208,7 @@ export function FarmSelector() {
     prefCityWorkerRef.current = worker;
     let cancelled = false;
 
-    const supportsGzip = typeof (window as any).DecompressionStream !== 'undefined';
-    const datasetPath = supportsGzip ? '/pref_city_p5.topo.json.gz' : '/pref_city_p5.topo.json';
+    const datasetPath = '/pref_city_p5.topo.json.gz';
     const datasetUrl = `${window.location.origin.replace(/\/$/, '')}${datasetPath}`;
 
     async function preloadDataset(attempt: number) {

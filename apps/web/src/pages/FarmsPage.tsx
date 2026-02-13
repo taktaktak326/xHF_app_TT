@@ -1215,8 +1215,7 @@ export function FarmsPage() {
     prefCityWorkerRef.current = worker;
     let cancelled = false;
 
-    const supportsGzip = typeof (window as any).DecompressionStream !== 'undefined';
-    const datasetPath = supportsGzip ? '/pref_city_p5.topo.json.gz' : '/pref_city_p5.topo.json';
+    const datasetPath = '/pref_city_p5.topo.json.gz';
     const datasetUrl = `${window.location.origin.replace(/\/$/, '')}${datasetPath}`;
     // In dev, some browsers restrict fetch from workers depending on origin/blob URLs.
     // Preload the dataset on the main thread and transfer it to the worker as a fallback.

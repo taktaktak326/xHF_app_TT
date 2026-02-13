@@ -318,26 +318,8 @@ async function loadTopologyOnce() {
     postMessage({ type: 'ready', loaded: true, geoms: geomList.length } satisfies ReadyResponse);
   };
 
-  const fetchJsonTextFallback = async (): Promise<string> => {
-    const urlGz =
-      datasetUrl ??
-      (() => {
-        try {
-          // eslint-disable-next-line no-undef
-          const origin = (self as any)?.location?.origin;
-          if (origin && origin !== 'null') {
-            return `${origin}/pref_city_p5.topo.json.gz`;
-          }
-        } catch {
-          // ignore
-        }
-        return '/pref_city_p5.topo.json.gz';
-      })();
-    const urlJson = urlGz.endsWith('.gz') ? urlGz.slice(0, -3) : '/pref_city_p5.topo.json';
-    const res = await fetch(urlJson);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
-  };
+  const noGzipSupportError = () =>
+    new Error("loadTopologyOnce: DecompressionStream('gzip') is not available in this browser");
 
   // If we were handed bytes directly from the main thread, accept either:
   // - gzip-compressed TopoJSON (.gz)
@@ -365,23 +347,11 @@ async function loadTopologyOnce() {
         const stream = new Blob([datasetGz]).stream().pipeThrough(new DecompressionStream('gzip'));
         text = await new Response(stream).text();
       } catch (e) {
-        // If gzip decompression fails even though the API exists, fall back to plain JSON fetch.
-        try {
-          text = await fetchJsonTextFallback();
-        } catch (fallbackErr) {
-          const msg = e instanceof Error ? e.message : String(e);
-          const fb = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-          throw new Error(`loadTopologyOnce: failed to decompress provided gzip: ${msg} (json fallback failed: ${fb})`);
-        }
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`loadTopologyOnce: failed to decompress provided gzip: ${msg}`);
       }
     } else {
-      // No DecompressionStream support: fall back to plain JSON fetch.
-      try {
-        text = await fetchJsonTextFallback();
-      } catch (fallbackErr) {
-        const fb = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-        throw new Error(`loadTopologyOnce: DecompressionStream('gzip') is not available (json fallback failed: ${fb})`);
-      }
+      throw noGzipSupportError();
     }
     try {
       const parsed = JSON.parse(text) as Topology;
@@ -394,10 +364,7 @@ async function loadTopologyOnce() {
   }
 
   let gzStream: ReadableStream;
-  let fetchedUrlGz: string | null = null;
   {
-    const fallbackJsonUrl = (url: string) =>
-      url.endsWith(".gz") ? url.slice(0, -3) : url;
     const urlGz =
       datasetUrl ??
       (() => {
@@ -417,14 +384,7 @@ async function loadTopologyOnce() {
     let res: Response;
     try {
       if (!hasDecompressionStream) {
-        const jsonRes = await fetch(fallbackJsonUrl(urlGz));
-        if (!jsonRes.ok) {
-          throw new Error(`HTTP ${jsonRes.status}`);
-        }
-        const text = await jsonRes.text();
-        const parsed = JSON.parse(text) as Topology;
-        applyParsedTopology(parsed);
-        return;
+        throw noGzipSupportError();
       }
       res = await fetch(urlGz);
     } catch (e) {
@@ -434,7 +394,6 @@ async function loadTopologyOnce() {
     if (!res.ok) throw new Error(`loadTopologyOnce: failed to fetch dataset (${urlGz}): HTTP ${res.status}`);
     if (!res.body) throw new Error('loadTopologyOnce: dataset response has no body');
     gzStream = res.body;
-    fetchedUrlGz = urlGz;
   }
 
   // Browser-native gzip decompression (fetch branch should always be gzip bytes)
@@ -444,18 +403,8 @@ async function loadTopologyOnce() {
     const stream = gzStream.pipeThrough(new DecompressionStream('gzip'));
     text = await new Response(stream).text();
   } catch (e) {
-    // Some environments still fail gzip streaming; fall back to plain JSON dataset.
-    try {
-      const urlJson =
-        fetchedUrlGz && fetchedUrlGz.endsWith(".gz") ? fetchedUrlGz.slice(0, -3) : "/pref_city_p5.topo.json";
-      const jsonRes = await fetch(urlJson);
-      if (!jsonRes.ok) throw new Error(`HTTP ${jsonRes.status}`);
-      text = await jsonRes.text();
-    } catch (fallbackErr) {
-      const msg = e instanceof Error ? e.message : String(e);
-      const fb = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-      throw new Error(`loadTopologyOnce: failed to decompress: ${msg} (json fallback failed: ${fb})`);
-    }
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`loadTopologyOnce: failed to decompress: ${msg}`);
   }
 
   let parsed: Topology;
