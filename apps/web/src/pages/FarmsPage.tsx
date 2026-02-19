@@ -305,6 +305,7 @@ function FieldsTable({
   noteImageStateByField,
   noteImageErrorByField,
   onOpenNoteList,
+  onOpenAiOutput,
   tableRef,
   locationByFieldUuid,
 }: {
@@ -320,6 +321,7 @@ function FieldsTable({
   noteImageStateByField: Record<string, NoteImageState>;
   noteImageErrorByField: Record<string, string>;
   onOpenNoteList: (field: Field) => void;
+  onOpenAiOutput: (pair: FieldSeasonPair) => void;
   tableRef?: Ref<HTMLTableElement>;
   locationByFieldUuid: Record<string, Partial<NonNullable<Field['location']>>>;
 }) {
@@ -370,6 +372,13 @@ function FieldsTable({
                       onClick={() => onOpenNoteList(field)}
                     >
                       {t('farms.notes.button.list')}
+                    </button>
+                    <button
+                      type="button"
+                      className="field-note-button field-note-button--ai"
+                      onClick={() => onOpenAiOutput(pair)}
+                    >
+                      {t('farms.ai_output.button')}
                     </button>
                     {noteState === 'loading' && (
                       <span className="field-note-loading">{t('farms.notes.loading_inline')}</span>
@@ -475,6 +484,10 @@ export function FarmsPage() {
   const [noteModalLimit, setNoteModalLimit] = useState<number>(10);
   const [noteModalFrom, setNoteModalFrom] = useState('');
   const [noteModalTo, setNoteModalTo] = useState('');
+  const [aiOutputOpen, setAiOutputOpen] = useState(false);
+  const [aiOutputTitle, setAiOutputTitle] = useState('');
+  const [aiOutputText, setAiOutputText] = useState('');
+  const [aiOutputCopied, setAiOutputCopied] = useState(false);
   const [prefCityByFieldUuid, setPrefCityByFieldUuid] = useState<Record<string, Partial<NonNullable<Field['location']>>>>(
     () => getSessionCache<Record<string, Partial<NonNullable<Field['location']>>>>(PREF_CITY_CACHE_KEY) ?? {},
   );
@@ -696,6 +709,329 @@ export function FarmsPage() {
     }
   };
 
+  const buildAiExportText = useCallback(
+    (pair: FieldSeasonPair): string => {
+      const { field, season } = pair;
+      const locationOverride = prefCityByFieldUuid[field.uuid];
+      const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
+
+      const farmV2: any = (field as any).farmV2 ?? (field as any).farm ?? null;
+      const owner: any = farmV2?.owner ?? null;
+
+      const centerCandidates = [effectiveLocation?.center, (field as any).center, (field as any).centroid, farmV2 && typeof farmV2.latitude === 'number' && typeof farmV2.longitude === 'number' ? { latitude: farmV2.latitude, longitude: farmV2.longitude } : null];
+      const center =
+        centerCandidates.find((c) => c && typeof c.latitude === 'number' && typeof c.longitude === 'number') ?? null;
+
+      const nowIso = new Date().toISOString();
+      const currentStage = season?.activeGrowthStage ?? null;
+
+      type TaskEntry = { type: string } & Record<string, any>;
+      type TaskEntryBody = Record<string, any>;
+
+      const normalizeAssignee = (assignee: any): string | null => {
+        if (!assignee) return null;
+        const name = `${assignee?.lastName ?? ''} ${assignee?.firstName ?? ''}`.trim();
+        return name || null;
+      };
+
+      const takeDefined = (v: any) => (v === undefined ? null : v);
+
+      const pushTasks = (type: string, items: any[] | null | undefined, mapper: (item: any) => TaskEntryBody) => {
+        if (!Array.isArray(items) || items.length === 0) return [];
+        const out: TaskEntry[] = [];
+        items.forEach((item) => {
+          if (!item || typeof item !== 'object') return;
+          out.push({ type, ...(mapper(item) || {}) });
+        });
+        return out;
+      };
+
+      const tasks: TaskEntry[] = [];
+      tasks.push(
+        ...pushTasks('spraying', (season as any)?.sprayingsV2, (task) => ({
+          uuid: task?.uuid ?? null,
+          plannedDate: takeDefined(task?.plannedDate),
+          executionDate: takeDefined(task?.executionDate),
+          autoExecutedOn: takeDefined(task?.autoExecutedOn),
+          state: takeDefined(task?.state),
+          assignmentState: takeDefined(task?.assignmentState),
+          note: takeDefined(task?.note),
+          assignee: normalizeAssignee(task?.assignee),
+          details: {
+            isAutoExecutable: takeDefined(task?.isAutoExecutable),
+            dosedMap: task?.dosedMap
+              ? {
+                  applicationType: takeDefined(task?.dosedMap?.applicationType),
+                  creationFlowHint: takeDefined(task?.dosedMap?.creationFlowHint),
+                  recipeV2: Array.isArray(task?.dosedMap?.recipeV2)
+                    ? task.dosedMap.recipeV2.map((r: any) => ({
+                        uuid: takeDefined(r?.uuid),
+                        name: takeDefined(r?.name),
+                        type: takeDefined(r?.type),
+                        totalApplication: takeDefined(r?.totalApplication),
+                        formulation: takeDefined(r?.formulation),
+                        unit: takeDefined(r?.unit),
+                        organization: takeDefined(r?.organization),
+                      }))
+                    : [],
+                }
+              : null,
+          },
+        })),
+      );
+      tasks.push(
+        ...pushTasks('harvest', (season as any)?.harvests, (task) => ({
+          uuid: task?.uuid ?? null,
+          plannedDate: takeDefined(task?.plannedDate),
+          executionDate: takeDefined(task?.executionDate),
+          state: takeDefined(task?.state),
+          assignmentState: takeDefined(task?.assignmentState),
+          note: takeDefined(task?.note),
+          assignee: normalizeAssignee(task?.assignee),
+          details: {
+            harvestMethodCode: takeDefined(task?.harvestMethodCode),
+            yield: takeDefined(task?.yield),
+            yieldProperties: takeDefined(task?.yieldProperties),
+          },
+        })),
+      );
+      tasks.push(
+        ...pushTasks('land_preparation', (season as any)?.landPreparations, (task) => ({
+          uuid: task?.uuid ?? null,
+          plannedDate: takeDefined(task?.plannedDate),
+          executionDate: takeDefined(task?.executionDate),
+          autoExecutedOn: takeDefined(task?.autoExecutedOn),
+          state: takeDefined(task?.state),
+          assignmentState: takeDefined(task?.assignmentState),
+          note: takeDefined(task?.note),
+          assignee: normalizeAssignee(task?.assignee),
+          details: {
+            tillageDepth: takeDefined(task?.tillageDepth),
+            processedArea: takeDefined(task?.processedArea),
+          },
+        })),
+      );
+      tasks.push(
+        ...pushTasks('seed_treatment', (season as any)?.seedTreatmentTasks, (task) => ({
+          uuid: task?.uuid ?? null,
+          plannedDate: takeDefined(task?.plannedDate),
+          executionDate: takeDefined(task?.executionDate),
+          autoExecutedOn: takeDefined(task?.autoExecutedOn),
+          state: takeDefined(task?.state),
+          assignmentState: takeDefined(task?.assignmentState),
+          note: takeDefined(task?.note),
+          assignee: normalizeAssignee(task?.assignee),
+          details: {
+            totalLiquidRate: takeDefined(task?.totalLiquidRate),
+            recipe: takeDefined(task?.recipe),
+            products: takeDefined(task?.products),
+          },
+        })),
+      );
+      tasks.push(
+        ...pushTasks('seed_box_treatment', (season as any)?.seedBoxTreatments, (task) => ({
+          uuid: task?.uuid ?? null,
+          plannedDate: takeDefined(task?.plannedDate),
+          executionDate: takeDefined(task?.executionDate),
+          autoExecutedOn: takeDefined(task?.autoExecutedOn),
+          state: takeDefined(task?.state),
+          assignmentState: takeDefined(task?.assignmentState),
+          note: takeDefined(task?.note),
+          assignee: normalizeAssignee(task?.assignee),
+          details: {
+            recipe: takeDefined(task?.recipe),
+            products: takeDefined(task?.products),
+          },
+        })),
+      );
+      tasks.push(
+        ...pushTasks('smart_spraying', (season as any)?.smartSprayingTasksV2, (task) => ({
+          uuid: task?.uuid ?? null,
+          plannedDate: takeDefined(task?.plannedDate),
+          executionDate: takeDefined(task?.executionDate),
+          state: takeDefined(task?.state),
+          assignmentState: takeDefined(task?.assignmentState),
+          note: takeDefined(task?.note),
+          assignee: normalizeAssignee(task?.assignee),
+          details: takeDefined(task?.dosedMaps),
+        })),
+      );
+      tasks.push(
+        ...pushTasks('water_management', (season as any)?.waterManagementTasks, (task) => ({
+          uuid: task?.uuid ?? null,
+          plannedDate: takeDefined(task?.plannedDate),
+          executionDate: takeDefined(task?.executionDate),
+          autoExecutedOn: takeDefined(task?.autoExecutedOn),
+          state: takeDefined(task?.state),
+          note: takeDefined(task?.note),
+          assignee: normalizeAssignee(task?.assignee),
+          details: {
+            type: takeDefined(task?.type),
+            waterHeight: takeDefined(task?.waterHeight),
+            waterHeightDifference: takeDefined(task?.waterHeightDifference),
+            executionStartDate: takeDefined(task?.executionStartDate),
+            fieldCoveragePercentage: takeDefined(task?.fieldCoveragePercentage),
+          },
+        })),
+      );
+      tasks.push(
+        ...pushTasks('scouting', (season as any)?.scoutingTasks, (task) => ({
+          uuid: task?.uuid ?? null,
+          plannedDate: takeDefined(task?.plannedDate),
+          executionDate: takeDefined(task?.executionDate),
+          state: takeDefined(task?.state),
+          note: takeDefined(task?.note),
+          assignee: normalizeAssignee(task?.assignee),
+        })),
+      );
+      tasks.push(
+        ...pushTasks('drone_flight', (season as any)?.droneFlights, (task) => ({
+          uuid: task?.uuid ?? null,
+          plannedDate: takeDefined(task?.plannedDate),
+          executedDate: takeDefined(task?.executedDate),
+          state: takeDefined(task?.status),
+          note: takeDefined(task?.note),
+          assignee: normalizeAssignee(task?.assignee),
+          details: {
+            warningCode: takeDefined(task?.warningCode),
+          },
+        })),
+      );
+      tasks.push(
+        ...pushTasks('soil_sampling', (season as any)?.soilSamplingTasks, (task) => ({
+          uuid: task?.uuid ?? null,
+          plannedDate: takeDefined(task?.plannedDate),
+          executionDate: takeDefined(task?.executionDate),
+          state: takeDefined(task?.state),
+          note: takeDefined(task?.note),
+          assignee: normalizeAssignee(task?.assignee),
+        })),
+      );
+
+      const isValidDate = (v: any) => typeof v === 'string' && v && Number.isFinite(new Date(v).getTime());
+      const tasksSorted = tasks
+        .map((task) => {
+          const ts =
+            (isValidDate(task.executionDate) && new Date(task.executionDate!).getTime()) ||
+            (isValidDate(task.executedDate) && new Date(task.executedDate!).getTime()) ||
+            (isValidDate(task.autoExecutedOn) && new Date(task.autoExecutedOn!).getTime()) ||
+            (isValidDate(task.plannedDate) && new Date(task.plannedDate!).getTime()) ||
+            0;
+          return { ...task, _ts: ts };
+        })
+        .sort((a, b) => a._ts - b._ts)
+        .map(({ _ts, ...task }) => task);
+
+      const payload = {
+        schema_version: 'xhf-ai-field-export/v1',
+        generated_at: nowIso,
+        field: {
+          uuid: field.uuid,
+          name: field.name,
+          farm: {
+            uuid: farmV2?.uuid ?? null,
+            name: farmV2?.name ?? null,
+            owner: owner
+              ? {
+                  name: `${owner?.lastName ?? ''} ${owner?.firstName ?? ''}`.trim() || owner?.email || null,
+                  email: owner?.email ?? null,
+                }
+              : null,
+          },
+          location: {
+            prefecture: formatPrefectureDisplay(effectiveLocation) || null,
+            municipality: formatMunicipalityDisplay(effectiveLocation) || null,
+            raw: effectiveLocation ?? null,
+          },
+          center: center ? { latitude: center.latitude, longitude: center.longitude } : null,
+          area: {
+            m2: field.area ?? null,
+            a: typeof field.area === 'number' ? Number((field.area / 100).toFixed(2)) : null,
+          },
+        },
+        season: season
+          ? {
+              uuid: season.uuid ?? null,
+              lifecycleState: (season as any).lifecycleState ?? null,
+              crop: season.crop ? { uuid: season.crop.uuid ?? null, name: season.crop.name ?? null } : null,
+              variety: season.variety ? { name: season.variety.name ?? null } : null,
+              planting_date: season.startDate ?? null,
+              current_bbch: currentStage
+                ? {
+                    index: (currentStage as any).index ?? null,
+                    gsOrder: (currentStage as any).gsOrder ?? null,
+                    scale: (currentStage as any).scale ?? null,
+                  }
+                : null,
+            }
+          : null,
+        tasks: tasksSorted,
+        diagnostics: {
+          tasks_count: tasksSorted.length,
+          has_tasks_payload: Boolean(
+            (season as any)?.sprayingsV2 ||
+              (season as any)?.harvests ||
+              (season as any)?.landPreparations ||
+              (season as any)?.seedTreatmentTasks ||
+              (season as any)?.seedBoxTreatments ||
+              (season as any)?.waterManagementTasks ||
+              (season as any)?.scoutingTasks ||
+              (season as any)?.droneFlights ||
+              (season as any)?.soilSamplingTasks,
+          ),
+        },
+      };
+
+      return JSON.stringify(payload, null, 2);
+    },
+    [prefCityByFieldUuid],
+  );
+
+  const handleOpenAiOutput = useCallback(
+    (pair: FieldSeasonPair) => {
+      const fieldName = pair.field?.name ?? '';
+      const crop = pair.season?.crop?.name ?? '';
+      const title = [fieldName, crop].filter(Boolean).join(' / ') || fieldName || t('field.generic');
+      setAiOutputTitle(title);
+      setAiOutputText(buildAiExportText(pair));
+      setAiOutputCopied(false);
+      setAiOutputOpen(true);
+    },
+    [buildAiExportText, t],
+  );
+
+  const closeAiOutput = useCallback(() => {
+    setAiOutputOpen(false);
+    setAiOutputTitle('');
+    setAiOutputText('');
+    setAiOutputCopied(false);
+  }, []);
+
+  const copyAiOutput = useCallback(async () => {
+    if (!aiOutputText) return;
+    try {
+      await navigator.clipboard.writeText(aiOutputText);
+      setAiOutputCopied(true);
+      window.setTimeout(() => setAiOutputCopied(false), 1200);
+    } catch {
+      try {
+        const el = document.createElement('textarea');
+        el.value = aiOutputText;
+        el.style.position = 'fixed';
+        el.style.left = '-9999px';
+        document.body.appendChild(el);
+        el.focus();
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+        setAiOutputCopied(true);
+        window.setTimeout(() => setAiOutputCopied(false), 1200);
+      } catch {
+        // ignore
+      }
+    }
+  }, [aiOutputText]);
+
   useEffect(() => {
     if (!auth) return;
     paginatedFieldSeasonPairs.forEach(({ field }) => {
@@ -770,8 +1106,10 @@ export function FarmsPage() {
   };
 
   useEffect(() => {
-    fetchCombinedDataIfNeeded();
-  }, [fetchCombinedDataIfNeeded]);
+    // For large farm selections, require completeness and let the fetch layer retry
+    // until all chunks succeed (instead of silently accepting partial results).
+    fetchCombinedDataIfNeeded({ requireComplete: submittedFarms.length >= 20 });
+  }, [fetchCombinedDataIfNeeded, submittedFarms.length]);
 
   useEffect(() => {
     const existingIds = new Set(sortedFieldSeasonPairs.map(pair => pair.field.uuid));
@@ -1454,7 +1792,7 @@ export function FarmsPage() {
           className={`fields-action-btn${seasonView === 'active' ? ' fields-action-btn--accent' : ''}`}
           onClick={() => {
             setSeasonView('active');
-            fetchCombinedDataIfNeeded({ includeTasks: false, force: true });
+	            fetchCombinedDataIfNeeded({ includeTasks: false, force: true, requireComplete: submittedFarms.length >= 20 });
             setSelectedFieldIds(new Set());
           }}
         >
@@ -1753,24 +2091,25 @@ export function FarmsPage() {
         )}
         {paginatedFieldSeasonPairs.length > 0 && (
           <div className="table-container table-container--synced-scroll" ref={tableContainerRef} onScroll={handleTableScroll}>
-            <FieldsTable
-              fieldSeasonPairs={paginatedFieldSeasonPairs}
-              requestSort={requestSort}
-              sortConfig={sortConfig}
-              selectedFieldIds={selectedFieldIds}
-              onToggleFieldSelection={handleToggleFieldSelection}
-              isAllSelectedOnPage={isAllSelectedOnPage}
-              isSomeSelectedOnPage={isSomeSelectedOnPage}
-              onToggleSelectAll={handleToggleSelectAllOnPage}
-              noteImageByField={noteImageByField}
-              noteImageStateByField={noteImageStateByField}
-              noteImageErrorByField={noteImageErrorByField}
-              onOpenNoteList={handleOpenNoteList}
-              tableRef={tableRef}
-              locationByFieldUuid={prefCityByFieldUuid}
-            />
-          </div>
-        )}
+	            <FieldsTable
+	              fieldSeasonPairs={paginatedFieldSeasonPairs}
+	              requestSort={requestSort}
+	              sortConfig={sortConfig}
+	              selectedFieldIds={selectedFieldIds}
+	              onToggleFieldSelection={handleToggleFieldSelection}
+	              isAllSelectedOnPage={isAllSelectedOnPage}
+	              isSomeSelectedOnPage={isSomeSelectedOnPage}
+	              onToggleSelectAll={handleToggleSelectAllOnPage}
+	              noteImageByField={noteImageByField}
+	              noteImageStateByField={noteImageStateByField}
+	              noteImageErrorByField={noteImageErrorByField}
+	              onOpenNoteList={handleOpenNoteList}
+	              onOpenAiOutput={handleOpenAiOutput}
+	              tableRef={tableRef}
+	              locationByFieldUuid={prefCityByFieldUuid}
+	            />
+	          </div>
+	        )}
         {paginatedFieldSeasonPairs.length > 0 && showTableScrollbar && (
           <div className="table-scrollbar" ref={tableScrollbarRef} onScroll={handleScrollbarScroll}>
             <div className="table-scrollbar__content" style={{ width: tableScrollbarWidth }} />
@@ -1806,9 +2145,9 @@ export function FarmsPage() {
 	          </div>
 	        )}
       </div>
-      {noteModalField && (
-        <div className="field-notes-modal-backdrop" onClick={closeNoteModal}>
-          <div className="field-notes-modal" onClick={(event) => event.stopPropagation()}>
+	      {noteModalField && (
+	        <div className="field-notes-modal-backdrop" onClick={closeNoteModal}>
+	          <div className="field-notes-modal" onClick={(event) => event.stopPropagation()}>
 	            <div className="field-notes-modal-header">
 	              <div>
 	                <h3>{t('farms.notes_modal.title')}</h3>
@@ -1892,11 +2231,35 @@ export function FarmsPage() {
                 </div>
               )}
             </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+	          </div>
+	        </div>
+	      )}
+	      {aiOutputOpen && (
+	        <div className="field-notes-modal-backdrop" onClick={closeAiOutput}>
+	          <div className="field-notes-modal ai-output-modal" onClick={(event) => event.stopPropagation()}>
+	            <div className="field-notes-modal-header">
+	              <div>
+	                <h3>{t('farms.ai_output.modal.title')}</h3>
+	                <div className="field-notes-modal-sub">{aiOutputTitle}</div>
+	              </div>
+	              <button type="button" className="field-notes-modal-close" onClick={closeAiOutput}>
+	                {t('farms.ai_output.modal.close')}
+	              </button>
+	            </div>
+	            <div className="ai-output-actions">
+	              <div className="ai-output-hint">{t('farms.ai_output.modal.hint')}</div>
+	              <button type="button" className="fields-action-btn" onClick={copyAiOutput} disabled={!aiOutputText}>
+	                {aiOutputCopied ? t('farms.ai_output.modal.copied') : t('farms.ai_output.modal.copy')}
+	              </button>
+	            </div>
+	            <div className="field-notes-modal-body">
+	              <textarea className="ai-output-textarea" value={aiOutputText} readOnly />
+	            </div>
+	          </div>
+	        </div>
+	      )}
+	    </div>
+	  );
 }
 
 // =============================================================================

@@ -1,6 +1,7 @@
 # apps/api/main.py
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta, timezone
 import io
 import zipfile
@@ -14,6 +15,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 from pydantic import BaseModel
 
@@ -23,6 +25,8 @@ from schemas import (
     FourValues,
     FarmsReq,
     FieldsReq,
+    HfrFarmCandidatesReq,
+    HfrCsvFieldsReq,
     CombinedFieldDataTasksReq,
     CombinedFieldsReq,  # ★ 追加
     BiomassNdviReq,
@@ -50,6 +54,7 @@ from services.cache import get_last_response, get_by_operation, clear_cache, sav
 from graphql.queries import (
     FARMS_OVERVIEW,
     FIELDS_BY_FARM,
+    FIELDS_NAME_SCAN_BY_FARMS,
     COMBINED_DATA_BASE,
     COMBINED_FIELD_DATA_TASKS,
     COMBINED_DATA_INSIGHTS,
@@ -62,6 +67,7 @@ from graphql.queries import (
     WEATHER_HISTORIC_FORECAST_HOURLY,
     CROP_PROTECTION_TASK_CREATION_PRODUCTS,
     FIELD_DATA_LAYER_IMAGES,
+    HFR_CSV_FIELDS_DATA,
 )
 from graphql.payloads import make_payload
 
@@ -152,6 +158,13 @@ api_app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Large JSON payloads are common for /combined-fields. Enable gzip to reduce
+# transfer size and lower the chance of incomplete chunked responses.
+api_app.add_middleware(
+    GZipMiddleware,
+    minimum_size=int(os.getenv("GZIP_MINIMUM_SIZE", "1000")),
 )
 
 
@@ -385,6 +398,146 @@ async def fields(req: FieldsReq):
     return JSONResponse(out)
 
 
+@api_app.post("/farms/hfr-candidates")
+async def farms_hfr_candidates(req: HfrFarmCandidatesReq):
+    farm_uuids = list(dict.fromkeys(str(u) for u in (req.farm_uuids or []) if str(u)))
+    hard_max_farms = int(os.getenv("COMBINED_FIELDS_HARD_MAX_FARMS", "500"))
+    if len(farm_uuids) > hard_max_farms:
+        raise HTTPException(status_code=422, detail={
+            "reason": "too_many_farms",
+            "received_farms": len(farm_uuids),
+            "max_farms": hard_max_farms,
+        })
+
+    suffix = str(req.suffix).strip() if req.suffix is not None else "HFR"
+    pattern = re.compile(rf"{re.escape(suffix)}$", re.IGNORECASE) if suffix else None
+    scan_chunk_size = int(os.getenv("HFR_SCAN_CHUNK_SIZE", "50"))
+
+    matched_farm_uuid_set = set()
+    matched_farm_name_by_uuid: Dict[str, str] = {}
+    matched_field_count = 0
+    scanned_field_count = 0
+
+    for farm_chunk in _chunk_list(farm_uuids, scan_chunk_size):
+        payload = make_payload("FieldsNameScanByFarms", FIELDS_NAME_SCAN_BY_FARMS, {
+            "farmUuids": farm_chunk,
+        })
+        out = await call_graphql(payload, req.login_token, req.api_token)
+        fields = (((out.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
+        if not isinstance(fields, list):
+            continue
+        scanned_field_count += len(fields)
+
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            name = str(field.get("name") or "").strip()
+            if not name:
+                continue
+            if pattern is not None and not pattern.search(name):
+                continue
+            farm = field.get("farmV2") or {}
+            farm_uuid = str((farm or {}).get("uuid") or "")
+            if not farm_uuid:
+                continue
+            matched_field_count += 1
+            matched_farm_uuid_set.add(farm_uuid)
+            farm_name = str((farm or {}).get("name") or "")
+            if farm_name:
+                matched_farm_name_by_uuid[farm_uuid] = farm_name
+
+    matched_farm_uuids = [u for u in farm_uuids if u in matched_farm_uuid_set]
+    matched_farms = [{"uuid": u, "name": matched_farm_name_by_uuid.get(u) or ""} for u in matched_farm_uuids]
+
+    out: Dict[str, Any] = {
+        "ok": True,
+        "status": 200,
+        "source": "api",
+        "request": {
+            "url": "/farms/hfr-candidates",
+            "headers": {"Cookie": "LOGIN_TOKEN=***; DF_TOKEN=***"} if not req.includeTokens else {},
+            "payload": {
+                "farm_uuids": farm_uuids,
+                "suffix": suffix,
+                "chunkSize": scan_chunk_size,
+            },
+        },
+        "response": {
+            "data": {
+                "suffix": suffix,
+                "scannedFarmCount": len(farm_uuids),
+                "scannedFieldCount": scanned_field_count,
+                "matchedFarmCount": len(matched_farm_uuids),
+                "matchedFieldCount": matched_field_count,
+                "matchedFarmUuids": matched_farm_uuids,
+                "matchedFarms": matched_farms,
+            }
+        },
+    }
+    return JSONResponse(out)
+
+
+@api_app.post("/farms/hfr-csv-fields")
+async def farms_hfr_csv_fields(req: HfrCsvFieldsReq):
+    farm_uuids = list(dict.fromkeys(str(u) for u in (req.farm_uuids or []) if str(u)))
+    hard_max_farms = int(os.getenv("COMBINED_FIELDS_HARD_MAX_FARMS", "500"))
+    if len(farm_uuids) > hard_max_farms:
+        raise HTTPException(status_code=422, detail={
+            "reason": "too_many_farms",
+            "received_farms": len(farm_uuids),
+            "max_farms": hard_max_farms,
+        })
+
+    suffix = str(req.suffix).strip() if req.suffix is not None else "HFR"
+    pattern = re.compile(rf"{re.escape(suffix)}$", re.IGNORECASE) if suffix else None
+
+    payload = make_payload("HfrCsvFieldsData", HFR_CSV_FIELDS_DATA, {
+        "farmUuids": farm_uuids,
+        "languageCode": req.languageCode,
+        "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+    })
+    gql = await call_graphql(payload, req.login_token, req.api_token)
+    fields = (((gql.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
+
+    matched_fields: List[dict] = []
+    if isinstance(fields, list):
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            name = str(field.get("name") or "").strip()
+            if not name:
+                continue
+            if pattern is not None and not pattern.search(name):
+                continue
+            matched_fields.append(field)
+
+    out: Dict[str, Any] = {
+        "ok": True,
+        "status": 200,
+        "source": "api",
+        "request": {
+            "url": "/farms/hfr-csv-fields",
+            "headers": {"Cookie": "LOGIN_TOKEN=***; DF_TOKEN=***"} if not req.includeTokens else {},
+            "payload": {
+                "farm_uuids": farm_uuids,
+                "languageCode": req.languageCode,
+                "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+                "suffix": suffix,
+            },
+        },
+        "response": {
+            "data": {
+                "suffix": suffix,
+                "scannedFarmCount": len(farm_uuids),
+                "scannedFieldCount": len(fields) if isinstance(fields, list) else 0,
+                "matchedFieldCount": len(matched_fields),
+                "hfrFields": matched_fields,
+            }
+        },
+    }
+    return JSONResponse(out)
+
+
 @api_app.post("/field-data-layers")
 async def field_data_layers(req: FieldDataLayersReq):
     """
@@ -472,6 +625,273 @@ def merge_fields_data(base_data, insights_data, predictions_data, tasks_data):
 
 @api_app.post("/combined-fields")
 async def combined_fields(req: CombinedFieldsReq):
+    farms = list(dict.fromkeys(str(u) for u in (req.farm_uuids or []) if str(u)))
+    req = req.copy(update={"farm_uuids": farms})
+
+    sync_max_farms = int(os.getenv("COMBINED_FIELDS_SYNC_MAX_FARMS", "200"))
+    hard_max_farms = int(os.getenv("COMBINED_FIELDS_HARD_MAX_FARMS", "500"))
+    hard_max_farms = max(sync_max_farms, hard_max_farms)
+
+    if len(farms) > hard_max_farms:
+        raise HTTPException(status_code=422, detail={
+            "reason": "too_many_farms",
+            "received_farms": len(farms),
+            "max_farms": hard_max_farms,
+            "sync_max_farms": sync_max_farms,
+        })
+
+    # For large (but allowed) selections, force reliability mode:
+    # - non-stream
+    # - strict completeness
+    # - chunked, lightweight payload
+    if len(farms) > sync_max_farms:
+        forced_req = req.copy(update={
+            "stream": False,
+            "requireComplete": True,
+            "withBoundarySvg": False,
+            "includeSubResponses": False,
+        })
+        return await _combined_fields_chunked(forced_req)
+
+    # For very large farm selections, a single upstream GraphQL call (or a huge
+    # combined response with duplicated debug payloads) becomes unreliable.
+    # Chunk farms server-side and merge results to improve completeness.
+    if not req.stream:
+        threshold = int(os.getenv("COMBINED_FIELDS_SERVER_CHUNK_THRESHOLD", "20"))
+        if len(farms) >= threshold:
+            return await _combined_fields_chunked(req)
+
+    return await _combined_fields_single(req)
+
+
+def _chunk_list(items: List[str], size: int) -> List[List[str]]:
+    n = max(1, int(size))
+    return [items[i:i + n] for i in range(0, len(items), n)]
+
+
+def _merge_fields_v2_by_uuid(field_lists: List[List[dict]]) -> List[dict]:
+    merged: Dict[str, dict] = {}
+
+    def _merge_crop_seasons(prev_list: Any, next_list: Any) -> List[dict]:
+        out: Dict[str, dict] = {}
+        for cs in (prev_list or []) if isinstance(prev_list, list) else []:
+            if isinstance(cs, dict) and cs.get("uuid"):
+                out[str(cs["uuid"])] = dict(cs)
+        for cs in (next_list or []) if isinstance(next_list, list) else []:
+            if not isinstance(cs, dict) or not cs.get("uuid"):
+                continue
+            key = str(cs["uuid"])
+            prev = out.get(key, {})
+            merged_cs = {**prev, **cs}
+            out[key] = merged_cs
+        return list(out.values())
+
+    for fields in field_lists:
+        if not isinstance(fields, list):
+            continue
+        for f in fields:
+            if not isinstance(f, dict) or not f.get("uuid"):
+                continue
+            uuid = str(f["uuid"])
+            prev = merged.get(uuid, {})
+            combined = {**prev, **f}
+            if prev.get("cropSeasonsV2") is not None or f.get("cropSeasonsV2") is not None:
+                combined["cropSeasonsV2"] = _merge_crop_seasons(prev.get("cropSeasonsV2"), f.get("cropSeasonsV2"))
+            merged[uuid] = combined
+    return list(merged.values())
+
+
+def _extract_farm_uuids_from_fields(fields: Any) -> List[str]:
+    out: List[str] = []
+    seen: set = set()
+    if not isinstance(fields, list):
+        return out
+    for f in fields:
+        if not isinstance(f, dict):
+            continue
+        farm = f.get("farmV2") or f.get("farm") or {}
+        uuid = farm.get("uuid") if isinstance(farm, dict) else None
+        if not uuid:
+            continue
+        key = str(uuid)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+async def _run_combined_chunk_pass(
+    *,
+    req: CombinedFieldsReq,
+    farm_chunks: List[List[str]],
+    per_chunk_attempts: int,
+    backoff_base_sec: float,
+) -> tuple[List[dict], List[dict]]:
+    successes: List[dict] = []
+    failures: List[dict] = []
+
+    for farm_chunk in farm_chunks:
+        subreq = req.copy(update={
+            "farm_uuids": farm_chunk,
+            "stream": False,
+            # boundary payloads are large and frequently cause timeouts for big selections.
+            "withBoundarySvg": False,
+            # Sub responses duplicate field lists and can easily explode payload size.
+            "includeSubResponses": False,
+        })
+
+        last_error: Any = None
+        for attempt in range(1, per_chunk_attempts + 1):
+            try:
+                resp = await _combined_fields_single(subreq)
+                if not isinstance(resp, JSONResponse):
+                    last_error = {"reason": "unexpected_response_type", "type": resp.__class__.__name__}
+                else:
+                    status = int(getattr(resp, "status_code", 200))
+                    body = getattr(resp, "body", b"") or b""
+                    parsed = json.loads(body.decode("utf-8")) if body else {}
+                    if status < 400 and isinstance(parsed, dict) and parsed.get("ok", True) is not False:
+                        fields = (((parsed.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
+                        if isinstance(fields, list):
+                            successes.append(parsed)
+                            last_error = None
+                            break
+                    last_error = {"status": status, "body": parsed}
+            except HTTPException as exc:
+                last_error = {"status": exc.status_code, "detail": exc.detail}
+            except Exception as exc:  # pylint: disable=broad-except
+                last_error = {"status": 500, "detail": str(exc), "exception_type": exc.__class__.__name__}
+
+            if attempt < per_chunk_attempts:
+                await asyncio.sleep(min(5.0, backoff_base_sec * attempt))
+
+        if last_error is not None:
+            failures.append({"farmUuids": farm_chunk, "error": last_error})
+
+    return successes, failures
+
+
+async def _combined_fields_chunked(req: CombinedFieldsReq):
+    farms = req.farm_uuids or []
+    chunk_size = int(os.getenv("COMBINED_FIELDS_SERVER_CHUNK_SIZE", "1"))
+    per_chunk_attempts = int(os.getenv("COMBINED_FIELDS_SERVER_PER_CHUNK_ATTEMPTS", "3"))
+    backoff_base_sec = float(os.getenv("COMBINED_FIELDS_SERVER_RETRY_BACKOFF_SEC", "0.8"))
+
+    require_complete = bool(getattr(req, "requireComplete", False))
+    include_sub = bool(getattr(req, "includeSubResponses", False))
+
+    warmup_status = start_pref_city_warmup()
+
+    boundary_omitted = bool(getattr(req, "withBoundarySvg", False))
+    initial_chunks = _chunk_list(farms, chunk_size)
+    successes, failures = await _run_combined_chunk_pass(
+        req=req,
+        farm_chunks=initial_chunks,
+        per_chunk_attempts=per_chunk_attempts,
+        backoff_base_sec=backoff_base_sec,
+    )
+
+    retried_failed_farms: List[str] = []
+    if failures:
+        failed_farm_uuids: List[str] = []
+        seen_failed: set = set()
+        for f in failures:
+            for uuid in (f.get("farmUuids") or []):
+                key = str(uuid)
+                if key in seen_failed:
+                    continue
+                seen_failed.add(key)
+                failed_farm_uuids.append(key)
+
+        if failed_farm_uuids:
+            retried_failed_farms = failed_farm_uuids
+            retry_successes, retry_failures = await _run_combined_chunk_pass(
+                req=req,
+                farm_chunks=_chunk_list(failed_farm_uuids, chunk_size),
+                per_chunk_attempts=per_chunk_attempts,
+                backoff_base_sec=backoff_base_sec,
+            )
+            successes.extend(retry_successes)
+            failures = retry_failures
+
+    if not successes:
+        raise HTTPException(status_code=502, detail={
+            "reason": "combined_fields_all_chunks_failed",
+            "failed_chunks": failures[:50],
+        })
+
+    merged_fields = _merge_fields_v2_by_uuid([
+        (((s.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
+        for s in successes
+    ])
+    requested_farm_uuids = list(dict.fromkeys(str(u) for u in farms if u))
+    covered_farm_uuid_set = set(_extract_farm_uuids_from_fields(merged_fields))
+    missing_farm_uuids = [u for u in requested_farm_uuids if u not in covered_farm_uuid_set]
+
+    warnings: List[dict] = []
+    for s in successes:
+        for w in (s.get("warnings") or []):
+            if isinstance(w, dict):
+                warnings.append(w)
+    if boundary_omitted:
+        warnings.append({"reason": "boundary_omitted_for_large_request"})
+    if include_sub:
+        warnings.append({"reason": "sub_responses_omitted_for_large_request"})
+    if failures:
+        warnings.append({"reason": "chunked_fetch_partial", "failed_chunks": len(failures)})
+    if retried_failed_farms:
+        warnings.append({"reason": "failed_farms_retried", "retried_farm_uuids": retried_failed_farms[:100]})
+    if missing_farm_uuids:
+        warnings.append({"reason": "missing_farms_in_merged_response", "missing_farm_uuids": missing_farm_uuids[:100]})
+
+    # If the caller requires a complete dataset, fail explicitly with diagnostics.
+    if require_complete and (failures or missing_farm_uuids):
+        raise HTTPException(status_code=502, detail={
+            "reason": "combined_fields_incomplete",
+            "failed_chunks": failures[:50],
+            "partial_fields": len(merged_fields),
+            "missing_farm_uuids": missing_farm_uuids[:100],
+            "retried_failed_farm_uuids": retried_failed_farms[:100],
+        })
+
+    has_incomplete = len(failures) > 0 or len(missing_farm_uuids) > 0
+    out: Dict[str, Any] = {
+        "ok": not has_incomplete,
+        "status": 200 if not has_incomplete else 206,
+        "source": "api",
+        "request": {
+            "url": "/combined-fields",
+            "headers": {"Cookie": "LOGIN_TOKEN=***; DF_TOKEN=***"} if not req.includeTokens else {},
+            "payload": {
+                "farm_uuids": farms,
+                "languageCode": req.languageCode,
+                "countryCode": req.countryCode,
+                "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
+                "withBoundarySvg": False,
+                "includeTasks": getattr(req, "includeTasks", True),
+                "requireComplete": require_complete,
+                "chunked": True,
+                "chunkSize": chunk_size,
+            },
+        },
+        "diagnostics": {
+            "requestedFarmCount": len(requested_farm_uuids),
+            "coveredFarmCount": len(covered_farm_uuid_set),
+            "missingFarmUuids": missing_farm_uuids[:100],
+            "retriedFailedFarmUuids": retried_failed_farms[:100],
+        },
+        "response": {"data": {"fieldsV2": merged_fields}},
+        "warmup": warmup_status,
+        "locationEnrichmentPending": not warmup_status.get("loaded", False),
+    }
+    if warnings:
+        out["warnings"] = warnings
+
+    return JSONResponse(out)
+
+
+async def _combined_fields_single(req: CombinedFieldsReq):
     """
     選択した複数の Farm UUID に対し、CombinedFieldData を実行して返す。
     body 例:
@@ -986,8 +1406,13 @@ async def combined_fields(req: CombinedFieldsReq):
                 "fieldsV2": merged_fields
             }
         },
-        # デバッグ用に個別のレスポンスも格納
-        "_sub_responses": {
+        "warmup": warmup_status,
+        "locationEnrichmentPending": not warmup_status.get("loaded", False),
+    }
+    # NOTE: _sub_responses duplicates large field lists (base/tasks/risk etc) and
+    # can easily exceed browser/proxy limits for big selections.
+    if getattr(req, "includeSubResponses", False):
+        out["_sub_responses"] = {
             "base": base_res,
             "insights": insights_res,
             "predictions": predictions_res,
@@ -995,10 +1420,7 @@ async def combined_fields(req: CombinedFieldsReq):
             "tasks_sprayings": tasks_sprayings_res,
             "risk1": risk1_res,
             "risk2": risk2_res,
-        },
-        "warmup": warmup_status,
-        "locationEnrichmentPending": not warmup_status.get("loaded", False),
-    }
+        }
     if warnings:
         out["warnings"] = warnings
 

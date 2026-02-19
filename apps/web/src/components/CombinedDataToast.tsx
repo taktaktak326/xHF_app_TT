@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useData } from '../context/DataContext';
 import { useLanguage } from '../context/LanguageContext';
+import { useFarms } from '../context/FarmContext';
 import './CombinedDataToast.css';
 
 export const CombinedDataToast = () => {
@@ -12,6 +13,7 @@ export const CombinedDataToast = () => {
     combinedRetryCountdown,
     combinedFetchProgress,
   } = useData();
+  const { cancelCombinedFetch } = useFarms();
   const { t } = useLanguage();
 
   const visible = combinedInProgress || combinedLoading;
@@ -76,6 +78,13 @@ export const CombinedDataToast = () => {
     <div className="combined-toast">
       <div className="combined-toast__header">
         <span className="combined-toast__title">{t('toast.combined_loading')}</span>
+        <button
+          type="button"
+          className="combined-toast__cancel"
+          onClick={cancelCombinedFetch}
+        >
+          {t('farm_selector.cancel_loading')}
+        </button>
       </div>
       {retryInfo && (
         <div className="combined-toast__body">

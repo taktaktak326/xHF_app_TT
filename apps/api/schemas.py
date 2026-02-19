@@ -23,6 +23,22 @@ class FieldsReq(BaseModel):
     farm_uuid: str
     includeTokens: bool = False
 
+class HfrFarmCandidatesReq(BaseModel):
+    login_token: str
+    api_token: str
+    farm_uuids: List[str]
+    suffix: str = "HFR"
+    includeTokens: bool = False
+
+class HfrCsvFieldsReq(BaseModel):
+    login_token: str
+    api_token: str
+    farm_uuids: List[str]
+    languageCode: str = "ja"
+    cropSeasonLifeCycleStates: List[str] = ["ACTIVE", "PLANNED"]
+    suffix: str = "HFR"
+    includeTokens: bool = False
+
 # ---- /field-notes ----
 class FieldNotesReq(BaseModel):
     login_token: str
@@ -81,6 +97,8 @@ class CombinedFieldsReq(BaseModel):
     cropSeasonLifeCycleStates: List[str] = ["ACTIVE", "PLANNED"]
     withBoundarySvg: bool = True
     stream: bool = False
+    requireComplete: bool = False
+    includeSubResponses: bool = False
     includeTasks: bool = True
     # Task flags
     withHarvests: bool = True

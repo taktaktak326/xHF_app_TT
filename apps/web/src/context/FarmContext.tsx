@@ -17,6 +17,24 @@ const COMBINED_FIELDS_CACHE_TTL_MS = (() => {
   return sec * 1000;
 })();
 const COMBINED_FIELDS_CACHE_MAX_CHARS = 2_000_000; // ~2MB to reduce sessionStorage quota risk
+const COMBINED_FIELDS_REQUIRE_COMPLETE_THRESHOLD = (() => {
+  const raw = (import.meta as any)?.env?.VITE_COMBINED_FIELDS_REQUIRE_COMPLETE_THRESHOLD;
+  const n = raw !== undefined ? Number(raw) : 20;
+  if (!Number.isFinite(n) || n < 1) return 20;
+  return Math.floor(n);
+})();
+const COMBINED_FIELDS_SYNC_MAX_FARMS = (() => {
+  const raw = (import.meta as any)?.env?.VITE_COMBINED_FIELDS_SYNC_MAX_FARMS;
+  const n = raw !== undefined ? Number(raw) : 200;
+  if (!Number.isFinite(n) || n < 1) return 200;
+  return Math.floor(n);
+})();
+const COMBINED_FIELDS_HARD_MAX_FARMS = (() => {
+  const raw = (import.meta as any)?.env?.VITE_COMBINED_FIELDS_HARD_MAX_FARMS;
+  const n = raw !== undefined ? Number(raw) : 500;
+  if (!Number.isFinite(n) || n < 1) return 500;
+  return Math.floor(n);
+})();
 
 const fnv1a = (input: string): string => {
   let hash = 0x811c9dc5;
@@ -80,6 +98,13 @@ const isNetworkLikeCombinedFieldsError = (error: any): boolean => {
 
 const isRecoverableCombinedFieldsError = (error: any): boolean => {
   return isTimeoutLikeCombinedFieldsError(error) || isNetworkLikeCombinedFieldsError(error);
+};
+
+const isAbortLikeError = (error: any): boolean => {
+  if (!error) return false;
+  if (error?.name === 'AbortError') return true;
+  const msg = String(error?.message ?? '');
+  return /abort/i.test(msg);
 };
 
 const chunkInHalf = <T,>(arr: T[]): [T[], T[]] => {
@@ -215,9 +240,12 @@ async function fetchCombinedFieldsApi(params: {
   stream?: boolean;
   includeTasks?: boolean;
   withBoundarySvg?: boolean;
+  requireComplete?: boolean;
+  signal?: AbortSignal;
 }) {
   const stream = Boolean(params.stream);
   const includeTasks = params.includeTasks !== undefined ? Boolean(params.includeTasks) : undefined;
+  const requireComplete = params.requireComplete !== undefined ? Boolean(params.requireComplete) : undefined;
   const cacheEnabled = !stream && COMBINED_FIELDS_CACHE_TTL_MS > 0;
   const cacheKey = cacheEnabled
     ? (() => {
@@ -226,6 +254,7 @@ async function fetchCombinedFieldsApi(params: {
           farms,
           languageCode: params.languageCode,
           includeTasks,
+          requireComplete,
           countryCode: 'JP',
         });
         return `${COMBINED_FIELDS_CACHE_KEY_PREFIX}:${fnv1a(keyPayload)}`;
@@ -245,6 +274,9 @@ async function fetchCombinedFieldsApi(params: {
     languageCode: params.languageCode,
     countryCode: 'JP',
   };
+  if (requireComplete !== undefined) {
+    requestBody.requireComplete = requireComplete;
+  }
   if (params.includeTasks !== undefined) {
     requestBody.includeTasks = params.includeTasks;
   }
@@ -257,12 +289,22 @@ async function fetchCombinedFieldsApi(params: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(requestBody),
+    signal: params.signal,
   });
 
   if (!res.ok) {
     const text = await res.text();
     let data: any = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+    const detailObj = data?.detail && typeof data.detail === 'object' ? data.detail : null;
+    if (detailObj?.reason === 'too_many_farms') {
+      const max = Number(detailObj.max_farms ?? detailObj.maxFarms ?? COMBINED_FIELDS_HARD_MAX_FARMS);
+      const count = Number(detailObj.received_farms ?? detailObj.receivedFarms ?? params.farmUuids.length);
+      const error = new Error(`combined-fields: ${tr('error.too_many_farms', { count, max })}`);
+      (error as any).status = res.status;
+      (error as any).responseBody = data ?? text;
+      throw error;
+    }
     const rawDetail = (data && (data.error || data.message || data.detail)) || `HTTP ${res.status}`;
     const detail =
       typeof rawDetail === 'string'
@@ -284,7 +326,8 @@ async function fetchCombinedFieldsApi(params: {
     } catch {
       parsed = {};
     }
-    if (cacheKey) {
+    const cacheable = parsed && parsed.ok !== false && Number(parsed.status ?? 200) < 300;
+    if (cacheKey && cacheable) {
       setSessionJson(cacheKey, { ts: Date.now(), value: parsed });
     }
     return parsed;
@@ -389,11 +432,13 @@ interface FarmContextType {
   selectedFarms: string[];
   setSelectedFarms: (farms: string[]) => void;
   submittedFarms: string[];
+  replaceSelectedAndSubmittedFarms: (farms: string[]) => void;
   submitSelectedFarms: (opts?: { mode?: 'replace' | 'append' }) => void;
   clearSelectedFarms: () => void;
   clearCombinedCache: () => void;
+  cancelCombinedFetch: () => void;
   // データ取得ロジックを追加
-  fetchCombinedDataIfNeeded: (opts?: { force?: boolean; includeTasks?: boolean }) => void;
+  fetchCombinedDataIfNeeded: (opts?: { force?: boolean; includeTasks?: boolean; requireComplete?: boolean }) => void;
 }
 
 const FarmContext = createContext<FarmContextType | undefined>(undefined);
@@ -436,6 +481,21 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
   }, [submittedFarms]);
   const requestIdRef = useRef(0);
   const combinedFetchInFlightRef = useRef<Map<string, Promise<void>>>(new Map());
+  const combinedAbortControllerRef = useRef<AbortController | null>(null);
+
+  const cancelCombinedFetch = useCallback(() => {
+    requestIdRef.current += 1;
+    combinedFetchInFlightRef.current.clear();
+    if (combinedAbortControllerRef.current) {
+      combinedAbortControllerRef.current.abort();
+      combinedAbortControllerRef.current = null;
+    }
+    setCombinedLoading(false);
+    setCombinedInProgress(false);
+    setCombinedFetchAttempt(0);
+    setCombinedRetryCountdown(null);
+    setCombinedFetchProgress(null);
+  }, [setCombinedLoading, setCombinedInProgress, setCombinedFetchAttempt, setCombinedRetryCountdown, setCombinedFetchProgress]);
 
   const submitSelectedFarms = (opts?: { mode?: 'replace' | 'append' }) => {
     const mode = opts?.mode ?? 'replace';
@@ -463,7 +523,20 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
     setSelectedFarms(next);
     setSubmittedFarms(next);
   };
+  const replaceSelectedAndSubmittedFarms = (farms: string[]) => {
+    const seen = new Set<string>();
+    const next = farms
+      .map((f) => String(f || '').trim())
+      .filter((f) => {
+        if (!f || seen.has(f)) return false;
+        seen.add(f);
+        return true;
+      });
+    setSelectedFarms(next);
+    setSubmittedFarms(next);
+  };
   const clearSelectedFarms = () => {
+    cancelCombinedFetch();
     setSelectedFarms([]);
     setSubmittedFarms([]);
     // データもクリアする
@@ -540,22 +613,40 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [combinedOut]);
 
-  const fetchCombinedDataIfNeeded = useCallback(async (opts?: { force?: boolean; includeTasks?: boolean }) => {
+  const fetchCombinedDataIfNeeded = useCallback(async (opts?: { force?: boolean; includeTasks?: boolean; requireComplete?: boolean }) => {
     if (!auth) return;
     const force = opts?.force ?? false;
     const includeTasks = opts?.includeTasks ?? false;
+    const hardMaxFarms = Math.max(COMBINED_FIELDS_SYNC_MAX_FARMS, COMBINED_FIELDS_HARD_MAX_FARMS);
+    if (submittedFarms.length > hardMaxFarms) {
+      setCombinedErr(tr('error.too_many_farms', { count: submittedFarms.length, max: hardMaxFarms }));
+      setCombinedLoading(false);
+      setCombinedInProgress(false);
+      setCombinedFetchAttempt(0);
+      setCombinedFetchMaxAttempts(1);
+      setCombinedRetryCountdown(null);
+      setCombinedFetchProgress(null);
+      return;
+    }
+    const forceReliabilityMode = submittedFarms.length > COMBINED_FIELDS_SYNC_MAX_FARMS;
+    const requireComplete = forceReliabilityMode
+      ? true
+      : (opts?.requireComplete ?? (submittedFarms.length >= COMBINED_FIELDS_REQUIRE_COMPLETE_THRESHOLD));
 
     // Same session: avoid firing the same request twice (e.g. React StrictMode effect replay).
-    const requestKey = `${language}:${includeTasks ? '1' : '0'}:${[...submittedFarms].sort().join(',')}`;
+    const requestKey = `${language}:${includeTasks ? '1' : '0'}:${requireComplete ? '1' : '0'}:${[...submittedFarms].sort().join(',')}`;
     if (!force) {
       const pending = combinedFetchInFlightRef.current.get(requestKey);
       if (pending) return pending;
     }
 
     const run = async () => {
-	      // Prefer reliability: stream for small selections only.
+      const runAbortController = new AbortController();
+      combinedAbortControllerRef.current = runAbortController;
+      try {
+	      // For strict completeness mode, avoid streaming to prevent partial-success paths.
 	      const STREAM_FARM_LIMIT = 5;
-	      const USE_STREAM = submittedFarms.length <= STREAM_FARM_LIMIT;
+	      const USE_STREAM = !requireComplete && submittedFarms.length <= STREAM_FARM_LIMIT;
       const LAUNCH_BACKGROUND_FULL_FETCH = true;
       requestIdRef.current += 1;
       const requestId = requestIdRef.current;
@@ -624,7 +715,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
     }
 
     // データが古い、または無ければ、APIを呼び出す
-    const MAX_ATTEMPTS = 2;
+    const MAX_ATTEMPTS = requireComplete ? 3 : 2;
     const RETRY_DELAY_SECONDS = 5;
 
     setCombinedFetchMaxAttempts(MAX_ATTEMPTS);
@@ -704,15 +795,18 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	      total = queue.length;
 	      updateChunkedProgress();
 
-	      const takeRpsSlot = async () => {
-	        if (COMBINED_FIELDS_MAX_RPS <= 0) return;
+		      const effectiveMaxRps = requireComplete ? Math.min(COMBINED_FIELDS_MAX_RPS, 2) : COMBINED_FIELDS_MAX_RPS;
+		      const effectiveConcurrency = requireComplete ? Math.min(COMBINED_FIELDS_CONCURRENCY, 2) : COMBINED_FIELDS_CONCURRENCY;
+
+		      const takeRpsSlot = async () => {
+		        if (effectiveMaxRps <= 0) return;
 	        // Simple sliding-window limiter shared across concurrent workers.
 	        while (true) {
 	          const now = Date.now();
 	          while (recentStarts.length > 0 && now - recentStarts[0] >= rpsWindowMs) {
 	            recentStarts.shift();
 	          }
-	          if (recentStarts.length < COMBINED_FIELDS_MAX_RPS) {
+	          if (recentStarts.length < effectiveMaxRps) {
 	            recentStarts.push(now);
 	            if (COMBINED_FIELDS_THROTTLE_MS > 0) {
 	              await sleep(COMBINED_FIELDS_THROTTLE_MS);
@@ -752,15 +846,17 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	          if (!isActiveRequest()) break;
 	          await takeRpsSlot();
 	          try {
-	            got = await fetchCombinedFieldsApi({
-	              auth,
-	              farmUuids: item.farmUuids,
-	              languageCode: language,
-	              stream: false,
-	              includeTasks: effectiveIncludeTasks,
-	              // Boundary SVG is huge; omit it for chunked fallback to maximize reliability.
-	              withBoundarySvg: false,
-	            });
+		            got = await fetchCombinedFieldsApi({
+		              auth,
+		              farmUuids: item.farmUuids,
+		              languageCode: language,
+		              stream: false,
+		              includeTasks: effectiveIncludeTasks,
+		              requireComplete,
+		              // Boundary SVG is huge; omit it for chunked fallback to maximize reliability.
+		              withBoundarySvg: false,
+                  signal: runAbortController.signal,
+		            });
 	            if (got?.response?.data?.fieldsV2) break;
 	            lastErr = new Error('combined-fields: empty response');
 	          } catch (err: any) {
@@ -817,7 +913,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 
 	      const inFlight = new Set<Promise<void>>();
 	      while ((queue.length > 0 || inFlight.size > 0) && isActiveRequest()) {
-	        while (queue.length > 0 && inFlight.size < COMBINED_FIELDS_CONCURRENCY && isActiveRequest()) {
+	        while (queue.length > 0 && inFlight.size < effectiveConcurrency && isActiveRequest()) {
 	          const item = queue.shift()!;
 	          let p: Promise<void>;
 	          p = runOne(item).finally(() => {
@@ -843,6 +939,10 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
         });
       }
 
+      if (requireComplete && failures.length > 0) {
+        return { ok: false, applied: false, failures };
+      }
+
       const first = successes[0];
       setCombinedOut({
         ok: failures.length === 0,
@@ -857,6 +957,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
             farm_uuids: submittedFarms,
             languageCode: language,
             includeTasks: fallbackIncludeTasks,
+            requireComplete,
             chunkedFallback: true,
           },
         },
@@ -869,7 +970,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
       try {
         // For large farm selections, skip streaming and directly use chunked fallback.
 	        if (!USE_STREAM && submittedFarms.length > 1) {
-	          const fallbackRes = await tryChunkedFallback(includeTasks);
+	          const fallbackRes: any = await tryChunkedFallback(includeTasks);
 	          if (fallbackRes.applied) {
 	            lastFarmUuidsRef.current = [...submittedFarms].sort();
 	            lastRefreshRef.current = Date.now();
@@ -877,21 +978,28 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	            success = true;
 	            break;
 	          }
+	          if (requireComplete && fallbackRes?.failures?.length) {
+	            const e: any = new Error('combined-fields: chunked_fallback_incomplete');
+	            e.failures = fallbackRes.failures;
+	            throw e;
+	          }
 	          throw new Error('combined-fields: chunked_fallback_failed');
 	        }
         if (USE_STREAM) {
           // 背景で非ストリームを並列起動しつつ、stream で即反映
           const fullFetchPromise = LAUNCH_BACKGROUND_FULL_FETCH
-            ? fetchCombinedFieldsApi({
-                auth,
-                farmUuids: submittedFarms,
-                languageCode: language,
-                stream: false,
-                includeTasks,
-              }).catch((e) => {
-                console.warn('[FarmContext] background full fetch failed', e);
-                return null;
-              })
+	            ? fetchCombinedFieldsApi({
+	                auth,
+	                farmUuids: submittedFarms,
+	                languageCode: language,
+	                stream: false,
+	                includeTasks,
+	                requireComplete,
+                  signal: runAbortController.signal,
+	              }).catch((e) => {
+	                console.warn('[FarmContext] background full fetch failed', e);
+	                return null;
+	              })
             : null;
 
           // streaming で逐次反映（base を最優先で即反映）
@@ -965,13 +1073,14 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
             setCombinedOut(partial as any);
           };
 
-          const streamPromise = fetchCombinedFieldsApi({
-            auth,
-            farmUuids: submittedFarms,
-            languageCode: language,
-            stream: true,
-            includeTasks,
-            onChunk: (chunk) => {
+	          const streamPromise = fetchCombinedFieldsApi({
+	            auth,
+	            farmUuids: submittedFarms,
+	            languageCode: language,
+	            stream: true,
+	            includeTasks,
+              signal: runAbortController.signal,
+	            onChunk: (chunk) => {
               if (!isActiveRequest()) return;
               const inferLabel = (data: any): CombinedChunk["type"] | "insights" | "predictions" | "tasks" | "tasks_sprayings" | "risk1" | "risk2" | null => {
                 const op = data?.request?.payload?.operationName;
@@ -1081,14 +1190,21 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
           }
         } else {
           // 非ストリームの一括取得
-          const res = await fetchCombinedFieldsApi({
-            auth,
-            farmUuids: submittedFarms,
-            languageCode: language,
-            stream: false,
-            includeTasks,
-          });
+	          const res = await fetchCombinedFieldsApi({
+	            auth,
+	            farmUuids: submittedFarms,
+	            languageCode: language,
+	            stream: false,
+	            includeTasks,
+	            requireComplete,
+              signal: runAbortController.signal,
+	          });
           if (!isActiveRequest()) return;
+          if (requireComplete && (res?.ok === false || Number(res?.status ?? 200) >= 300)) {
+            const e: any = new Error('combined-fields: incomplete_response');
+            e.responseBody = res;
+            throw e;
+          }
           if (!res || !res.response?.data?.fieldsV2) {
             throw new Error('combined-fields: empty response');
           }
@@ -1102,13 +1218,17 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
         lastRefreshRef.current = Date.now();
         success = true;
         break;
-      } catch (error: any) {
-        lastError = error;
-        console.warn(`[FarmContext] combined-fields attempt ${attempt} failed`, error);
+	      } catch (error: any) {
+	        if (isAbortLikeError(error)) {
+	          return;
+	        }
+	        lastError = error;
+	        console.warn(`[FarmContext] combined-fields attempt ${attempt} failed`, error);
         if (error?.responseBody) {
           // Surface diagnostics payload from API (includes graphql error summary)
           console.warn("[FarmContext] combined-fields responseBody", error.responseBody);
         }
+        const status = Number(error?.status ?? 0);
 
         // Fallback: if large payload causes timeout, split farms and fetch in smaller batches.
         if (isRecoverableCombinedFieldsError(error) && submittedFarms.length > 1) {
@@ -1125,6 +1245,11 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	            console.warn('[FarmContext] chunked fallback failed', e);
 	          }
 	        }
+
+        // 4xx are usually non-recoverable request issues (e.g. too many farms).
+        if (status >= 400 && status < 500 && !isRecoverableCombinedFieldsError(error)) {
+          break;
+        }
 
         if (attempt >= MAX_ATTEMPTS) {
           break;
@@ -1160,10 +1285,15 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 
     setCombinedLoading(false);
     setCombinedInProgress(false);
-    setCombinedFetchAttempt(0);
-    setCombinedRetryCountdown(null);
-    setCombinedFetchProgress(null);
-    };
+	    setCombinedFetchAttempt(0);
+	    setCombinedRetryCountdown(null);
+	    setCombinedFetchProgress(null);
+      } finally {
+        if (combinedAbortControllerRef.current === runAbortController) {
+          combinedAbortControllerRef.current = null;
+        }
+      }
+	    };
 
     const promise = run();
     if (!force) {
@@ -1216,9 +1346,11 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
       selectedFarms,
       setSelectedFarms,
       submittedFarms,
+      replaceSelectedAndSubmittedFarms,
       submitSelectedFarms,
       clearSelectedFarms,
       clearCombinedCache,
+      cancelCombinedFetch,
       fetchCombinedDataIfNeeded,
     }}>
       {children}

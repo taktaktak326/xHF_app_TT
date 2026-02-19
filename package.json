@@ -7,6 +7,7 @@
   "scripts": {
     "build:web": "npm run build --workspace web",
     "lint:web": "npm run lint --workspace web",
+    "lint:web:strict": "npm run lint:strict --workspace web",
     "dev:web": "npm run dev --workspace web"
   }
 }

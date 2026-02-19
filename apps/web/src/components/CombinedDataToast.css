@@ -1,12 +1,13 @@
 .combined-toast {
   position: fixed;
-  right: 1.5rem;
-  bottom: 1.5rem;
-  width: min(320px, 90vw);
+  top: 50%;
+  left: 50%;
+  width: min(560px, 94vw);
+  transform: translate(-50%, -50%);
   background: rgba(24, 26, 32, 0.95);
   border: 1px solid rgba(121, 134, 255, 0.35);
-  border-radius: 12px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
   color: #e0e7ff;
   z-index: 2500;
   overflow: hidden;
@@ -18,31 +19,45 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1rem 0.5rem;
+  padding: 1rem 1.2rem 0.8rem;
 }
 
 .combined-toast__title {
-  font-size: 0.95rem;
+  font-size: 1.12rem;
   font-weight: 600;
 }
 
+.combined-toast__cancel {
+  border: 1px solid rgba(255, 164, 164, 0.45);
+  background: rgba(80, 31, 31, 0.55);
+  color: #ffd7d7;
+  border-radius: 999px;
+  font-size: 0.86rem;
+  padding: 0.38rem 0.85rem;
+  cursor: pointer;
+}
+
+.combined-toast__cancel:hover {
+  background: rgba(113, 40, 40, 0.7);
+}
+
 .combined-toast__body {
-  padding: 0.5rem 1rem 0.75rem;
-  font-size: 0.85rem;
-  line-height: 1.4;
+  padding: 0.7rem 1.2rem 0.95rem;
+  font-size: 0.98rem;
+  line-height: 1.5;
 }
 
 .combined-toast__body p {
-  margin: 0.1rem 0;
+  margin: 0.2rem 0;
 }
 
 .combined-toast__progress {
   position: relative;
-  height: 10px;
+  height: 13px;
   background: rgba(255, 255, 255, 0.12);
   border-radius: 999px;
   overflow: hidden;
-  margin-top: 0.4rem;
+  margin-top: 0.55rem;
 }
 
 .combined-toast__progress-bar {
@@ -53,28 +68,29 @@
 
 .combined-toast__progress-label {
   display: block;
-  margin-top: 0.35rem;
-  font-size: 0.75rem;
+  margin-top: 0.45rem;
+  font-size: 0.9rem;
   color: rgba(224, 231, 255, 0.85);
 }
 
 .combined-toast__details {
-  margin: 0.5rem 0 0;
-  padding-left: 1.2rem;
+  margin: 0.7rem 0 0;
+  padding-left: 1.35rem;
   color: rgba(224, 231, 255, 0.9);
+  font-size: 0.95rem;
 }
 
 .combined-toast__details li {
-  margin: 0.15rem 0;
+  margin: 0.22rem 0;
 }
 
 @keyframes combined-toast-fade-in {
   from {
-    transform: translateY(16px);
+    transform: translate(-50%, calc(-50% + 16px));
     opacity: 0;
   }
   to {
-    transform: translateY(0);
+    transform: translate(-50%, -50%);
     opacity: 1;
   }
 }

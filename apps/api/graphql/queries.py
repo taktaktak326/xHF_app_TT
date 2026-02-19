@@ -24,6 +24,16 @@ query FieldsByFarm($farmUuid: UUID!) {
 }
 """
 
+FIELDS_NAME_SCAN_BY_FARMS = """
+query FieldsNameScanByFarms($farmUuids: [UUID!]!) {
+  fieldsV2(farmUuids: $farmUuids) {
+    uuid
+    name
+    farmV2 { uuid name }
+  }
+}
+"""
+
 # 既存の FARMS_OVERVIEW / FIELDS_BY_FARM の下あたりに追記
 
 COMBINED_DATA_BASE = """
@@ -210,6 +220,49 @@ query FieldDataLayerImages($fieldUuid: UUID!, $types: [FieldDataLayerType!]) {
         imageUrl
         vectorTilesUrl
         vectorTilesStyleUrl
+      }
+    }
+  }
+}
+"""
+
+HFR_CSV_FIELDS_DATA = """
+query HfrCsvFieldsData(
+  $farmUuids: [UUID!]!,
+  $languageCode: String!,
+  $cropSeasonLifeCycleStates: [LifecycleState]!
+) {
+  fieldsV2(farmUuids: $farmUuids) {
+    uuid
+    name
+    farmV2 {
+      uuid
+      name
+      owner { firstName lastName email }
+    }
+    cropSeasonsV2(lifecycleState: $cropSeasonLifeCycleStates) {
+      uuid
+      startDate
+      crop(languageCode: $languageCode) { uuid }
+      variety(languageCode: $languageCode) { name }
+      cropEstablishmentDetails { seedBoxPerArea seedWeightPerSeedBox }
+      cropEstablishments {
+        note
+        dosedMap {
+          recipeV2 {
+            totalApplication
+            unit
+          }
+        }
+      }
+      sprayingsV2 {
+        plannedDate
+        note
+        dosedMap {
+          applicationType
+          creationFlowHint
+          recipeV2 { uuid name type }
+        }
       }
     }
   }
