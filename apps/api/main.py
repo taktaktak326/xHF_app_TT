@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+import math
 from datetime import datetime, timedelta, timezone
 import io
 import zipfile
@@ -126,6 +127,10 @@ IMAGE_CACHE_TTL_SEC = int(os.getenv("IMAGE_CACHE_TTL", "300"))
 _image_cache: Dict[str, Dict[str, Any]] = {}
 _image_cache_lock = threading.Lock()
 
+DASHBOARD_CACHE_TTL_SEC = int(os.getenv("DASHBOARD_CACHE_TTL", "300"))
+_dashboard_cache: Dict[str, Dict[str, Any]] = {}
+_dashboard_cache_lock = threading.Lock()
+
 
 def _image_cache_get(url: str):
     now = time.time()
@@ -149,7 +154,318 @@ def _image_cache_set(url: str, content: bytes, content_type: str):
         }
 
 
+def _dashboard_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    now = time.time()
+    with _dashboard_cache_lock:
+        entry = _dashboard_cache.get(key)
+        if not entry:
+            return None
+        if entry.get("expires_at", 0) < now:
+            _dashboard_cache.pop(key, None)
+            return None
+        return entry
+
+
+def _dashboard_cache_set(key: str, data: Dict[str, Any]):
+    with _dashboard_cache_lock:
+        _dashboard_cache[key] = {
+            "data": data,
+            "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+            "expires_at": time.time() + DASHBOARD_CACHE_TTL_SEC,
+        }
+
+
+def _dashboard_rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round((numerator * 100.0) / denominator, 1)
+
+
+def _dashboard_status(rate: float) -> str:
+    if rate < 15:
+        return "good"
+    if rate < 30:
+        return "warn"
+    return "bad"
+
+
+def _dashboard_trend(rate: float, index: int) -> str:
+    metric = (int(rate) + index * 7) % 9
+    if metric >= 6:
+        return "worsening"
+    if metric <= 2:
+        return "improving"
+    return "stable"
+
+
+def _build_dashboard_dataset() -> Dict[str, Any]:
+    names = [
+        "佐藤農園",
+        "田中アグリ",
+        "高橋ファーム",
+        "伊藤ライス",
+        "渡辺農場",
+        "中村アグロ",
+        "小林グリーン",
+        "加藤ファーム",
+        "吉田農園",
+        "山本アグリ",
+        "山田農産",
+        "斎藤ファーム",
+    ]
+    task_type_names = ["土壌分析", "播種", "施肥", "防除", "生育調査", "収穫"]
+    as_of = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds")
+
+    farmers: List[Dict[str, Any]] = []
+    farmer_details: Dict[str, Dict[str, Any]] = {}
+
+    for i, name in enumerate(names):
+        farmer_id = f"farmer-{i + 1}"
+        field_count = 18 + ((i * 5) % 32)
+        due_task_count = field_count * 5 + ((i * 13) % 40)
+        completion_seed = 58 + ((i * 9) % 35)
+        completed_count = round((due_task_count * completion_seed) / 100)
+        overdue_count = max(0, due_task_count - completed_count)
+        due_today_count = 6 + ((i * 3) % 16)
+        upcoming_3days_count = 10 + ((i * 7) % 24)
+        future_task_count = 70 + ((i * 23) % 140)
+        delay_rate = _dashboard_rate(overdue_count, due_task_count)
+        completion_rate = _dashboard_rate(completed_count, due_task_count)
+
+        farmer_row = {
+            "id": farmer_id,
+            "name": name,
+            "field_count": field_count,
+            "due_task_count": due_task_count,
+            "completed_count": completed_count,
+            "overdue_count": overdue_count,
+            "due_today_count": due_today_count,
+            "upcoming_3days_count": upcoming_3days_count,
+            "future_task_count": future_task_count,
+            "delay_rate": delay_rate,
+            "completion_rate": completion_rate,
+            "delay_status": _dashboard_status(delay_rate),
+            "trend_direction": _dashboard_trend(delay_rate, i),
+        }
+        farmers.append(farmer_row)
+
+        task_type_rows: List[Dict[str, Any]] = []
+        for ti, task_name in enumerate(task_type_names):
+            due_count = max(8, round((due_task_count * (12 + ti * 2)) / 100))
+            type_completed = min(due_count, round(due_count * (0.55 + ((ti * 7) % 21) / 100)))
+            type_overdue = max(0, due_count - type_completed)
+            pending_count = round((future_task_count * (10 + ti * 4)) / 100)
+            task_type_rows.append(
+                {
+                    "name": task_name,
+                    "display_order": ti + 1,
+                    "due_count": due_count,
+                    "completed_count": type_completed,
+                    "overdue_count": type_overdue,
+                    "pending_count": pending_count,
+                    "completion_rate": _dashboard_rate(type_completed, due_count),
+                    "delay_rate": _dashboard_rate(type_overdue, due_count),
+                }
+            )
+
+        farmer_details[farmer_id] = {
+            "id": farmer_id,
+            "name": name,
+            "field_count": field_count,
+            "summary": {
+                "due": due_task_count,
+                "completed": completed_count,
+                "overdue": overdue_count,
+                "pending": future_task_count,
+                "delay_rate": delay_rate,
+                "completion_rate": completion_rate,
+            },
+            "task_types": task_type_rows,
+        }
+
+    due_count = sum(f["due_task_count"] for f in farmers)
+    completed_count = sum(f["completed_count"] for f in farmers)
+    overdue_count = sum(f["overdue_count"] for f in farmers)
+    due_today_count = sum(f["due_today_count"] for f in farmers)
+    upcoming_3days_count = sum(f["upcoming_3days_count"] for f in farmers)
+    future_task_count = sum(f["future_task_count"] for f in farmers)
+
+    kpi = {
+        "completion_rate": _dashboard_rate(completed_count, due_count),
+        "completed_count": completed_count,
+        "due_count": due_count,
+        "overdue_count": overdue_count,
+        "delay_rate": _dashboard_rate(overdue_count, due_count),
+        "due_today_count": due_today_count,
+        "upcoming_3days_count": upcoming_3days_count,
+        "future_count": future_task_count,
+        "total_task_count": due_count + future_task_count,
+        "as_of": as_of,
+    }
+
+    task_types: List[Dict[str, Any]] = []
+    for ti, task_name in enumerate(task_type_names):
+        ratio = 0.1 + ti * 0.03
+        type_due = sum(round(f["due_task_count"] * ratio) for f in farmers)
+        type_completed = sum(round(f["completed_count"] * ratio) for f in farmers)
+        type_overdue = max(0, type_due - type_completed)
+        type_pending = sum(round(f["future_task_count"] * ratio) for f in farmers)
+        task_types.append(
+            {
+                "task_type_name": task_name,
+                "display_order": ti + 1,
+                "due_count": type_due,
+                "completed_count": type_completed,
+                "overdue_count": type_overdue,
+                "pending_count": type_pending,
+                "completion_rate": _dashboard_rate(type_completed, type_due),
+                "delay_rate": _dashboard_rate(type_overdue, type_due),
+            }
+        )
+
+    buckets = [
+        {"bucket": "0-5%", "min": 0, "max": 5, "color": "#22c55e"},
+        {"bucket": "5-10%", "min": 5, "max": 10, "color": "#22c55e"},
+        {"bucket": "10-15%", "min": 10, "max": 15, "color": "#22c55e"},
+        {"bucket": "15-20%", "min": 15, "max": 20, "color": "#f59e0b"},
+        {"bucket": "20-25%", "min": 20, "max": 25, "color": "#f59e0b"},
+        {"bucket": "25-30%", "min": 25, "max": 30, "color": "#f59e0b"},
+        {"bucket": "30%+", "min": 30, "max": 999, "color": "#ef4444"},
+    ]
+    distribution: List[Dict[str, Any]] = []
+    for bucket in buckets:
+        count = sum(1 for f in farmers if bucket["min"] <= f["delay_rate"] < bucket["max"])
+        distribution.append(
+            {
+                "bucket": bucket["bucket"],
+                "count": count,
+                "color": bucket["color"],
+            }
+        )
+
+    base_completion = _dashboard_rate(completed_count, due_count)
+    trend: List[Dict[str, Any]] = []
+    for idx in range(30):
+        day = datetime.now(timezone(timedelta(hours=9))) - timedelta(days=29 - idx)
+        drift = (math.sin((idx + 2) / 4) * 3) + (math.cos((idx + 4) / 5) * 1.4)
+        completion_rate = max(40, min(98, round(base_completion + drift, 1)))
+        delay_rate = round(100 - completion_rate, 1)
+        trend.append(
+            {
+                "date": f"{day.month}/{day.day}",
+                "completion_rate": completion_rate,
+                "delay_rate": delay_rate,
+            }
+        )
+
+    return {
+        "as_of": as_of,
+        "kpi": kpi,
+        "farmers": farmers,
+        "farmer_details": farmer_details,
+        "task_types": task_types,
+        "distribution": distribution,
+        "trend": trend,
+    }
+
+
+def _get_dashboard_dataset(force_refresh: bool = False) -> Dict[str, Any]:
+    cache_key = "dashboard:v1"
+    if not force_refresh:
+        cached = _dashboard_cache_get(cache_key)
+        if cached:
+            return {
+                "source": "cache",
+                "cached_at": cached.get("cached_at"),
+                "data": cached["data"],
+            }
+
+    data = _build_dashboard_dataset()
+    _dashboard_cache_set(cache_key, data)
+    fresh = _dashboard_cache_get(cache_key)
+    return {
+        "source": "api",
+        "cached_at": fresh.get("cached_at") if fresh else None,
+        "data": data,
+    }
+
+
 api_app = FastAPI(title="xhf-app: Gigya login -> Xarvio API token")
+
+
+@api_app.get("/dashboard/kpi")
+async def dashboard_kpi(refresh: bool = False):
+    result = _get_dashboard_dataset(force_refresh=refresh)
+    return {
+        **result["data"]["kpi"],
+        "source": result["source"],
+        "cached_at": result["cached_at"],
+    }
+
+
+@api_app.get("/dashboard/farmers")
+async def dashboard_farmers(refresh: bool = False):
+    result = _get_dashboard_dataset(force_refresh=refresh)
+    return {
+        "farmers": result["data"]["farmers"],
+        "as_of": result["data"]["as_of"],
+        "source": result["source"],
+        "cached_at": result["cached_at"],
+    }
+
+
+@api_app.get("/dashboard/farmers/{farmer_id}")
+async def dashboard_farmer_detail(farmer_id: str, refresh: bool = False):
+    result = _get_dashboard_dataset(force_refresh=refresh)
+    detail = result["data"]["farmer_details"].get(farmer_id)
+    if not detail:
+        raise HTTPException(404, {"reason": "farmer_not_found", "farmer_id": farmer_id})
+    return {
+        **detail,
+        "as_of": result["data"]["as_of"],
+        "source": result["source"],
+        "cached_at": result["cached_at"],
+    }
+
+
+@api_app.get("/dashboard/task-types")
+async def dashboard_task_types(refresh: bool = False):
+    result = _get_dashboard_dataset(force_refresh=refresh)
+    return {
+        "task_types": result["data"]["task_types"],
+        "as_of": result["data"]["as_of"],
+        "source": result["source"],
+        "cached_at": result["cached_at"],
+    }
+
+
+@api_app.get("/dashboard/distribution")
+async def dashboard_distribution(refresh: bool = False):
+    result = _get_dashboard_dataset(force_refresh=refresh)
+    return {
+        "distribution": result["data"]["distribution"],
+        "as_of": result["data"]["as_of"],
+        "source": result["source"],
+        "cached_at": result["cached_at"],
+    }
+
+
+@api_app.get("/dashboard/trend")
+async def dashboard_trend(refresh: bool = False):
+    result = _get_dashboard_dataset(force_refresh=refresh)
+    return {
+        "data": result["data"]["trend"],
+        "as_of": result["data"]["as_of"],
+        "source": result["source"],
+        "cached_at": result["cached_at"],
+    }
+
+
+@api_app.post("/dashboard/cache/clear")
+async def dashboard_cache_clear():
+    with _dashboard_cache_lock:
+        _dashboard_cache.clear()
+    return {"ok": True, "cleared": True}
 
 # CORS（開発中は緩め / 本番は適切に制限してください）
 api_app.add_middleware(
