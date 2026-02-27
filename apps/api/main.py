@@ -8,6 +8,7 @@ import zipfile
 import os
 import threading
 import time
+from pathlib import Path as FilePath
 from typing import Optional, List, Any, Dict
 from urllib.parse import urlparse, unquote, quote
 
@@ -16,7 +17,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, Response
+from fastapi.responses import JSONResponse, StreamingResponse, Response, FileResponse
 from pydantic import BaseModel
 
 from settings import settings
@@ -2334,3 +2335,52 @@ async def root_healthz():
 
 
 app.mount("/api", api_app)
+
+
+def _resolve_web_dist_dir() -> Optional[FilePath]:
+    env_dir = os.getenv("WEB_DIST_DIR")
+    candidates: List[FilePath] = []
+    if env_dir:
+        candidates.append(FilePath(env_dir))
+
+    # Docker image (apps/api/Dockerfile) copies frontend dist here.
+    candidates.append(FilePath(__file__).resolve().parent / "web_dist")
+    # Local development from repository root.
+    candidates.append(FilePath(__file__).resolve().parents[1] / "web" / "dist")
+
+    for candidate in candidates:
+        if candidate.is_dir() and (candidate / "index.html").is_file():
+            return candidate
+    return None
+
+
+WEB_DIST_DIR = _resolve_web_dist_dir()
+
+
+@app.get("/", include_in_schema=False)
+async def serve_spa_index():
+    if WEB_DIST_DIR:
+        return FileResponse(WEB_DIST_DIR / "index.html")
+    return JSONResponse(
+        status_code=404,
+        content={
+            "ok": False,
+            "reason": "frontend_not_built",
+            "detail": "Frontend dist not found. Build apps/web and provide WEB_DIST_DIR.",
+        },
+    )
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def serve_spa_assets(full_path: str):
+    if not WEB_DIST_DIR:
+        raise HTTPException(404, {"reason": "not_found"})
+
+    candidate = (WEB_DIST_DIR / full_path).resolve()
+    base = WEB_DIST_DIR.resolve()
+    if base not in candidate.parents and candidate != base:
+        raise HTTPException(400, {"reason": "invalid_path"})
+
+    if candidate.is_file():
+        return FileResponse(candidate)
+    return FileResponse(WEB_DIST_DIR / "index.html")
