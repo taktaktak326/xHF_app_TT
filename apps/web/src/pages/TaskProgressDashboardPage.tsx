@@ -1149,6 +1149,7 @@ export function TaskProgressDashboardPage() {
   const [manualUpdateMsg, setManualUpdateMsg] = useState<string | null>(null);
   const [snapshotLoadingElapsedSec, setSnapshotLoadingElapsedSec] = useState(0);
   const [sprayCategoryMap, setSprayCategoryMap] = useState<Record<string, string>>({});
+  const [summaryReady, setSummaryReady] = useState(false);
   const [isFilterPending, startFilterTransition] = useTransition();
   const [dashboardPending, setDashboardPending] = useState(false);
   const [dashboardState, setDashboardState] = useState<DashboardBundle>(emptyDashboardBundle(getJstDayKey(new Date())));
@@ -1168,6 +1169,7 @@ export function TaskProgressDashboardPage() {
       setSnapshotLoading(true);
       setTasksHydrating(false);
       setSnapshotErr(null);
+      setSummaryReady(false);
       try {
         const now = Date.now();
         const metaKey = `${snapshotDate}:meta`;
@@ -1210,6 +1212,7 @@ export function TaskProgressDashboardPage() {
           } else {
             setSnapshotTasks([]);
           }
+          setSummaryReady(true);
           setSnapshotLoading(false);
         }
 
@@ -1236,6 +1239,7 @@ export function TaskProgressDashboardPage() {
         const hasRun = Boolean(metaJson?.run?.run_id);
         if (useCachedSummary) {
           summaryJson = activeSummary?.data;
+          setSummaryReady(true);
         } else if (!hasRun) {
           summaryJson = {
             kpi: emptyDashboardBundle(snapshotDate).kpi,
@@ -1246,6 +1250,7 @@ export function TaskProgressDashboardPage() {
             farmer_details: {},
             as_of: snapshotDate,
           };
+          setSummaryReady(true);
         }
 
         if (useCachedDates) {
@@ -1314,6 +1319,7 @@ export function TaskProgressDashboardPage() {
                 farmer_details: json?.farmer_details ?? {},
                 as_of: json?.as_of ?? snapshotDate,
               });
+              setSummaryReady(true);
             } catch {
               // 背景ロード失敗は画面全体エラーにしない
             }
@@ -1517,7 +1523,7 @@ export function TaskProgressDashboardPage() {
     }
     // 初期表示（全タスク・アクションフィルタなし）は API サマリーをそのまま使う。
     // ここで再集計しないことで、表示完了までの待ち時間を短縮する。
-    if (selectedFamily === ALL_FAMILY_OPTION && actionFilter === 'none') {
+    if (summaryReady && selectedFamily === ALL_FAMILY_OPTION && actionFilter === 'none') {
       setDashboardPending(false);
       return;
     }
@@ -1546,7 +1552,7 @@ export function TaskProgressDashboardPage() {
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [linkedTasks, selectedFamily, snapshotDate, snapshotRun, snapshotTasks.length]);
+  }, [linkedTasks, selectedFamily, actionFilter, summaryReady, snapshotDate, snapshotRun, snapshotTasks.length]);
   const dashboard = dashboardState;
 
   const filteredFarmers = useMemo(() => {
