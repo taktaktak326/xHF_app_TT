@@ -1515,6 +1515,12 @@ export function TaskProgressDashboardPage() {
       setDashboardPending(false);
       return;
     }
+    // 初期表示（全タスク・アクションフィルタなし）は API サマリーをそのまま使う。
+    // ここで再集計しないことで、表示完了までの待ち時間を短縮する。
+    if (selectedFamily === ALL_FAMILY_OPTION && actionFilter === 'none') {
+      setDashboardPending(false);
+      return;
+    }
     let alive = true;
     setDashboardPending(true);
     const today = getJstDayKey(new Date());
