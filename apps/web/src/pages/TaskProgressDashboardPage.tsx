@@ -1142,6 +1142,7 @@ export function TaskProgressDashboardPage() {
   const [snapshotFieldsLoaded, setSnapshotFieldsLoaded] = useState(false);
   const [snapshotFieldsLoading, setSnapshotFieldsLoading] = useState(false);
   const [tasksHydrating, setTasksHydrating] = useState(false);
+  const [snapshotTasksLoaded, setSnapshotTasksLoaded] = useState(false);
   const [visibleFieldRows, setVisibleFieldRows] = useState(INITIAL_FIELD_ROWS);
   const [visibleTaskRows, setVisibleTaskRows] = useState(INITIAL_TASK_ROWS);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -1209,8 +1210,10 @@ export function TaskProgressDashboardPage() {
           });
           if (useCachedSnap) {
             setSnapshotTasks((activeSnap?.data?.tasks ?? []) as SnapshotTask[]);
+            setSnapshotTasksLoaded(true);
           } else {
             setSnapshotTasks([]);
+            setSnapshotTasksLoaded(false);
           }
           setSummaryReady(true);
           setSnapshotLoading(false);
@@ -1286,7 +1289,13 @@ export function TaskProgressDashboardPage() {
         setSnapshotRun((metaJson?.run ?? null) as SnapshotRun | null);
         setSnapshotFields([]);
         setSnapshotFieldsLoaded(false);
-        setSnapshotTasks([]);
+        if (useCachedSnap) {
+          setSnapshotTasks((activeSnap?.data?.tasks ?? []) as SnapshotTask[]);
+          setSnapshotTasksLoaded(true);
+        } else {
+          setSnapshotTasks([]);
+          setSnapshotTasksLoaded(false);
+        }
         setDashboardState((prev) => ({
           kpi: summaryJson?.kpi ?? prev.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
           farmers: summaryJson?.farmers ?? prev.farmers ?? [],
@@ -1326,34 +1335,6 @@ export function TaskProgressDashboardPage() {
           })();
         }
 
-        if (useCachedSnap) {
-          setSnapshotTasks((activeSnap?.data?.tasks ?? []) as SnapshotTask[]);
-        } else {
-          setTasksHydrating(true);
-          void (async () => {
-            try {
-              const taskRes = await fetch(
-                withApiBase(
-                  `/hfr-snapshots?snapshot_date=${encodeURIComponent(snapshotDate)}`
-                  + `&include_fields=false&include_tasks=true&task_limit=${SNAPSHOT_TASK_LIMIT}&limit=${SNAPSHOT_TASK_LIMIT}`,
-                ),
-                { signal: controller.signal },
-              );
-              const taskJson = await taskRes.json();
-              if (!active || !taskRes.ok || taskJson?.ok === false) return;
-              snapshotPageCache.set(snapKey, {
-                data: taskJson,
-                expiresAt: Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS,
-              });
-              writeSessionCache(snapKey, taskJson, Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS);
-              setSnapshotTasks((taskJson.tasks ?? []) as SnapshotTask[]);
-            } catch {
-              // 背景ロード失敗は画面全体エラーにしない
-            } finally {
-              if (active) setTasksHydrating(false);
-            }
-          })();
-        }
       } catch (error: any) {
         if (!active || error?.name === 'AbortError') return;
         setSnapshotErr(error?.message || 'スナップショットの取得に失敗しました');
@@ -1361,6 +1342,7 @@ export function TaskProgressDashboardPage() {
         setSnapshotFields([]);
         setSnapshotFieldsLoaded(false);
         setSnapshotTasks([]);
+        setSnapshotTasksLoaded(false);
         setTasksHydrating(false);
       } finally {
         if (active) setSnapshotLoading(false);
@@ -1471,6 +1453,15 @@ export function TaskProgressDashboardPage() {
   const familyOptions = useMemo(() => {
     const set = new Set<string>();
     allTasks.forEach((task) => set.add(task.typeFamily));
+    if (set.size === 0) {
+      (dashboard.task_types || []).forEach((row) => {
+        const raw = String(row.task_type_name || '').trim();
+        if (!raw) return;
+        const m = raw.match(/^(.*)\s\d+回目$/);
+        const family = m ? m[1] : raw;
+        if (family) set.add(family);
+      });
+    }
     const hasProtectionSub = Array.from(set).some((name) => name.startsWith('防除（'));
     if (hasProtectionSub) set.add('防除');
     const hasSprayingTask = allTasks.some((task) => task.taskType === 'Spraying');
@@ -1486,6 +1477,56 @@ export function TaskProgressDashboardPage() {
       return ai - bi;
     });
   }, [allTasks]);
+
+  useEffect(() => {
+    if (snapshotLoading) return;
+    let alive = true;
+    const controller = new AbortController();
+    const loadFilteredSummary = async () => {
+      const familyParam = selectedFamily !== ALL_FAMILY_OPTION ? `&families=${encodeURIComponent(selectedFamily)}` : '';
+      const cacheKey = `${snapshotDate}:summary:${selectedFamily}:${actionFilter}`;
+      const now = Date.now();
+      const cached = snapshotPageCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        setDashboardState(cached.data as DashboardBundle);
+        setDashboardPending(false);
+        return;
+      }
+      try {
+        setDashboardPending(true);
+        const res = await fetch(
+          withApiBase(
+            `/hfr-snapshots/summary?snapshot_date=${encodeURIComponent(snapshotDate)}`
+            + `&action_filter=${encodeURIComponent(actionFilter)}${familyParam}`,
+          ),
+          { signal: controller.signal },
+        );
+        const json = await res.json();
+        if (!alive || !res.ok || json?.ok === false) return;
+        const payload: DashboardBundle = {
+          kpi: json?.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
+          farmers: json?.farmers ?? [],
+          task_types: json?.task_types ?? [],
+          distribution: json?.distribution ?? [],
+          trend: json?.trend ?? [],
+          farmer_details: json?.farmer_details ?? {},
+          as_of: json?.as_of ?? snapshotDate,
+        };
+        const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
+        snapshotPageCache.set(cacheKey, { data: payload, expiresAt });
+        if (!alive) return;
+        setDashboardState(payload);
+        setSummaryReady(true);
+      } finally {
+        if (alive) setDashboardPending(false);
+      }
+    };
+    void loadFilteredSummary();
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [snapshotDate, selectedFamily, actionFilter, snapshotLoading]);
 
   useEffect(() => {
     if (familyOptions.length === 0) return;
@@ -1683,6 +1724,39 @@ export function TaskProgressDashboardPage() {
       setManualUpdateMsg(err?.message || '圃場一覧の取得に失敗しました');
     } finally {
       setSnapshotFieldsLoading(false);
+    }
+  };
+
+  const loadSnapshotTasks = async () => {
+    if (tasksHydrating) return;
+    setTasksHydrating(true);
+    try {
+      const key = `${snapshotDate}:tasks:${SNAPSHOT_TASK_LIMIT}`;
+      const now = Date.now();
+      const cached = snapshotPageCache.get(key);
+      let json: any;
+      if (cached && cached.expiresAt > now) {
+        json = cached.data;
+      } else {
+        const res = await fetch(
+          withApiBase(
+            `/hfr-snapshots?snapshot_date=${encodeURIComponent(snapshotDate)}`
+            + `&include_fields=false&include_tasks=true&task_limit=${SNAPSHOT_TASK_LIMIT}&limit=${SNAPSHOT_TASK_LIMIT}`,
+          ),
+        );
+        json = await res.json();
+        if (!res.ok || json?.ok === false) {
+          const reason = json?.detail?.reason || json?.reason || `HTTP ${res.status}`;
+          throw new Error(`タスク一覧取得失敗: ${reason}`);
+        }
+        snapshotPageCache.set(key, { data: json, expiresAt: now + SNAPSHOT_CLIENT_CACHE_TTL_MS });
+      }
+      setSnapshotTasks((json?.tasks ?? []) as SnapshotTask[]);
+      setSnapshotTasksLoaded(true);
+    } catch (err: any) {
+      setManualUpdateMsg(err?.message || 'タスク一覧の取得に失敗しました');
+    } finally {
+      setTasksHydrating(false);
     }
   };
 
@@ -1954,6 +2028,11 @@ export function TaskProgressDashboardPage() {
         <h3>タスクスナップショット一覧（表示 {visibleTasks.length} / 全 {filteredSnapshotTasks.length}件）</h3>
         <p className="manual-update-msg">画面は軽量表示。大量データはCSV出力で確認してください。</p>
         <div className="snapshot-table-controls">
+          <button type="button" onClick={loadSnapshotTasks} disabled={snapshotTasksLoaded || tasksHydrating}>
+            {tasksHydrating ? 'タスク一覧を読込中...' : snapshotTasksLoaded ? 'タスク一覧ロード済み' : 'タスク一覧を読み込む'}
+          </button>
+        </div>
+        <div className="snapshot-table-controls">
           <button
             type="button"
             onClick={() => setVisibleTaskRows((v) => Math.min(filteredSnapshotTasks.length, v + TASK_ROWS_STEP))}
@@ -1969,6 +2048,9 @@ export function TaskProgressDashboardPage() {
             すべて表示
           </button>
         </div>
+        {!snapshotTasksLoaded ? (
+          <p className="manual-update-msg">タスクテーブルは未ロードです。必要時のみ「タスク一覧を読み込む」を押してください。</p>
+        ) : (
         <div className="table-wrap table-wrap-wide">
           <table>
             <thead>
@@ -2043,6 +2125,7 @@ export function TaskProgressDashboardPage() {
             </tbody>
           </table>
         </div>
+        )}
       </section>
     </div>
   );
