@@ -342,6 +342,33 @@ def fetch_snapshot(snapshot_date: date, farm_uuid: Optional[str] = None, limit: 
             }
 
 
+def list_snapshot_runs(limit: int = 90) -> List[Dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 1000))
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (snapshot_date)
+                       run_id,
+                       snapshot_date,
+                       status,
+                       message,
+                       farms_scanned,
+                       farms_matched,
+                       fields_saved,
+                       tasks_saved,
+                       started_at,
+                       finished_at
+                  FROM hfr_snapshot_runs
+                 ORDER BY snapshot_date DESC, started_at DESC
+                 LIMIT %s
+                """,
+                (safe_limit,),
+            )
+            rows = cur.fetchall() or []
+    return rows
+
+
 def compare_snapshots(from_date: date, to_date: date) -> Dict[str, Any]:
     with _connect() as conn:
         with conn.cursor() as cur:

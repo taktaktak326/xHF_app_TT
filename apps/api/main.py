@@ -3129,7 +3129,7 @@ async def hfr_snapshots(snapshot_date: Optional[str] = None, farm_uuid: Optional
     try:
         hfr_snapshot_store.ensure_schema()
         day = datetime.strptime(snapshot_date, "%Y-%m-%d").date() if snapshot_date else datetime.now(timezone(timedelta(hours=9))).date()
-        data = hfr_snapshot_store.fetch_snapshot(day, farm_uuid=farm_uuid, limit=max(1, min(limit, 10000)))
+        data = hfr_snapshot_store.fetch_snapshot(day, farm_uuid=farm_uuid, limit=max(1, min(limit, 50000)))
         return {
             "ok": True,
             "snapshot_date": str(day),
@@ -3139,6 +3139,20 @@ async def hfr_snapshots(snapshot_date: Optional[str] = None, farm_uuid: Optional
         }
     except Exception as exc:
         raise HTTPException(500, {"reason": "snapshot_read_failed", "detail": str(exc)})
+
+
+@api_app.get("/hfr-snapshots/dates")
+async def hfr_snapshot_dates(limit: int = 90):
+    try:
+        hfr_snapshot_store.ensure_schema()
+        runs = hfr_snapshot_store.list_snapshot_runs(limit=max(1, min(limit, 3650)))
+        return {
+            "ok": True,
+            "runs": runs,
+            "dates": [str((r or {}).get("snapshot_date")) for r in runs if (r or {}).get("snapshot_date")],
+        }
+    except Exception as exc:
+        raise HTTPException(500, {"reason": "snapshot_dates_failed", "detail": str(exc)})
 
 
 @api_app.get("/hfr-snapshots/compare")
