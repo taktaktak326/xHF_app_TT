@@ -370,7 +370,7 @@ function normalizeProductToken(value: string | null | undefined): string {
 function splitProductNames(productRaw: string | null | undefined): string[] {
   if (!productRaw) return [];
   return productRaw
-    .split(/[\/／|｜、，,\n\r]+/)
+    .split(/[\/／|｜\n\r]+/)
     .map((s) => s.trim())
     .filter(Boolean);
 }
@@ -406,6 +406,8 @@ function resolveTaskFamilyFromSnapshot(
       const cropUuid = (task.crop_uuid || '').trim();
       const products = splitProductNames(task.product);
       const found = new Set<string>();
+      const bySprayCategory = spraySubtypeFromCategory(String(task.spray_category || ''));
+      if (bySprayCategory) found.add(bySprayCategory);
       for (const name of products) {
         const byMaster = spraySubtypeFromCategory(lookupSprayCategoryCode(sprayCategoryMap, cropUuid, name));
         if (byMaster) found.add(byMaster);
@@ -442,6 +444,8 @@ function detectSpraySubtype(
     const products = splitProductNames(task.product);
     const fromMaster = new Set<string>();
     const fromName = new Set<string>();
+    const bySprayCategory = spraySubtypeFromCategory(String(task.spray_category || ''));
+    if (bySprayCategory) fromMaster.add(bySprayCategory);
     for (const name of products) {
       const byMaster = spraySubtypeFromCategory(lookupSprayCategoryCode(sprayCategoryMap, cropUuid, name));
       if (byMaster) fromMaster.add(byMaster);
