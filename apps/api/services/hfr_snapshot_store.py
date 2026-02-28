@@ -351,13 +351,31 @@ def fetch_snapshot(
     with _connect() as conn:
         with conn.cursor() as cur:
             run_q = """
-                SELECT *
+                WITH task_last AS (
+                  SELECT snapshot_date, run_id, MAX(fetched_at) AS last_at
+                    FROM hfr_snapshot_tasks
+                   WHERE snapshot_date = %s
+                   GROUP BY snapshot_date, run_id
+                ),
+                field_last AS (
+                  SELECT snapshot_date, run_id, MAX(fetched_at) AS last_at
+                    FROM hfr_snapshot_fields
+                   WHERE snapshot_date = %s
+                   GROUP BY snapshot_date, run_id
+                )
+                SELECT r.*
                   FROM hfr_snapshot_runs
-                 WHERE snapshot_date = %s
-                 ORDER BY started_at DESC
+                  r
+                  LEFT JOIN task_last t
+                    ON t.snapshot_date = r.snapshot_date AND t.run_id = r.run_id
+                  LEFT JOIN field_last f
+                    ON f.snapshot_date = r.snapshot_date AND f.run_id = r.run_id
+                 WHERE r.snapshot_date = %s
+                 ORDER BY COALESCE(t.last_at, f.last_at, r.finished_at, r.started_at) DESC NULLS LAST,
+                          r.started_at DESC
                  LIMIT 1
             """
-            cur.execute(run_q, (snapshot_date,))
+            cur.execute(run_q, (snapshot_date, snapshot_date, snapshot_date))
             run = cur.fetchone()
             run_id = (run or {}).get("run_id")
             if not run_id:
@@ -455,19 +473,35 @@ def list_snapshot_runs(limit: int = 90) -> List[Dict[str, Any]]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT ON (snapshot_date)
-                       run_id,
-                       snapshot_date,
-                       status,
-                       message,
-                       farms_scanned,
-                       farms_matched,
-                       fields_saved,
-                       tasks_saved,
-                       started_at,
-                       finished_at
-                  FROM hfr_snapshot_runs
-                 ORDER BY snapshot_date DESC, started_at DESC
+                WITH task_last AS (
+                  SELECT snapshot_date, run_id, MAX(fetched_at) AS last_at
+                    FROM hfr_snapshot_tasks
+                   GROUP BY snapshot_date, run_id
+                ),
+                field_last AS (
+                  SELECT snapshot_date, run_id, MAX(fetched_at) AS last_at
+                    FROM hfr_snapshot_fields
+                   GROUP BY snapshot_date, run_id
+                )
+                SELECT DISTINCT ON (r.snapshot_date)
+                       r.run_id,
+                       r.snapshot_date,
+                       r.status,
+                       r.message,
+                       r.farms_scanned,
+                       r.farms_matched,
+                       r.fields_saved,
+                       r.tasks_saved,
+                       r.started_at,
+                       r.finished_at
+                  FROM hfr_snapshot_runs r
+                  LEFT JOIN task_last t
+                    ON t.snapshot_date = r.snapshot_date AND t.run_id = r.run_id
+                  LEFT JOIN field_last f
+                    ON f.snapshot_date = r.snapshot_date AND f.run_id = r.run_id
+                 ORDER BY r.snapshot_date DESC,
+                          COALESCE(t.last_at, f.last_at, r.finished_at, r.started_at) DESC NULLS LAST,
+                          r.started_at DESC
                  LIMIT %s
                 """,
                 (safe_limit,),
