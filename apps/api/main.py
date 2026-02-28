@@ -18,6 +18,7 @@ from urllib.parse import urlparse, unquote, quote
 import httpx
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Path, Header
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response, FileResponse
@@ -39,6 +40,7 @@ from schemas import (
     WeatherByFieldReq,
     CropProtectionProductsReq,
     CropProtectionProductsBulkReq,
+    CropProtectionProductsCachedReq,
     FieldDataLayersReq,
     FieldDataLayerImageReq,
     SprayingTaskUpdateReq,
@@ -56,7 +58,7 @@ from services.xarvio import get_api_token_impl
 from services.graphql_client import call_graphql
 from services.field_location import enrich_field_with_location, get_pref_city_status, start_pref_city_warmup
 from services.cache import get_last_response, get_by_operation, clear_cache, save_response
-from services import hfr_snapshot_store
+from services import hfr_snapshot_store, crop_product_cache_store
 from graphql.queries import (
     FARMS_OVERVIEW,
     FIELDS_BY_FARM,
@@ -2294,6 +2296,51 @@ async def crop_protection_products_bulk(req: CropProtectionProductsBulkReq):
         out[crop_uuid] = result.get("response", {}).get("data", {}).get("productsV2", [])
 
     return JSONResponse({"ok": True, "items": out})
+
+
+@api_app.post("/crop-protection-products/cached")
+async def crop_protection_products_cached(req: CropProtectionProductsCachedReq):
+    """
+    稲向け農薬マスターを DB 永続キャッシュから返す。
+    キャッシュ未作成時のみ upstream GraphQL を1回実行して保存する。
+    """
+    try:
+        crop_product_cache_store.ensure_schema()
+    except Exception as exc:
+        raise HTTPException(500, {"reason": "crop_product_cache_not_ready", "detail": str(exc)})
+
+    country_uuid = str(req.country_uuid or "").strip()
+    crop_uuid = str(req.crop_uuid or "").strip()
+    task_type_code = str(req.task_type_code or "FIELDTREATMENT").strip() or "FIELDTREATMENT"
+
+    cached = crop_product_cache_store.get_cached_products(country_uuid, crop_uuid, task_type_code)
+    if cached and not req.refresh:
+        return JSONResponse(jsonable_encoder({"ok": True, "source": "db_cache", "items": cached}))
+
+    login_token = str(req.login_token or "").strip()
+    api_token = str(req.api_token or "").strip()
+    if not login_token or not api_token:
+        if cached:
+            return JSONResponse(jsonable_encoder({"ok": True, "source": "db_cache_stale", "items": cached}))
+        raise HTTPException(400, {"reason": "auth_required_for_cache_miss"})
+
+    variables = {
+        "farmUuids": [],
+        "countryUuid": country_uuid,
+        "cropUuid": crop_uuid,
+        "taskTypeCode": task_type_code,
+    }
+    payload = make_payload("CropProtectionTaskCreationProducts", CROP_PROTECTION_TASK_CREATION_PRODUCTS, variables)
+    result = await call_graphql(payload, login_token, api_token)
+    if isinstance(result, Exception):
+        raise HTTPException(status_code=500, detail=str(result))
+    if result.get("ok") is False:
+        return JSONResponse(status_code=result.get("status", 500), content=result)
+
+    products = result.get("response", {}).get("data", {}).get("productsV2", []) or []
+    saved = crop_product_cache_store.replace_cached_products(country_uuid, crop_uuid, task_type_code, products)
+    refreshed = crop_product_cache_store.get_cached_products(country_uuid, crop_uuid, task_type_code)
+    return JSONResponse(jsonable_encoder({"ok": True, "source": "api_refresh", "saved": saved, "items": refreshed}))
 
 
 @api_app.post("/masterdata/crops")

@@ -74,6 +74,16 @@ class CropProtectionProductsBulkReq(BaseModel):
     task_type_code: Optional[str] = "FIELDTREATMENT"
     includeTokens: bool = False
 
+
+class CropProtectionProductsCachedReq(BaseModel):
+    login_token: Optional[str] = None
+    api_token: Optional[str] = None
+    country_uuid: str = "0f59ff55-c86b-4b7b-4eaa-eb003d47dcd3"
+    crop_uuid: str = "e54c5e22-94a0-a5ff-34a6-4fe0f8ad1ccc"
+    task_type_code: Optional[str] = "FIELDTREATMENT"
+    refresh: bool = False
+    includeTokens: bool = False
+
 class FieldDataLayersReq(BaseModel):
     login_token: str
     api_token: str
