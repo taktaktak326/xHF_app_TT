@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { LANGUAGE_STORAGE_KEY, useLanguage } from '../context/LanguageContext';
+import type { LoginAndTokenResp } from '../types/farm';
 import { withApiBase } from '../utils/apiBase';
 import { useNavigate } from 'react-router-dom';
 import LoadingOverlay from './LoadingOverlay';
 import LoadingSpinner from './LoadingSpinner';
 import './LoginForm.css';
 
-// App.tsxからAPIクライアントと型定義を移動またはインポート
-type LoginAndTokenResp = any; // 仮の型
 async function loginAndToken(
   email: string,
   password: string,

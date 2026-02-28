@@ -231,6 +231,22 @@ class CrossFarmDashboardSearchReq(BaseModel):
 
 
 class HfrSnapshotJobReq(BaseModel):
+    email: Optional[str] = None
+    login_token: Optional[str] = None
+    api_token: Optional[str] = None
     suffix: str = "HFR"
     languageCode: str = "ja"
     dryRun: bool = False
+    farm_uuids: List[str] = []
+    farmUuids: List[str] = []
+
+
+class HfrSnapshotManualReq(BaseModel):
+    email: str
+    login_token: str
+    api_token: str
+    suffix: str = "HFR"
+    languageCode: str = "ja"
+    dryRun: bool = False
+    farm_uuids: List[str] = []
+    farmUuids: List[str] = []

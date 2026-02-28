@@ -693,6 +693,7 @@ async def login_and_token(req: LoginReq):
     api_token = await get_api_token_impl(four)
     return JSONResponse({
         "ok": True,
+        "email": req.email,
         "login": four.dict(),
         "api_token": api_token,
     })
@@ -2840,9 +2841,21 @@ async def jobs_hfr_snapshot(
     req: HfrSnapshotJobReq,
     x_job_secret: Optional[str] = Header(default=None, alias="X-Job-Secret"),
 ):
+    selected_farm_uuids = list(dict.fromkeys(
+        str(u).strip() for u in ((req.farm_uuids or []) + (req.farmUuids or [])) if str(u).strip()
+    ))
+    manual_mode = bool((req.login_token or "").strip() and (req.api_token or "").strip())
+
     expected_secret = os.getenv("SNAPSHOT_JOB_SECRET", "").strip()
-    if expected_secret and x_job_secret != expected_secret:
+    if not manual_mode and expected_secret and x_job_secret != expected_secret:
         raise HTTPException(401, {"reason": "unauthorized_job"})
+    if manual_mode:
+        allowed_email = (os.getenv("HFR_SNAPSHOT_MANUAL_EMAIL") or "am@shonai.inc").strip().lower()
+        req_email = (req.email or "").strip().lower()
+        if not req_email or req_email != allowed_email:
+            raise HTTPException(403, {"reason": "manual_snapshot_forbidden"})
+        if not selected_farm_uuids:
+            raise HTTPException(422, {"reason": "manual_snapshot_requires_farms"})
 
     snapshot_date = datetime.now(timezone(timedelta(hours=9))).date()
     run_id = f"hfr-{snapshot_date.isoformat()}-{uuid4().hex[:8]}"
@@ -2857,7 +2870,10 @@ async def jobs_hfr_snapshot(
         elapsed = time.perf_counter() - started_at
         print(f"[HFR_SNAPSHOT][{run_id}] +{elapsed:.1f}s {message}", flush=True)
 
-    _progress(f"job started dryRun={req.dryRun} suffix={req.suffix} language={req.languageCode}")
+    _progress(
+        f"job started dryRun={req.dryRun} suffix={req.suffix} language={req.languageCode} "
+        f"manual_mode={manual_mode} selected_farms={len(selected_farm_uuids)}"
+    )
 
     if should_persist:
         try:
@@ -2866,31 +2882,42 @@ async def jobs_hfr_snapshot(
             raise HTTPException(500, {"reason": "snapshot_store_not_ready", "detail": str(exc)})
         hfr_snapshot_store.start_run(run_id, snapshot_date, status="running", message="job started")
     try:
-        email = os.getenv("SNAPSHOT_USER_EMAIL", "").strip()
-        password = os.getenv("SNAPSHOT_USER_PASSWORD", "").strip()
-        if not email or not password:
-            raise HTTPException(500, {"reason": "snapshot_credentials_missing"})
+        if manual_mode:
+            login_token = (req.login_token or "").strip()
+            api_token = (req.api_token or "").strip()
+            _progress("auth: using manual tokens from logged-in user")
+        else:
+            email = os.getenv("SNAPSHOT_USER_EMAIL", "").strip()
+            password = os.getenv("SNAPSHOT_USER_PASSWORD", "").strip()
+            if not email or not password:
+                raise HTTPException(500, {"reason": "snapshot_credentials_missing"})
 
-        _progress("auth: gigya login started")
-        login = await gigya_login_impl(email, password)
-        _progress("auth: gigya login completed")
-        four = FourValues(
-            login_token=login.get("login_token") or "",
-            gigya_uuid=login.get("gigya_uuid") or "",
-            gigya_uuid_signature=login.get("gigya_uuid_signature") or "",
-            gigya_signature_timestamp=login.get("gigya_signature_timestamp") or "",
-        )
-        _progress("auth: xarvio token started")
-        api_token = await get_api_token_impl(four)
-        login_token = four.login_token
-        _progress("auth: xarvio token completed")
+            _progress("auth: gigya login started")
+            login = await gigya_login_impl(email, password)
+            _progress("auth: gigya login completed")
+            four = FourValues(
+                login_token=login.get("login_token") or "",
+                gigya_uuid=login.get("gigya_uuid") or "",
+                gigya_uuid_signature=login.get("gigya_uuid_signature") or "",
+                gigya_signature_timestamp=login.get("gigya_signature_timestamp") or "",
+            )
+            _progress("auth: xarvio token started")
+            api_token = await get_api_token_impl(four)
+            login_token = four.login_token
+            _progress("auth: xarvio token completed")
 
-        _progress("step1: farms overview started")
-        farms_out = await call_graphql(make_payload("FarmsOverview", FARMS_OVERVIEW), login_token, api_token)
-        farms_data = (((farms_out.get("response") or {}).get("data") or {}).get("farms") or [])
-        all_farm_uuids = [str(f.get("uuid")) for f in farms_data if isinstance(f, dict) and f.get("uuid")]
-        farms_scanned = len(all_farm_uuids)
-        _progress(f"step1: farms overview completed farms_scanned={farms_scanned}")
+        all_farm_uuids: List[str] = []
+        if selected_farm_uuids:
+            all_farm_uuids = selected_farm_uuids
+            farms_scanned = len(all_farm_uuids)
+            _progress(f"step1: selected farms applied farms_scanned={farms_scanned}")
+        else:
+            _progress("step1: farms overview started")
+            farms_out = await call_graphql(make_payload("FarmsOverview", FARMS_OVERVIEW), login_token, api_token)
+            farms_data = (((farms_out.get("response") or {}).get("data") or {}).get("farms") or [])
+            all_farm_uuids = [str(f.get("uuid")) for f in farms_data if isinstance(f, dict) and f.get("uuid")]
+            farms_scanned = len(all_farm_uuids)
+            _progress(f"step1: farms overview completed farms_scanned={farms_scanned}")
 
         _progress("step2: hfr candidate scan started")
         cand_resp = await farms_hfr_candidates(
@@ -3090,6 +3117,7 @@ async def jobs_hfr_snapshot(
             "ok": True,
             "run_id": run_id,
             "snapshot_date": str(snapshot_date),
+            "mode": "manual" if manual_mode else "scheduled",
             "farms_scanned": farms_scanned,
             "farms_matched": farms_matched,
             "fields_saved": fields_saved,

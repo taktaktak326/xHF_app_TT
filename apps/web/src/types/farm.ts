@@ -1,5 +1,6 @@
 export type LoginAndTokenResp = {
   ok: boolean;
+  email?: string;
   login: {
     login_token: string;
     gigya_uuid: string;

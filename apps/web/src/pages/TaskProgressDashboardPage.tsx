@@ -13,6 +13,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { useAuth } from '../context/AuthContext';
+import { useFarms } from '../context/FarmContext';
 import { withApiBase } from '../utils/apiBase';
 import './TaskProgressDashboardPage.css';
 
@@ -458,6 +460,8 @@ function trendLabel(direction: FarmerRow['trend_direction']) {
 }
 
 export function TaskProgressDashboardPage() {
+  const { auth } = useAuth();
+  const { submittedFarms } = useFarms();
   const [query, setQuery] = useState('');
   const [selectedFarmerId, setSelectedFarmerId] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('delay_rate');
@@ -470,6 +474,8 @@ export function TaskProgressDashboardPage() {
   const [snapshotRun, setSnapshotRun] = useState<SnapshotRun | null>(null);
   const [snapshotTasks, setSnapshotTasks] = useState<SnapshotTask[]>([]);
   const [refreshToken, setRefreshToken] = useState(0);
+  const [manualUpdateLoading, setManualUpdateLoading] = useState(false);
+  const [manualUpdateMsg, setManualUpdateMsg] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -594,6 +600,46 @@ export function TaskProgressDashboardPage() {
     [sortedFarmers]
   );
 
+  const canManualUpdate =
+    (auth?.email || '').trim().toLowerCase() === 'am@shonai.inc' &&
+    submittedFarms.length > 0 &&
+    Boolean(auth?.login?.login_token) &&
+    Boolean(auth?.api_token);
+
+  const handleManualUpdate = async () => {
+    if (!canManualUpdate || !auth?.login?.login_token || !auth?.api_token) return;
+    setManualUpdateLoading(true);
+    setManualUpdateMsg(null);
+    try {
+      const res = await fetch(withApiBase('/jobs/hfr-snapshot'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: auth.email,
+          login_token: auth.login.login_token,
+          api_token: auth.api_token,
+          farm_uuids: submittedFarms,
+          dryRun: false,
+          suffix: 'HFR',
+          languageCode: 'ja',
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || json?.ok === false) {
+        const reason = json?.detail?.reason || json?.reason || `HTTP ${res.status}`;
+        throw new Error(`HFR更新に失敗: ${reason}`);
+      }
+      setManualUpdateMsg(
+        `更新完了: fields=${json?.fields_saved ?? '-'} tasks=${json?.tasks_saved ?? '-'} run=${json?.run_id ?? '-'}`,
+      );
+      setRefreshToken((v) => v + 1);
+    } catch (error: any) {
+      setManualUpdateMsg(error?.message || 'HFR更新に失敗しました');
+    } finally {
+      setManualUpdateLoading(false);
+    }
+  };
+
   useEffect(() => {
     setSelectedFarmerId(null);
   }, [snapshotDate]);
@@ -668,9 +714,15 @@ export function TaskProgressDashboardPage() {
           {availableDates.length > 0 && (
             <button type="button" onClick={() => setSnapshotDate(availableDates[0])}>最新日</button>
           )}
+          {canManualUpdate && (
+            <button type="button" onClick={handleManualUpdate} disabled={manualUpdateLoading}>
+              {manualUpdateLoading ? 'HFR更新中...' : 'HFR更新（選択農場）'}
+            </button>
+          )}
           <span>{new Date(dashboard.as_of).toLocaleString('ja-JP')}</span>
           <span className="source-tag">snapshot: {snapshotRun?.run_id ?? '-'}</span>
         </div>
+        {manualUpdateMsg && <p className="manual-update-msg">{manualUpdateMsg}</p>}
         <div className="task-family-filter">
           <span className="task-family-filter__label">表示タスク（複数選択）</span>
           <div className="task-family-filter__options">
