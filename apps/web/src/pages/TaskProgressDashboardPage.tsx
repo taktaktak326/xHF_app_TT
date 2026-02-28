@@ -254,6 +254,9 @@ const snapshotDatesCache = new Map<string, { expiresAt: number; data: any }>();
 const jstDayKeyCache = new Map<string, string>();
 const sprayMasterCache = new Map<string, { expiresAt: number; data: Record<string, string> }>();
 const SNAPSHOT_SS_PREFIX = 'hfr:ss:v1';
+function summaryFilterCacheKey(snapshotDate: string, family: string, action: ActionFilterKey): string {
+  return `${snapshotDate}:summary:${family}:${action}`;
+}
 
 function readSessionCache<T>(key: string): { data: T; expiresAt: number } | null {
   try {
@@ -890,6 +893,7 @@ export function TaskProgressDashboardPage() {
         const now = Date.now();
         const metaKey = `${snapshotDate}:meta`;
         const summaryKey = `${snapshotDate}:summary`;
+        const summaryDefaultKey = summaryFilterCacheKey(snapshotDate, ALL_FAMILY_OPTION, 'none');
         const snapKey = `${snapshotDate}:tasks:${SNAPSHOT_TASK_LIMIT}`;
         const datesKey = 'dates:365';
         const cachedMeta = snapshotPageCache.get(metaKey);
@@ -923,6 +927,7 @@ export function TaskProgressDashboardPage() {
             farmer_details: activeSummary?.data?.farmer_details ?? {},
             as_of: cachedAsOf,
           });
+          snapshotPageCache.set(summaryDefaultKey, { data: activeSummary?.data, expiresAt: now + SNAPSHOT_CLIENT_CACHE_TTL_MS });
           if (useCachedSnap) {
             setSnapshotTasks((activeSnap?.data?.tasks ?? []) as SnapshotTask[]);
             setSnapshotTasksLoaded(true);
@@ -1018,6 +1023,10 @@ export function TaskProgressDashboardPage() {
           as_of: summaryJson?.as_of ?? prev.as_of ?? snapshotDate,
         }));
         setAvailableDates(dates);
+        if (summaryJson) {
+          const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
+          snapshotPageCache.set(summaryDefaultKey, { data: summaryJson, expiresAt });
+        }
 
         if (!useCachedSummary && hasRun) {
           void (async () => {
@@ -1030,6 +1039,7 @@ export function TaskProgressDashboardPage() {
               if (!active || !summaryRes.ok || json?.ok === false) return;
               const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
               snapshotPageCache.set(summaryKey, { data: json, expiresAt });
+              snapshotPageCache.set(summaryDefaultKey, { data: json, expiresAt });
               writeSessionCache(summaryKey, json, expiresAt);
               setDashboardState({
                 kpi: json?.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
@@ -1227,7 +1237,7 @@ export function TaskProgressDashboardPage() {
     const controller = new AbortController();
     const loadFilteredSummary = async () => {
       const familyParam = selectedFamily !== ALL_FAMILY_OPTION ? `&families=${encodeURIComponent(selectedFamily)}` : '';
-      const cacheKey = `${snapshotDate}:summary:${selectedFamily}:${actionFilter}`;
+      const cacheKey = summaryFilterCacheKey(snapshotDate, selectedFamily, actionFilter);
       const now = Date.now();
       const cached = snapshotPageCache.get(cacheKey);
       if (cached && cached.expiresAt > now) {
