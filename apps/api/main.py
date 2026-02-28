@@ -135,6 +135,10 @@ DASHBOARD_CACHE_TTL_SEC = int(os.getenv("DASHBOARD_CACHE_TTL", "300"))
 _dashboard_cache: Dict[str, Dict[str, Any]] = {}
 _dashboard_cache_lock = threading.Lock()
 
+HFR_SNAPSHOT_CACHE_TTL_SEC = int(os.getenv("HFR_SNAPSHOT_CACHE_TTL", "180"))
+_hfr_snapshot_cache: Dict[str, Dict[str, Any]] = {}
+_hfr_snapshot_cache_lock = threading.Lock()
+
 
 def _image_cache_get(url: str):
     now = time.time()
@@ -177,6 +181,42 @@ def _dashboard_cache_set(key: str, data: Dict[str, Any]):
             "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
             "expires_at": time.time() + DASHBOARD_CACHE_TTL_SEC,
         }
+
+
+def _hfr_snapshot_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    now = time.time()
+    with _hfr_snapshot_cache_lock:
+        entry = _hfr_snapshot_cache.get(key)
+        if not entry:
+            return None
+        if entry.get("expires_at", 0) < now:
+            _hfr_snapshot_cache.pop(key, None)
+            return None
+        return entry
+
+
+def _hfr_snapshot_cache_set(key: str, data: Dict[str, Any]):
+    with _hfr_snapshot_cache_lock:
+        _hfr_snapshot_cache[key] = {
+            "data": data,
+            "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+            "expires_at": time.time() + HFR_SNAPSHOT_CACHE_TTL_SEC,
+        }
+
+
+def _hfr_snapshot_cache_invalidate_snapshot_date(snapshot_date: date):
+    day_str = str(snapshot_date)
+    with _hfr_snapshot_cache_lock:
+        keys = list(_hfr_snapshot_cache.keys())
+        for key in keys:
+            if key.startswith("hfr:snapshots:") and f":{day_str}:" in key:
+                _hfr_snapshot_cache.pop(key, None)
+            if key.startswith("hfr:dates:"):
+                _hfr_snapshot_cache.pop(key, None)
+            if key.startswith("hfr:compare:") and (f":{day_str}:" in key or key.endswith(f":{day_str}")):
+                _hfr_snapshot_cache.pop(key, None)
+            if key.startswith("hfr:summary:") and f":{day_str}:" in key:
+                _hfr_snapshot_cache.pop(key, None)
 
 
 def _dashboard_rate(numerator: int, denominator: int) -> float:
@@ -2723,6 +2763,7 @@ def _extract_snapshot_rows(
             if not isinstance(season, dict):
                 continue
             season_uuid = str(season.get("uuid") or "")
+            crop_season_start_date = season.get("startDate")
             crop = season.get("crop") or {}
             variety = season.get("variety") or {}
             active = season.get("activeGrowthStage") or {}
@@ -2767,6 +2808,9 @@ def _extract_snapshot_rows(
                 for idx, task in enumerate(sorted_tasks):
                     task_uuid = str(task.get("uuid") or f"{field_uuid}:{season_uuid}:{task_type}:{idx + 1}")
                     planned_date = task.get("plannedDate")
+                    # 播種タスクは plannedDate が空の場合、crop season の開始日を予定日として補完する。
+                    if task_type == "CropEstablishment" and not planned_date and crop_season_start_date:
+                        planned_date = crop_season_start_date
                     execution_date = task.get("executionDate")
                     task_date_raw = execution_date or planned_date
                     task_date = None
@@ -2780,20 +2824,36 @@ def _extract_snapshot_rows(
                     status = str(task.get("state") or "")
                     product_names: List[str] = []
                     dosage_parts: List[str] = []
+                    creation_flow_hint = ""
+                    spray_category = ""
 
                     dosed = task.get("dosedMap") or {}
+                    if isinstance(dosed, dict):
+                        creation_flow_hint = str(dosed.get("creationFlowHint") or "").strip()
+                        spray_category = str(dosed.get("applicationType") or "").strip().upper()
                     recipes = dosed.get("recipeV2") if isinstance(dosed, dict) else None
                     if isinstance(recipes, list):
+                        recipe_types: List[str] = []
                         for recipe in recipes:
                             if not isinstance(recipe, dict):
                                 continue
                             r_name = str(recipe.get("name") or "")
                             if r_name:
                                 product_names.append(r_name)
+                            r_type = str(recipe.get("type") or "").strip().upper()
+                            if r_type:
+                                recipe_types.append(r_type)
                             total = recipe.get("totalApplication")
                             unit = str(recipe.get("unit") or "")
                             if total is not None:
                                 dosage_parts.append(f"{total}{unit}")
+                        if task_type == "Spraying":
+                            priority = ["HERBICIDE", "FUNGICIDE", "INSECTICIDE", "FERTILIZER"]
+                            chosen = next((k for k in priority if k in recipe_types), "")
+                            if not chosen and recipe_types:
+                                chosen = recipe_types[0]
+                            if chosen:
+                                spray_category = chosen
                     if not product_names:
                         products = task.get("products") or []
                         if isinstance(products, list):
@@ -2829,6 +2889,8 @@ def _extract_snapshot_rows(
                             "assignee_name": assignee_name,
                             "product": " / ".join(product_names),
                             "dosage": " / ".join(dosage_parts),
+                            "spray_category": spray_category,
+                            "creation_flow_hint": creation_flow_hint,
                             "bbch_index": bbch_index,
                             "bbch_scale": bbch_scale,
                             "occurrence": idx + 1,
@@ -3088,6 +3150,7 @@ async def jobs_hfr_snapshot(
                 fields_saved = hfr_snapshot_store.upsert_fields(extracted["fields"])
                 tasks_saved = hfr_snapshot_store.upsert_tasks(extracted["tasks"])
                 pruned = hfr_snapshot_store.prune_snapshot_date(snapshot_date, run_id)
+                _hfr_snapshot_cache_invalidate_snapshot_date(snapshot_date)
                 _progress(f"step5: persisted fields_saved={fields_saved} tasks_saved={tasks_saved}")
                 _progress(
                     f"step5.5: pruned old runs runs_deleted={pruned.get('runs_deleted', 0)} "
@@ -3104,6 +3167,7 @@ async def jobs_hfr_snapshot(
         if should_persist:
             hfr_snapshot_store.finish_run(
                 run_id,
+                snapshot_date=snapshot_date,
                 status="success",
                 message="snapshot completed",
                 farms_scanned=farms_scanned,
@@ -3130,6 +3194,7 @@ async def jobs_hfr_snapshot(
         if should_persist:
             hfr_snapshot_store.finish_run(
                 run_id,
+                snapshot_date=snapshot_date,
                 status="failed",
                 message=str(exc.detail),
                 farms_scanned=farms_scanned,
@@ -3143,6 +3208,7 @@ async def jobs_hfr_snapshot(
         if should_persist:
             hfr_snapshot_store.finish_run(
                 run_id,
+                snapshot_date=snapshot_date,
                 status="failed",
                 message=str(exc),
                 farms_scanned=farms_scanned,
@@ -3154,45 +3220,403 @@ async def jobs_hfr_snapshot(
         raise HTTPException(500, {"reason": "snapshot_failed", "detail": str(exc)})
 
 
-@api_app.get("/hfr-snapshots")
-async def hfr_snapshots(snapshot_date: Optional[str] = None, farm_uuid: Optional[str] = None, limit: int = 2000):
+def _to_day_key(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, datetime):
+        jst = value.astimezone(timezone(timedelta(hours=9)))
+        return jst.date().isoformat()
+    s = str(value).strip()
+    if not s:
+        return ""
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        jst = dt.astimezone(timezone(timedelta(hours=9)))
+        return jst.date().isoformat()
+    except Exception:
+        return ""
+
+
+def _snapshot_task_family(task: Dict[str, Any]) -> str:
+    name = str(task.get("task_name") or "").strip()
+    if name:
+        return name
+    task_type = str(task.get("task_type") or "")
+    default_map = {
+        "Harvest": "収穫",
+        "Spraying": "防除",
+        "WaterManagement": "水管理",
+        "Scouting": "生育調査",
+        "CropEstablishment": "播種",
+        "LandPreparation": "土づくり",
+        "SeedTreatment": "種子処理",
+        "SeedBoxTreatment": "育苗箱処理",
+    }
+    return default_map.get(task_type, task_type or "その他")
+
+
+@api_app.get("/hfr-snapshots/summary")
+async def hfr_snapshots_summary(
+    snapshot_date: Optional[str] = None,
+    families: Optional[str] = None,
+    action_filter: str = "none",
+    refresh: bool = False,
+):
     try:
         hfr_snapshot_store.ensure_schema()
         day = datetime.strptime(snapshot_date, "%Y-%m-%d").date() if snapshot_date else datetime.now(timezone(timedelta(hours=9))).date()
-        data = hfr_snapshot_store.fetch_snapshot(day, farm_uuid=farm_uuid, limit=max(1, min(limit, 50000)))
+        family_list = [s.strip() for s in str(families or "").split(",") if s.strip()]
+        family_set = set(family_list)
+        cache_key = f"hfr:summary:{day}:{','.join(sorted(family_set))}:{action_filter}"
+        if not refresh:
+            cached = _hfr_snapshot_cache_get(cache_key)
+            if cached:
+                return {**cached["data"], "source": "cache", "cached_at": cached.get("cached_at")}
+
+        data = hfr_snapshot_store.fetch_snapshot(
+            day,
+            include_fields=False,
+            include_tasks=True,
+            task_limit=50000,
+            limit=50000,
+        )
+        tasks = data.get("tasks") or []
+        today = str(day)
+        in3days = (day + timedelta(days=3)).isoformat()
+
+        filtered_tasks: List[Dict[str, Any]] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            family = _snapshot_task_family(task)
+            if family_set and family not in family_set:
+                continue
+            planned = _to_day_key(task.get("planned_date")) or _to_day_key(task.get("task_date"))
+            execution = _to_day_key(task.get("execution_date"))
+            status = str(task.get("status") or "").upper()
+            done = bool(execution) or ("DONE" in status or "COMPLETED" in status or "EXECUTED" in status)
+            if action_filter == "overdue" and not (planned and planned < today and not done):
+                continue
+            if action_filter == "due_today" and not (planned and planned == today and not done):
+                continue
+            if action_filter == "upcoming_3days" and not (planned and today < planned <= in3days and not done):
+                continue
+            if action_filter == "future" and not (planned and planned > today and not done):
+                continue
+            if action_filter == "incomplete" and done:
+                continue
+
+            task["_family"] = family
+            task["_planned"] = planned
+            task["_done"] = done
+            filtered_tasks.append(task)
+
+        farmers_map: Dict[str, Dict[str, Any]] = {}
+        for task in filtered_tasks:
+            farmer_id = str(task.get("farm_uuid") or f"name:{task.get('farm_name') or ''}")
+            row = farmers_map.get(farmer_id)
+            if not row:
+                row = {"id": farmer_id, "name": str(task.get("farm_name") or ""), "field_set": set(), "tasks": []}
+                farmers_map[farmer_id] = row
+            field_uuid = str(task.get("field_uuid") or "")
+            if field_uuid:
+                row["field_set"].add(field_uuid)
+            row["tasks"].append(task)
+
+        def _counts(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+            due = completed = overdue = due_today = upcoming3 = future = 0
+            for t in rows:
+                planned = str(t.get("_planned") or "")
+                done = bool(t.get("_done"))
+                if not planned:
+                    if not done:
+                        future += 1
+                    continue
+                if planned <= today:
+                    due += 1
+                    if done:
+                        completed += 1
+                if planned < today and not done:
+                    overdue += 1
+                if planned == today and not done:
+                    due_today += 1
+                if today < planned <= in3days and not done:
+                    upcoming3 += 1
+                if planned > today and not done:
+                    future += 1
+            if due == 0 and rows:
+                due = len(rows)
+                completed = sum(1 for t in rows if t.get("_done"))
+            return {
+                "due": due,
+                "completed": completed,
+                "overdue": overdue,
+                "due_today": due_today,
+                "upcoming3": upcoming3,
+                "future": future,
+            }
+
+        def _rate(a: int, b: int) -> float:
+            return round((a * 100.0 / b), 1) if b > 0 else 0.0
+
+        farmers: List[Dict[str, Any]] = []
+        farmer_details: Dict[str, Any] = {}
+        for idx, (farmer_id, row) in enumerate(farmers_map.items(), start=1):
+            c = _counts(row["tasks"])
+            delay_rate = _rate(c["overdue"], c["due"])
+            completion_rate = _rate(c["completed"], c["due"])
+            farmers.append({
+                "id": farmer_id,
+                "name": row["name"] or f"農業者{idx}",
+                "field_count": len(row["field_set"]),
+                "due_task_count": c["due"],
+                "completed_count": c["completed"],
+                "overdue_count": c["overdue"],
+                "due_today_count": c["due_today"],
+                "upcoming_3days_count": c["upcoming3"],
+                "future_task_count": c["future"],
+                "delay_rate": delay_rate,
+                "completion_rate": completion_rate,
+                "delay_status": "good" if delay_rate < 15 else ("warn" if delay_rate < 30 else "bad"),
+                "trend_direction": "stable",
+            })
+
+            type_map: Dict[str, List[Dict[str, Any]]] = {}
+            for t in row["tasks"]:
+                label = f"{str(t.get('_family') or '')} {int(t.get('occurrence') or 1)}回目"
+                type_map.setdefault(label, []).append(t)
+            type_rows = []
+            for order, name in enumerate(sorted(type_map.keys()), start=1):
+                tc = _counts(type_map[name])
+                type_rows.append({
+                    "name": name,
+                    "display_order": order,
+                    "due_count": tc["due"],
+                    "completed_count": tc["completed"],
+                    "overdue_count": tc["overdue"],
+                    "pending_count": tc["future"],
+                    "completion_rate": _rate(tc["completed"], tc["due"]),
+                    "delay_rate": _rate(tc["overdue"], tc["due"]),
+                })
+            farmer_details[farmer_id] = {
+                "id": farmer_id,
+                "name": row["name"] or f"農業者{idx}",
+                "field_count": len(row["field_set"]),
+                "summary": {
+                    "due": c["due"],
+                    "completed": c["completed"],
+                    "overdue": c["overdue"],
+                    "pending": c["future"],
+                    "delay_rate": delay_rate,
+                    "completion_rate": completion_rate,
+                },
+                "task_types": type_rows,
+            }
+
+        total_due = sum(f["due_task_count"] for f in farmers)
+        total_completed = sum(f["completed_count"] for f in farmers)
+        total_overdue = sum(f["overdue_count"] for f in farmers)
+        total_due_today = sum(f["due_today_count"] for f in farmers)
+        total_upcoming = sum(f["upcoming_3days_count"] for f in farmers)
+        total_future = sum(f["future_task_count"] for f in farmers)
+
+        type_map_all: Dict[str, List[Dict[str, Any]]] = {}
+        for t in filtered_tasks:
+            label = f"{str(t.get('_family') or '')} {int(t.get('occurrence') or 1)}回目"
+            type_map_all.setdefault(label, []).append(t)
+        task_types = []
+        for order, name in enumerate(sorted(type_map_all.keys()), start=1):
+            tc = _counts(type_map_all[name])
+            task_types.append({
+                "task_type_name": name,
+                "display_order": order,
+                "due_count": tc["due"],
+                "completed_count": tc["completed"],
+                "overdue_count": tc["overdue"],
+                "pending_count": tc["future"],
+                "completion_rate": _rate(tc["completed"], tc["due"]),
+                "delay_rate": _rate(tc["overdue"], tc["due"]),
+            })
+
+        distribution_buckets = [(0, 5, "#22c55e", "0-5%"), (5, 10, "#22c55e", "5-10%"), (10, 15, "#22c55e", "10-15%"),
+                                (15, 20, "#f59e0b", "15-20%"), (20, 25, "#f59e0b", "20-25%"), (25, 30, "#f59e0b", "25-30%"),
+                                (30, 1000, "#ef4444", "30%+")]
+        distribution = []
+        for lo, hi, color, label in distribution_buckets:
+            cnt = sum(1 for f in farmers if lo <= float(f["delay_rate"]) < hi)
+            distribution.append({"bucket": label, "count": cnt, "color": color})
+
+        trend = []
+        for offset in range(29, -1, -1):
+            day_key = (day - timedelta(days=offset)).isoformat()
+            due = completed = overdue = 0
+            for t in filtered_tasks:
+                planned = str(t.get("_planned") or "")
+                if not planned or planned > day_key:
+                    continue
+                due += 1
+                done = bool(t.get("_done"))
+                exec_day = _to_day_key(t.get("execution_date"))
+                if done and (not exec_day or exec_day <= day_key):
+                    completed += 1
+                elif planned < day_key and not done:
+                    overdue += 1
+            if due == 0 and filtered_tasks:
+                due = len(filtered_tasks)
+                completed = sum(1 for t in filtered_tasks if t.get("_done"))
+            trend.append({
+                "date": f"{int(day_key[5:7])}/{int(day_key[8:10])}",
+                "completion_rate": _rate(completed, due),
+                "delay_rate": _rate(overdue, due),
+            })
+
+        payload = {
+            "ok": True,
+            "snapshot_date": str(day),
+            "kpi": {
+                "completion_rate": _rate(total_completed, total_due),
+                "completed_count": total_completed,
+                "due_count": total_due,
+                "overdue_count": total_overdue,
+                "delay_rate": _rate(total_overdue, total_due),
+                "due_today_count": total_due_today,
+                "upcoming_3days_count": total_upcoming,
+                "future_count": total_future,
+                "total_task_count": len(filtered_tasks),
+                "as_of": ((data.get("run") or {}).get("finished_at") or (data.get("run") or {}).get("started_at") or str(day)),
+            },
+            "farmers": farmers,
+            "task_types": task_types,
+            "distribution": distribution,
+            "trend": trend,
+            "farmer_details": farmer_details,
+            "as_of": ((data.get("run") or {}).get("finished_at") or (data.get("run") or {}).get("started_at") or str(day)),
+        }
+        _hfr_snapshot_cache_set(cache_key, payload)
         return {
+            **payload,
+            "source": "db",
+            "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+        }
+    except Exception as exc:
+        raise HTTPException(500, {"reason": "snapshot_summary_failed", "detail": str(exc)})
+
+
+@api_app.get("/hfr-snapshots")
+async def hfr_snapshots(
+    snapshot_date: Optional[str] = None,
+    farm_uuid: Optional[str] = None,
+    limit: int = 2000,
+    include_fields: bool = True,
+    include_tasks: bool = True,
+    field_limit: Optional[int] = None,
+    task_limit: Optional[int] = None,
+    refresh: bool = False,
+):
+    try:
+        hfr_snapshot_store.ensure_schema()
+        day = datetime.strptime(snapshot_date, "%Y-%m-%d").date() if snapshot_date else datetime.now(timezone(timedelta(hours=9))).date()
+        safe_limit = max(1, min(limit, 50000))
+        safe_field_limit = max(1, min(int(field_limit if field_limit is not None else safe_limit), 50000))
+        safe_task_limit = max(1, min(int(task_limit if task_limit is not None else safe_limit), 50000))
+        cache_key = (
+            f"hfr:snapshots:{day}:{farm_uuid or '*'}:{safe_limit}:"
+            f"if={int(include_fields)}:it={int(include_tasks)}:"
+            f"fl={safe_field_limit}:tl={safe_task_limit}"
+        )
+        if not refresh:
+            cached = _hfr_snapshot_cache_get(cache_key)
+            if cached:
+                return {
+                    **cached["data"],
+                    "source": "cache",
+                    "cached_at": cached.get("cached_at"),
+                }
+
+        data = hfr_snapshot_store.fetch_snapshot(
+            day,
+            farm_uuid=farm_uuid,
+            limit=safe_limit,
+            include_fields=include_fields,
+            include_tasks=include_tasks,
+            field_limit=safe_field_limit,
+            task_limit=safe_task_limit,
+        )
+        payload = {
             "ok": True,
             "snapshot_date": str(day),
             "run": data.get("run"),
             "fields": data.get("fields") or [],
             "tasks": data.get("tasks") or [],
         }
+        _hfr_snapshot_cache_set(cache_key, payload)
+        return {
+            **payload,
+            "source": "db",
+            "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+        }
     except Exception as exc:
         raise HTTPException(500, {"reason": "snapshot_read_failed", "detail": str(exc)})
 
 
 @api_app.get("/hfr-snapshots/dates")
-async def hfr_snapshot_dates(limit: int = 90):
+async def hfr_snapshot_dates(limit: int = 90, refresh: bool = False):
     try:
         hfr_snapshot_store.ensure_schema()
-        runs = hfr_snapshot_store.list_snapshot_runs(limit=max(1, min(limit, 3650)))
-        return {
+        safe_limit = max(1, min(limit, 3650))
+        cache_key = f"hfr:dates:{safe_limit}"
+        if not refresh:
+            cached = _hfr_snapshot_cache_get(cache_key)
+            if cached:
+                return {
+                    **cached["data"],
+                    "source": "cache",
+                    "cached_at": cached.get("cached_at"),
+                }
+
+        runs = hfr_snapshot_store.list_snapshot_runs(limit=safe_limit)
+        payload = {
             "ok": True,
             "runs": runs,
             "dates": [str((r or {}).get("snapshot_date")) for r in runs if (r or {}).get("snapshot_date")],
+        }
+        _hfr_snapshot_cache_set(cache_key, payload)
+        return {
+            **payload,
+            "source": "db",
+            "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
         }
     except Exception as exc:
         raise HTTPException(500, {"reason": "snapshot_dates_failed", "detail": str(exc)})
 
 
 @api_app.get("/hfr-snapshots/compare")
-async def hfr_snapshots_compare(from_date: str, to_date: str):
+async def hfr_snapshots_compare(from_date: str, to_date: str, refresh: bool = False):
     try:
         hfr_snapshot_store.ensure_schema()
         from_day = datetime.strptime(from_date, "%Y-%m-%d").date()
         to_day = datetime.strptime(to_date, "%Y-%m-%d").date()
+        cache_key = f"hfr:compare:{from_day}:{to_day}"
+        if not refresh:
+            cached = _hfr_snapshot_cache_get(cache_key)
+            if cached:
+                return {
+                    **cached["data"],
+                    "source": "cache",
+                    "cached_at": cached.get("cached_at"),
+                }
         data = hfr_snapshot_store.compare_snapshots(from_day, to_day)
-        return {"ok": True, **data}
+        payload = {"ok": True, **data}
+        _hfr_snapshot_cache_set(cache_key, payload)
+        return {
+            **payload,
+            "source": "db",
+            "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+        }
     except Exception as exc:
         raise HTTPException(500, {"reason": "snapshot_compare_failed", "detail": str(exc)})
 

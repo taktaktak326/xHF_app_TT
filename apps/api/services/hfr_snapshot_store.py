@@ -97,6 +97,8 @@ def ensure_schema() -> None:
                   assignee_name TEXT,
                   product TEXT,
                   dosage TEXT,
+                  spray_category TEXT,
+                  creation_flow_hint TEXT,
                   bbch_index TEXT,
                   bbch_scale TEXT,
                   occurrence INTEGER,
@@ -109,6 +111,18 @@ def ensure_schema() -> None:
                 """
                 ALTER TABLE hfr_snapshot_tasks
                 ADD COLUMN IF NOT EXISTS crop_uuid TEXT
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE hfr_snapshot_tasks
+                ADD COLUMN IF NOT EXISTS spray_category TEXT
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE hfr_snapshot_tasks
+                ADD COLUMN IF NOT EXISTS creation_flow_hint TEXT
                 """
             )
         conn.commit()
@@ -136,6 +150,7 @@ def start_run(run_id: str, snapshot_date: date, status: str = "running", message
 def finish_run(
     run_id: str,
     *,
+    snapshot_date: Optional[date] = None,
     status: str,
     message: Optional[str],
     farms_scanned: int,
@@ -159,6 +174,39 @@ def finish_run(
                 """,
                 (status, message, farms_scanned, farms_matched, fields_saved, tasks_saved, run_id),
             )
+            updated = int(cur.rowcount or 0)
+            if updated == 0:
+                fallback_date = snapshot_date or date.today()
+                cur.execute(
+                    """
+                    INSERT INTO hfr_snapshot_runs (
+                      run_id, snapshot_date, status, message,
+                      farms_scanned, farms_matched, fields_saved, tasks_saved,
+                      started_at, finished_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (run_id)
+                    DO UPDATE SET
+                      snapshot_date = EXCLUDED.snapshot_date,
+                      status = EXCLUDED.status,
+                      message = EXCLUDED.message,
+                      farms_scanned = EXCLUDED.farms_scanned,
+                      farms_matched = EXCLUDED.farms_matched,
+                      fields_saved = EXCLUDED.fields_saved,
+                      tasks_saved = EXCLUDED.tasks_saved,
+                      finished_at = NOW()
+                    """,
+                    (
+                        run_id,
+                        fallback_date,
+                        status,
+                        message,
+                        farms_scanned,
+                        farms_matched,
+                        fields_saved,
+                        tasks_saved,
+                    ),
+                )
         conn.commit()
 
 
@@ -250,13 +298,13 @@ def upsert_tasks(rows: List[Dict[str, Any]]) -> int:
                   farm_uuid, farm_name, field_name, user_name,
                   task_name, task_type, task_date,
                   planned_date, execution_date, status, assignee_name,
-                  product, dosage, bbch_index, bbch_scale, occurrence
+                  product, dosage, spray_category, creation_flow_hint, bbch_index, bbch_scale, occurrence
                 ) VALUES (
                   %(snapshot_date)s, %(run_id)s, %(task_uuid)s, %(field_uuid)s, %(season_uuid)s, %(crop_uuid)s,
                   %(farm_uuid)s, %(farm_name)s, %(field_name)s, %(user_name)s,
                   %(task_name)s, %(task_type)s, %(task_date)s,
                   %(planned_date)s, %(execution_date)s, %(status)s, %(assignee_name)s,
-                  %(product)s, %(dosage)s, %(bbch_index)s, %(bbch_scale)s, %(occurrence)s
+                  %(product)s, %(dosage)s, %(spray_category)s, %(creation_flow_hint)s, %(bbch_index)s, %(bbch_scale)s, %(occurrence)s
                 )
                 ON CONFLICT (snapshot_date, task_uuid)
                 DO UPDATE SET
@@ -277,6 +325,8 @@ def upsert_tasks(rows: List[Dict[str, Any]]) -> int:
                   assignee_name = EXCLUDED.assignee_name,
                   product = EXCLUDED.product,
                   dosage = EXCLUDED.dosage,
+                  spray_category = EXCLUDED.spray_category,
+                  creation_flow_hint = EXCLUDED.creation_flow_hint,
                   bbch_index = EXCLUDED.bbch_index,
                   bbch_scale = EXCLUDED.bbch_scale,
                   occurrence = EXCLUDED.occurrence,
@@ -288,7 +338,16 @@ def upsert_tasks(rows: List[Dict[str, Any]]) -> int:
     return len(rows)
 
 
-def fetch_snapshot(snapshot_date: date, farm_uuid: Optional[str] = None, limit: int = 2000) -> Dict[str, Any]:
+def fetch_snapshot(
+    snapshot_date: date,
+    farm_uuid: Optional[str] = None,
+    limit: int = 2000,
+    *,
+    include_fields: bool = True,
+    include_tasks: bool = True,
+    field_limit: Optional[int] = None,
+    task_limit: Optional[int] = None,
+) -> Dict[str, Any]:
     with _connect() as conn:
         with conn.cursor() as cur:
             run_q = """
@@ -302,7 +361,43 @@ def fetch_snapshot(snapshot_date: date, farm_uuid: Optional[str] = None, limit: 
             run = cur.fetchone()
             run_id = (run or {}).get("run_id")
             if not run_id:
-                return {"run": run, "fields": [], "tasks": []}
+                # Backward-compatibility: if runs table is empty but tasks/fields exist,
+                # infer the latest run_id from data tables.
+                cur.execute(
+                    """
+                    SELECT run_id
+                      FROM (
+                        SELECT run_id, MAX(fetched_at) AS last_at
+                          FROM hfr_snapshot_tasks
+                         WHERE snapshot_date = %s
+                         GROUP BY run_id
+                        UNION ALL
+                        SELECT run_id, MAX(fetched_at) AS last_at
+                          FROM hfr_snapshot_fields
+                         WHERE snapshot_date = %s
+                         GROUP BY run_id
+                      ) x
+                     ORDER BY last_at DESC NULLS LAST
+                     LIMIT 1
+                    """,
+                    (snapshot_date, snapshot_date),
+                )
+                inferred = cur.fetchone() or {}
+                run_id = inferred.get("run_id")
+                if not run_id:
+                    return {"run": run, "fields": [], "tasks": []}
+                run = {
+                    "run_id": run_id,
+                    "snapshot_date": snapshot_date,
+                    "status": "inferred",
+                    "message": "run row missing; inferred from snapshot tables",
+                }
+
+            safe_field_limit = int(field_limit if field_limit is not None else limit)
+            safe_task_limit = int(task_limit if task_limit is not None else limit)
+
+            fields: List[Dict[str, Any]] = []
+            tasks: List[Dict[str, Any]] = []
 
             if farm_uuid:
                 field_q = """
@@ -319,10 +414,12 @@ def fetch_snapshot(snapshot_date: date, farm_uuid: Optional[str] = None, limit: 
                      ORDER BY farm_name, field_name, task_date NULLS LAST, task_name
                      LIMIT %s
                 """
-                cur.execute(field_q, (snapshot_date, run_id, farm_uuid, limit))
-                fields = cur.fetchall() or []
-                cur.execute(task_q, (snapshot_date, run_id, farm_uuid, limit))
-                tasks = cur.fetchall() or []
+                if include_fields:
+                    cur.execute(field_q, (snapshot_date, run_id, farm_uuid, safe_field_limit))
+                    fields = cur.fetchall() or []
+                if include_tasks:
+                    cur.execute(task_q, (snapshot_date, run_id, farm_uuid, safe_task_limit))
+                    tasks = cur.fetchall() or []
             else:
                 field_q = """
                     SELECT *
@@ -338,10 +435,12 @@ def fetch_snapshot(snapshot_date: date, farm_uuid: Optional[str] = None, limit: 
                      ORDER BY farm_name, field_name, task_date NULLS LAST, task_name
                      LIMIT %s
                 """
-                cur.execute(field_q, (snapshot_date, run_id, limit))
-                fields = cur.fetchall() or []
-                cur.execute(task_q, (snapshot_date, run_id, limit))
-                tasks = cur.fetchall() or []
+                if include_fields:
+                    cur.execute(field_q, (snapshot_date, run_id, safe_field_limit))
+                    fields = cur.fetchall() or []
+                if include_tasks:
+                    cur.execute(task_q, (snapshot_date, run_id, safe_task_limit))
+                    tasks = cur.fetchall() or []
 
             return {
                 "run": run,
@@ -369,6 +468,50 @@ def list_snapshot_runs(limit: int = 90) -> List[Dict[str, Any]]:
                        finished_at
                   FROM hfr_snapshot_runs
                  ORDER BY snapshot_date DESC, started_at DESC
+                 LIMIT %s
+                """,
+                (safe_limit,),
+            )
+            rows = cur.fetchall() or []
+            if rows:
+                return rows
+
+            # Fallback when runs table is empty: reconstruct latest run per day
+            # from tasks/fields.
+            cur.execute(
+                """
+                WITH merged AS (
+                  SELECT snapshot_date, run_id, MAX(fetched_at) AS last_at
+                    FROM hfr_snapshot_tasks
+                   GROUP BY snapshot_date, run_id
+                  UNION ALL
+                  SELECT snapshot_date, run_id, MAX(fetched_at) AS last_at
+                    FROM hfr_snapshot_fields
+                   GROUP BY snapshot_date, run_id
+                ),
+                ranked AS (
+                  SELECT snapshot_date, run_id, MAX(last_at) AS last_at
+                    FROM merged
+                   GROUP BY snapshot_date, run_id
+                ),
+                picked AS (
+                  SELECT DISTINCT ON (snapshot_date)
+                         snapshot_date, run_id, last_at
+                    FROM ranked
+                   ORDER BY snapshot_date DESC, last_at DESC NULLS LAST
+                )
+                SELECT run_id,
+                       snapshot_date,
+                       'inferred'::TEXT AS status,
+                       'run row missing; inferred from snapshot tables'::TEXT AS message,
+                       0::INTEGER AS farms_scanned,
+                       0::INTEGER AS farms_matched,
+                       0::INTEGER AS fields_saved,
+                       0::INTEGER AS tasks_saved,
+                       NULL::TIMESTAMPTZ AS started_at,
+                       last_at AS finished_at
+                  FROM picked
+                 ORDER BY snapshot_date DESC
                  LIMIT %s
                 """,
                 (safe_limit,),
