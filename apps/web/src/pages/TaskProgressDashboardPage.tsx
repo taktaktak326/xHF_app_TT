@@ -1335,6 +1335,38 @@ export function TaskProgressDashboardPage() {
           })();
         }
 
+        if (useCachedSnap) {
+          setSnapshotTasks((activeSnap?.data?.tasks ?? []) as SnapshotTask[]);
+          setSnapshotTasksLoaded(true);
+        } else {
+          setTasksHydrating(true);
+          void (async () => {
+            try {
+              const taskRes = await fetch(
+                withApiBase(
+                  `/hfr-snapshots?snapshot_date=${encodeURIComponent(snapshotDate)}`
+                  + `&include_fields=false&include_tasks=true&task_limit=${SNAPSHOT_TASK_LIMIT}&limit=${SNAPSHOT_TASK_LIMIT}`,
+                ),
+                { signal: controller.signal },
+              );
+              const taskJson = await taskRes.json();
+              if (!active || !taskRes.ok || taskJson?.ok === false) return;
+              const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
+              snapshotPageCache.set(snapKey, {
+                data: taskJson,
+                expiresAt,
+              });
+              writeSessionCache(snapKey, taskJson, expiresAt);
+              setSnapshotTasks((taskJson.tasks ?? []) as SnapshotTask[]);
+              setSnapshotTasksLoaded(true);
+            } catch {
+              // 背景ロード失敗は画面全体エラーにしない
+            } finally {
+              if (active) setTasksHydrating(false);
+            }
+          })();
+        }
+
       } catch (error: any) {
         if (!active || error?.name === 'AbortError') return;
         setSnapshotErr(error?.message || 'スナップショットの取得に失敗しました');
@@ -1727,39 +1759,6 @@ export function TaskProgressDashboardPage() {
     }
   };
 
-  const loadSnapshotTasks = async () => {
-    if (tasksHydrating) return;
-    setTasksHydrating(true);
-    try {
-      const key = `${snapshotDate}:tasks:${SNAPSHOT_TASK_LIMIT}`;
-      const now = Date.now();
-      const cached = snapshotPageCache.get(key);
-      let json: any;
-      if (cached && cached.expiresAt > now) {
-        json = cached.data;
-      } else {
-        const res = await fetch(
-          withApiBase(
-            `/hfr-snapshots?snapshot_date=${encodeURIComponent(snapshotDate)}`
-            + `&include_fields=false&include_tasks=true&task_limit=${SNAPSHOT_TASK_LIMIT}&limit=${SNAPSHOT_TASK_LIMIT}`,
-          ),
-        );
-        json = await res.json();
-        if (!res.ok || json?.ok === false) {
-          const reason = json?.detail?.reason || json?.reason || `HTTP ${res.status}`;
-          throw new Error(`タスク一覧取得失敗: ${reason}`);
-        }
-        snapshotPageCache.set(key, { data: json, expiresAt: now + SNAPSHOT_CLIENT_CACHE_TTL_MS });
-      }
-      setSnapshotTasks((json?.tasks ?? []) as SnapshotTask[]);
-      setSnapshotTasksLoaded(true);
-    } catch (err: any) {
-      setManualUpdateMsg(err?.message || 'タスク一覧の取得に失敗しました');
-    } finally {
-      setTasksHydrating(false);
-    }
-  };
-
   const handleManualUpdate = async () => {
     if (!canManualUpdate || !auth?.login?.login_token || !auth?.api_token) return;
     setManualUpdateLoading(true);
@@ -2028,11 +2027,6 @@ export function TaskProgressDashboardPage() {
         <h3>タスクスナップショット一覧（表示 {visibleTasks.length} / 全 {filteredSnapshotTasks.length}件）</h3>
         <p className="manual-update-msg">画面は軽量表示。大量データはCSV出力で確認してください。</p>
         <div className="snapshot-table-controls">
-          <button type="button" onClick={loadSnapshotTasks} disabled={snapshotTasksLoaded || tasksHydrating}>
-            {tasksHydrating ? 'タスク一覧を読込中...' : snapshotTasksLoaded ? 'タスク一覧ロード済み' : 'タスク一覧を読み込む'}
-          </button>
-        </div>
-        <div className="snapshot-table-controls">
           <button
             type="button"
             onClick={() => setVisibleTaskRows((v) => Math.min(filteredSnapshotTasks.length, v + TASK_ROWS_STEP))}
@@ -2048,9 +2042,9 @@ export function TaskProgressDashboardPage() {
             すべて表示
           </button>
         </div>
-        {!snapshotTasksLoaded ? (
-          <p className="manual-update-msg">タスクテーブルは未ロードです。必要時のみ「タスク一覧を読み込む」を押してください。</p>
-        ) : (
+        {!snapshotTasksLoaded && (
+          <p className="manual-update-msg">タスク一覧を自動取得しています...</p>
+        )}
         <div className="table-wrap table-wrap-wide">
           <table>
             <thead>
@@ -2125,7 +2119,6 @@ export function TaskProgressDashboardPage() {
             </tbody>
           </table>
         </div>
-        )}
       </section>
     </div>
   );
