@@ -296,6 +296,11 @@ query CombinedFieldData(
     uuid
     name
     area
+    farmV2 {
+      uuid
+      name
+      owner { firstName lastName email }
+    }
     boundary @include(if: $withBoundary)
 
     cropSeasonsV2(lifecycleState: $cropSeasonLifeCycleStates) @include(if: $withCropSeasonsV2) {

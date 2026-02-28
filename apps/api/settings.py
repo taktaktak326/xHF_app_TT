@@ -21,9 +21,17 @@ class Settings(BaseSettings):
     XARVIO_GRAPHQL_ENDPOINT: Optional[str] = None
     GRAPHQL_END_POINT: Optional[str] = None
 
+    # Snapshot job / storage
+    HFR_SNAPSHOT_DATABASE_URL: Optional[str] = None
+    DATABASE_URL: Optional[str] = None
+    SNAPSHOT_USER_EMAIL: Optional[str] = None
+    SNAPSHOT_USER_PASSWORD: Optional[str] = None
+    SNAPSHOT_JOB_SECRET: Optional[str] = None
+
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"
 
     @property
     def GRAPHQL_ENDPOINT(self) -> str:

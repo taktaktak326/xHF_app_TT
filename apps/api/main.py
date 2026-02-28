@@ -3,7 +3,9 @@ import asyncio
 import json
 import re
 import math
-from datetime import datetime, timedelta, timezone
+import random
+from datetime import datetime, timedelta, timezone, date
+from uuid import uuid4
 import io
 import zipfile
 import os
@@ -15,7 +17,7 @@ from urllib.parse import urlparse, unquote, quote
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Path
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Path, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response, FileResponse
@@ -46,6 +48,7 @@ from schemas import (
     MasterdataTillageSystemsReq,
     CropSeasonCreateReq,
     CrossFarmDashboardSearchReq,
+    HfrSnapshotJobReq,
 )
 from pydantic import BaseModel
 from services.gigya import gigya_login_impl
@@ -53,6 +56,7 @@ from services.xarvio import get_api_token_impl
 from services.graphql_client import call_graphql
 from services.field_location import enrich_field_with_location, get_pref_city_status, start_pref_city_warmup
 from services.cache import get_last_response, get_by_operation, clear_cache, save_response
+from services import hfr_snapshot_store
 from graphql.queries import (
     FARMS_OVERVIEW,
     FIELDS_BY_FARM,
@@ -2640,6 +2644,447 @@ async def cache_graphql_clear():
     """
     clear_cache()
     return {"ok": True, "cleared": True}
+
+
+def _response_to_json(resp: Response) -> Dict[str, Any]:
+    raw = getattr(resp, "body", b"") or b""
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+    return json.loads(text) if text else {}
+
+
+def _full_name(person: Any) -> str:
+    if not isinstance(person, dict):
+        return ""
+    first = str(person.get("firstName") or "").strip()
+    last = str(person.get("lastName") or "").strip()
+    full = f"{last} {first}".strip()
+    return full or str(person.get("email") or "").strip()
+
+
+def _task_sort_time(task: Dict[str, Any]) -> float:
+    for key in ("executionDate", "plannedDate"):
+        raw = task.get(key)
+        if not raw:
+            continue
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+    return float("inf")
+
+
+def _extract_snapshot_rows(
+    *,
+    run_id: str,
+    snapshot_date: date,
+    fields: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    field_rows: List[Dict[str, Any]] = []
+    task_rows: List[Dict[str, Any]] = []
+
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        field_uuid = str(field.get("uuid") or "")
+        if not field_uuid:
+            continue
+        farm = field.get("farmV2") if isinstance(field.get("farmV2"), dict) else {}
+        farm_uuid = str((farm or {}).get("uuid") or "")
+        farm_name = str((farm or {}).get("name") or "")
+        owner = (farm or {}).get("owner") or {}
+        user_name = _full_name(owner)
+        field_name = str(field.get("name") or "")
+        area_m2 = field.get("area")
+        crop_seasons = field.get("cropSeasonsV2") or []
+
+        if not crop_seasons:
+            field_rows.append(
+                {
+                    "snapshot_date": snapshot_date,
+                    "run_id": run_id,
+                    "field_uuid": field_uuid,
+                    "season_uuid": "",
+                    "field_name": field_name,
+                    "farm_uuid": farm_uuid,
+                    "farm_name": farm_name,
+                    "user_name": user_name,
+                    "crop_name": "",
+                    "variety_name": "",
+                    "area_m2": area_m2,
+                    "bbch_index": "",
+                    "bbch_scale": "",
+                }
+            )
+            continue
+
+        for season in crop_seasons:
+            if not isinstance(season, dict):
+                continue
+            season_uuid = str(season.get("uuid") or "")
+            crop = season.get("crop") or {}
+            variety = season.get("variety") or {}
+            active = season.get("activeGrowthStage") or {}
+            crop_name = str((crop or {}).get("name") or "")
+            variety_name = str((variety or {}).get("name") or "")
+            bbch_index = str((active or {}).get("index") or "")
+            bbch_scale = str((active or {}).get("scale") or "")
+
+            field_rows.append(
+                {
+                    "snapshot_date": snapshot_date,
+                    "run_id": run_id,
+                    "field_uuid": field_uuid,
+                    "season_uuid": season_uuid,
+                    "field_name": field_name,
+                    "farm_uuid": farm_uuid,
+                    "farm_name": farm_name,
+                    "user_name": user_name,
+                    "crop_name": crop_name,
+                    "variety_name": variety_name,
+                    "area_m2": area_m2,
+                    "bbch_index": bbch_index,
+                    "bbch_scale": bbch_scale,
+                }
+            )
+
+            task_lists: List[tuple[str, str, List[Dict[str, Any]]]] = []
+            task_lists.append(("Harvest", "収穫", list(season.get("harvests") or [])))
+            task_lists.append(("Spraying", "防除", list(season.get("sprayingsV2") or [])))
+            task_lists.append(("CropEstablishment", "播種", list(season.get("cropEstablishments") or [])))
+            task_lists.append(("WaterManagement", "水管理", list(season.get("waterManagementTasks") or [])))
+            task_lists.append(("Scouting", "生育調査", list(season.get("scoutingTasks") or [])))
+            task_lists.append(("LandPreparation", "土づくり", list(season.get("landPreparations") or [])))
+            task_lists.append(("SeedTreatment", "種子処理", list(season.get("seedTreatmentTasks") or [])))
+            task_lists.append(("SeedBoxTreatment", "育苗箱処理", list(season.get("seedBoxTreatments") or [])))
+
+            for task_type, task_name, tasks in task_lists:
+                if not tasks:
+                    continue
+                sorted_tasks = sorted([t for t in tasks if isinstance(t, dict)], key=_task_sort_time)
+                for idx, task in enumerate(sorted_tasks):
+                    task_uuid = str(task.get("uuid") or f"{field_uuid}:{season_uuid}:{task_type}:{idx + 1}")
+                    planned_date = task.get("plannedDate")
+                    execution_date = task.get("executionDate")
+                    task_date_raw = execution_date or planned_date
+                    task_date = None
+                    if task_date_raw:
+                        try:
+                            task_date = datetime.fromisoformat(str(task_date_raw).replace("Z", "+00:00")).date()
+                        except Exception:
+                            task_date = None
+
+                    assignee_name = _full_name(task.get("assignee") or {})
+                    status = str(task.get("state") or "")
+                    product_names: List[str] = []
+                    dosage_parts: List[str] = []
+
+                    dosed = task.get("dosedMap") or {}
+                    recipes = dosed.get("recipeV2") if isinstance(dosed, dict) else None
+                    if isinstance(recipes, list):
+                        for recipe in recipes:
+                            if not isinstance(recipe, dict):
+                                continue
+                            r_name = str(recipe.get("name") or "")
+                            if r_name:
+                                product_names.append(r_name)
+                            total = recipe.get("totalApplication")
+                            unit = str(recipe.get("unit") or "")
+                            if total is not None:
+                                dosage_parts.append(f"{total}{unit}")
+                    if not product_names:
+                        products = task.get("products") or []
+                        if isinstance(products, list):
+                            for prod in products:
+                                if not isinstance(prod, dict):
+                                    continue
+                                p_name = str(prod.get("name") or prod.get("uuid") or "")
+                                if p_name:
+                                    product_names.append(p_name)
+                                app_rate = prod.get("applicationRate")
+                                unit = str(prod.get("unit") or "")
+                                if app_rate is not None:
+                                    dosage_parts.append(f"{app_rate}{unit}")
+
+                    task_rows.append(
+                        {
+                            "snapshot_date": snapshot_date,
+                            "run_id": run_id,
+                            "task_uuid": task_uuid,
+                            "field_uuid": field_uuid,
+                            "season_uuid": season_uuid,
+                            "farm_uuid": farm_uuid,
+                            "farm_name": farm_name,
+                            "field_name": field_name,
+                            "user_name": user_name,
+                            "task_name": task_name,
+                            "task_type": task_type,
+                            "task_date": task_date,
+                            "planned_date": planned_date,
+                            "execution_date": execution_date,
+                            "status": status,
+                            "assignee_name": assignee_name,
+                            "product": " / ".join(product_names),
+                            "dosage": " / ".join(dosage_parts),
+                            "bbch_index": bbch_index,
+                            "bbch_scale": bbch_scale,
+                            "occurrence": idx + 1,
+                        }
+                    )
+
+    return {"fields": field_rows, "tasks": task_rows}
+
+
+@api_app.post("/jobs/hfr-snapshot")
+async def jobs_hfr_snapshot(
+    req: HfrSnapshotJobReq,
+    x_job_secret: Optional[str] = Header(default=None, alias="X-Job-Secret"),
+):
+    expected_secret = os.getenv("SNAPSHOT_JOB_SECRET", "").strip()
+    if expected_secret and x_job_secret != expected_secret:
+        raise HTTPException(401, {"reason": "unauthorized_job"})
+
+    snapshot_date = datetime.now(timezone(timedelta(hours=9))).date()
+    run_id = f"hfr-{snapshot_date.isoformat()}-{uuid4().hex[:8]}"
+    farms_scanned = 0
+    farms_matched = 0
+    fields_saved = 0
+    tasks_saved = 0
+    should_persist = not req.dryRun
+    started_at = time.perf_counter()
+
+    def _progress(message: str):
+        elapsed = time.perf_counter() - started_at
+        print(f"[HFR_SNAPSHOT][{run_id}] +{elapsed:.1f}s {message}", flush=True)
+
+    _progress(f"job started dryRun={req.dryRun} suffix={req.suffix} language={req.languageCode}")
+
+    if should_persist:
+        try:
+            hfr_snapshot_store.ensure_schema()
+        except Exception as exc:
+            raise HTTPException(500, {"reason": "snapshot_store_not_ready", "detail": str(exc)})
+        hfr_snapshot_store.start_run(run_id, snapshot_date, status="running", message="job started")
+    try:
+        email = os.getenv("SNAPSHOT_USER_EMAIL", "").strip()
+        password = os.getenv("SNAPSHOT_USER_PASSWORD", "").strip()
+        if not email or not password:
+            raise HTTPException(500, {"reason": "snapshot_credentials_missing"})
+
+        _progress("auth: gigya login started")
+        login = await gigya_login_impl(email, password)
+        _progress("auth: gigya login completed")
+        four = FourValues(
+            login_token=login.get("login_token") or "",
+            gigya_uuid=login.get("gigya_uuid") or "",
+            gigya_uuid_signature=login.get("gigya_uuid_signature") or "",
+            gigya_signature_timestamp=login.get("gigya_signature_timestamp") or "",
+        )
+        _progress("auth: xarvio token started")
+        api_token = await get_api_token_impl(four)
+        login_token = four.login_token
+        _progress("auth: xarvio token completed")
+
+        _progress("step1: farms overview started")
+        farms_out = await call_graphql(make_payload("FarmsOverview", FARMS_OVERVIEW), login_token, api_token)
+        farms_data = (((farms_out.get("response") or {}).get("data") or {}).get("farms") or [])
+        all_farm_uuids = [str(f.get("uuid")) for f in farms_data if isinstance(f, dict) and f.get("uuid")]
+        farms_scanned = len(all_farm_uuids)
+        _progress(f"step1: farms overview completed farms_scanned={farms_scanned}")
+
+        _progress("step2: hfr candidate scan started")
+        cand_resp = await farms_hfr_candidates(
+            HfrFarmCandidatesReq(
+                login_token=login_token,
+                api_token=api_token,
+                farm_uuids=all_farm_uuids,
+                suffix=req.suffix,
+                includeTokens=False,
+            )
+        )
+        cand_json = _response_to_json(cand_resp)
+        matched_farm_uuids = (((cand_json.get("response") or {}).get("data") or {}).get("matchedFarmUuids") or [])
+        matched_farm_uuids = [str(u) for u in matched_farm_uuids if str(u)]
+        farms_matched = len(matched_farm_uuids)
+        _progress(f"step2: hfr candidate scan completed farms_matched={farms_matched}")
+
+        if matched_farm_uuids:
+            chunk_size = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_SIZE", "30")), 100))
+            chunk_attempts = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_ATTEMPTS", "3")), 8))
+            retry_backoff_sec = max(0.1, float(os.getenv("HFR_SNAPSHOT_CHUNK_RETRY_BACKOFF_SEC", "2.0")))
+            collected_fields: List[Dict[str, Any]] = []
+            farm_chunks = _chunk_list(matched_farm_uuids, chunk_size)
+            total_chunks = len(farm_chunks)
+            _progress(
+                f"step3: task fetch started chunk_size={chunk_size} total_chunks={total_chunks} "
+                f"attempts={chunk_attempts}"
+            )
+
+            for idx, farm_chunk in enumerate(farm_chunks, start=1):
+                _progress(f"step3: chunk {idx}/{total_chunks} started farms={len(farm_chunk)}")
+                combined_json = None
+                last_http_exc: Optional[HTTPException] = None
+                last_exc: Optional[Exception] = None
+                for attempt in range(1, chunk_attempts + 1):
+                    try:
+                        combined_resp = await combined_field_data_tasks(
+                            CombinedFieldDataTasksReq(
+                                login_token=login_token,
+                                api_token=api_token,
+                                farm_uuids=farm_chunk,
+                                languageCode=req.languageCode,
+                                withBoundary=False,
+                                withCropSeasonsV2=True,
+                                withHarvests=True,
+                                withCropEstablishments=True,
+                                withLandPreparations=True,
+                                withDroneFlights=False,
+                                withSeedTreatments=True,
+                                withSeedBoxTreatments=True,
+                                withSmartSprayingTasks=False,
+                                withWaterManagementTasks=True,
+                                withScoutingTasks=True,
+                                withObservations=False,
+                                withSprayingsV2=True,
+                                withSoilSamplingTasks=False,
+                            )
+                        )
+                        combined_json = _response_to_json(combined_resp)
+                        break
+                    except HTTPException as exc:
+                        last_http_exc = exc
+                        retryable_status = exc.status_code in (429, 500, 502, 503, 504)
+                        if attempt >= chunk_attempts or not retryable_status:
+                            raise
+                        sleep_s = retry_backoff_sec * attempt + random.uniform(0.0, 0.6)
+                        _progress(
+                            f"step3: chunk {idx}/{total_chunks} retry {attempt}/{chunk_attempts - 1} "
+                            f"status={exc.status_code} wait={sleep_s:.1f}s"
+                        )
+                        await asyncio.sleep(sleep_s)
+                    except Exception as exc:  # pylint: disable=broad-except
+                        last_exc = exc
+                        if attempt >= chunk_attempts:
+                            raise
+                        sleep_s = retry_backoff_sec * attempt + random.uniform(0.0, 0.6)
+                        _progress(
+                            f"step3: chunk {idx}/{total_chunks} retry {attempt}/{chunk_attempts - 1} "
+                            f"error={exc.__class__.__name__} wait={sleep_s:.1f}s"
+                        )
+                        await asyncio.sleep(sleep_s)
+
+                if combined_json is None:
+                    if last_http_exc is not None:
+                        raise last_http_exc
+                    if last_exc is not None:
+                        raise last_exc
+                    raise HTTPException(500, {"reason": "snapshot_chunk_no_response"})
+
+                fields = (((combined_json.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
+                if isinstance(fields, list):
+                    collected_fields.extend([f for f in fields if isinstance(f, dict)])
+                    _progress(
+                        f"step3: chunk {idx}/{total_chunks} completed "
+                        f"fields_in_chunk={len(fields)} collected_fields={len(collected_fields)}"
+                    )
+                else:
+                    _progress(f"step3: chunk {idx}/{total_chunks} completed with no fieldsV2 list")
+
+            _progress(f"step3: fetch completed collected_fields={len(collected_fields)}")
+            extracted = _extract_snapshot_rows(run_id=run_id, snapshot_date=snapshot_date, fields=collected_fields)
+            _progress(
+                f"step4: extraction completed field_rows={len(extracted['fields'])} "
+                f"task_rows={len(extracted['tasks'])}"
+            )
+            if not req.dryRun:
+                fields_saved = hfr_snapshot_store.upsert_fields(extracted["fields"])
+                tasks_saved = hfr_snapshot_store.upsert_tasks(extracted["tasks"])
+                _progress(f"step5: persisted fields_saved={fields_saved} tasks_saved={tasks_saved}")
+            else:
+                fields_saved = len(extracted["fields"])
+                tasks_saved = len(extracted["tasks"])
+                _progress(f"step5: dry run counts fields={fields_saved} tasks={tasks_saved}")
+        else:
+            _progress("step3: skipped (no matched farms)")
+
+        if should_persist:
+            hfr_snapshot_store.finish_run(
+                run_id,
+                status="success",
+                message="snapshot completed",
+                farms_scanned=farms_scanned,
+                farms_matched=farms_matched,
+                fields_saved=fields_saved,
+                tasks_saved=tasks_saved,
+            )
+        _progress(
+            f"job completed farms_scanned={farms_scanned} farms_matched={farms_matched} "
+            f"fields={fields_saved} tasks={tasks_saved}"
+        )
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "snapshot_date": str(snapshot_date),
+            "farms_scanned": farms_scanned,
+            "farms_matched": farms_matched,
+            "fields_saved": fields_saved,
+            "tasks_saved": tasks_saved,
+            "dry_run": req.dryRun,
+        }
+    except HTTPException as exc:
+        if should_persist:
+            hfr_snapshot_store.finish_run(
+                run_id,
+                status="failed",
+                message=str(exc.detail),
+                farms_scanned=farms_scanned,
+                farms_matched=farms_matched,
+                fields_saved=fields_saved,
+                tasks_saved=tasks_saved,
+            )
+        _progress(f"job failed (http) detail={exc.detail}")
+        raise
+    except Exception as exc:
+        if should_persist:
+            hfr_snapshot_store.finish_run(
+                run_id,
+                status="failed",
+                message=str(exc),
+                farms_scanned=farms_scanned,
+                farms_matched=farms_matched,
+                fields_saved=fields_saved,
+                tasks_saved=tasks_saved,
+            )
+        _progress(f"job failed (exception) type={exc.__class__.__name__} detail={str(exc)}")
+        raise HTTPException(500, {"reason": "snapshot_failed", "detail": str(exc)})
+
+
+@api_app.get("/hfr-snapshots")
+async def hfr_snapshots(snapshot_date: Optional[str] = None, farm_uuid: Optional[str] = None, limit: int = 2000):
+    try:
+        hfr_snapshot_store.ensure_schema()
+        day = datetime.strptime(snapshot_date, "%Y-%m-%d").date() if snapshot_date else datetime.now(timezone(timedelta(hours=9))).date()
+        data = hfr_snapshot_store.fetch_snapshot(day, farm_uuid=farm_uuid, limit=max(1, min(limit, 10000)))
+        return {
+            "ok": True,
+            "snapshot_date": str(day),
+            "run": data.get("run"),
+            "fields": data.get("fields") or [],
+            "tasks": data.get("tasks") or [],
+        }
+    except Exception as exc:
+        raise HTTPException(500, {"reason": "snapshot_read_failed", "detail": str(exc)})
+
+
+@api_app.get("/hfr-snapshots/compare")
+async def hfr_snapshots_compare(from_date: str, to_date: str):
+    try:
+        hfr_snapshot_store.ensure_schema()
+        from_day = datetime.strptime(from_date, "%Y-%m-%d").date()
+        to_day = datetime.strptime(to_date, "%Y-%m-%d").date()
+        data = hfr_snapshot_store.compare_snapshots(from_day, to_day)
+        return {"ok": True, **data}
+    except Exception as exc:
+        raise HTTPException(500, {"reason": "snapshot_compare_failed", "detail": str(exc)})
 
 
 app = FastAPI()

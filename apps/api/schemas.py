@@ -227,3 +227,9 @@ class CrossFarmDashboardSearchReq(BaseModel):
 
     class Config:
         extra = "allow"
+
+
+class HfrSnapshotJobReq(BaseModel):
+    suffix: str = "HFR"
+    languageCode: str = "ja"
+    dryRun: bool = False
