@@ -252,6 +252,7 @@ const TASK_ROWS_STEP = 50;
 const snapshotPageCache = new Map<string, { expiresAt: number; data: any }>();
 const snapshotDatesCache = new Map<string, { expiresAt: number; data: any }>();
 const jstDayKeyCache = new Map<string, string>();
+const sprayMasterCache = new Map<string, { expiresAt: number; data: Record<string, string> }>();
 const SNAPSHOT_SS_PREFIX = 'hfr:ss:v1';
 
 function readSessionCache<T>(key: string): { data: T; expiresAt: number } | null {
@@ -1210,7 +1211,7 @@ export function TaskProgressDashboardPage() {
         }
 
         let metaJson: any;
-        let summaryJson: any;
+        let summaryJson: any = null;
         let dates: string[] = [];
 
         if (useCachedMeta) metaJson = activeMeta?.data;
@@ -1232,20 +1233,7 @@ export function TaskProgressDashboardPage() {
         const hasRun = Boolean(metaJson?.run?.run_id);
         if (useCachedSummary) {
           summaryJson = activeSummary?.data;
-        } else if (hasRun) {
-          const summaryRes = await fetch(
-            withApiBase(`/hfr-snapshots/summary?snapshot_date=${encodeURIComponent(snapshotDate)}`),
-            { signal: controller.signal },
-          );
-          summaryJson = await summaryRes.json();
-          if (!summaryRes.ok || summaryJson?.ok === false) {
-            const reason = summaryJson?.detail?.reason || summaryJson?.reason || `HTTP ${summaryRes.status}`;
-            throw new Error(`サマリー取得失敗: ${reason}`);
-          }
-          const expiresAt = now + SNAPSHOT_CLIENT_CACHE_TTL_MS;
-          snapshotPageCache.set(summaryKey, { data: summaryJson, expiresAt });
-          writeSessionCache(summaryKey, summaryJson, expiresAt);
-        } else {
+        } else if (!hasRun) {
           summaryJson = {
             kpi: emptyDashboardBundle(snapshotDate).kpi,
             farmers: [],
@@ -1291,16 +1279,43 @@ export function TaskProgressDashboardPage() {
         setSnapshotFields([]);
         setSnapshotFieldsLoaded(false);
         setSnapshotTasks([]);
-        setDashboardState({
-          kpi: summaryJson?.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
-          farmers: summaryJson?.farmers ?? [],
-          task_types: summaryJson?.task_types ?? [],
-          distribution: summaryJson?.distribution ?? [],
-          trend: summaryJson?.trend ?? [],
-          farmer_details: summaryJson?.farmer_details ?? {},
-          as_of: summaryJson?.as_of ?? snapshotDate,
-        });
+        setDashboardState((prev) => ({
+          kpi: summaryJson?.kpi ?? prev.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
+          farmers: summaryJson?.farmers ?? prev.farmers ?? [],
+          task_types: summaryJson?.task_types ?? prev.task_types ?? [],
+          distribution: summaryJson?.distribution ?? prev.distribution ?? [],
+          trend: summaryJson?.trend ?? prev.trend ?? [],
+          farmer_details: summaryJson?.farmer_details ?? prev.farmer_details ?? {},
+          as_of: summaryJson?.as_of ?? prev.as_of ?? snapshotDate,
+        }));
         setAvailableDates(dates);
+
+        if (!useCachedSummary && hasRun) {
+          void (async () => {
+            try {
+              const summaryRes = await fetch(
+                withApiBase(`/hfr-snapshots/summary?snapshot_date=${encodeURIComponent(snapshotDate)}`),
+                { signal: controller.signal },
+              );
+              const json = await summaryRes.json();
+              if (!active || !summaryRes.ok || json?.ok === false) return;
+              const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
+              snapshotPageCache.set(summaryKey, { data: json, expiresAt });
+              writeSessionCache(summaryKey, json, expiresAt);
+              setDashboardState({
+                kpi: json?.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
+                farmers: json?.farmers ?? [],
+                task_types: json?.task_types ?? [],
+                distribution: json?.distribution ?? [],
+                trend: json?.trend ?? [],
+                farmer_details: json?.farmer_details ?? {},
+                as_of: json?.as_of ?? snapshotDate,
+              });
+            } catch {
+              // 背景ロード失敗は画面全体エラーにしない
+            }
+          })();
+        }
 
         if (useCachedSnap) {
           setSnapshotTasks((activeSnap?.data?.tasks ?? []) as SnapshotTask[]);
@@ -1359,27 +1374,33 @@ export function TaskProgressDashboardPage() {
     let active = true;
     const controller = new AbortController();
     const loadSprayMaster = async () => {
-      if (!auth?.login?.login_token || !auth?.api_token) {
-        setSprayCategoryMap({});
-        return;
-      }
       const sprayTasks = snapshotTasks.filter((t) => t.task_type === 'Spraying');
       if (sprayTasks.length === 0) {
         setSprayCategoryMap({});
         return;
       }
+      const cacheKey = `${COUNTRY_UUID_JP}:${RICE_CROP_UUID}:FIELDTREATMENT`;
+      const now = Date.now();
+      const cached = sprayMasterCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        setSprayCategoryMap(cached.data);
+        return;
+      }
       try {
+        const body: Record<string, unknown> = {
+          country_uuid: COUNTRY_UUID_JP,
+          crop_uuid: RICE_CROP_UUID,
+          task_type_code: 'FIELDTREATMENT',
+        };
+        if (auth?.login?.login_token && auth?.api_token) {
+          body.login_token = auth.login.login_token;
+          body.api_token = auth.api_token;
+        }
         const res = await fetch(withApiBase('/crop-protection-products/cached'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: controller.signal,
-          body: JSON.stringify({
-            login_token: auth.login.login_token,
-            api_token: auth.api_token,
-            country_uuid: COUNTRY_UUID_JP,
-            crop_uuid: RICE_CROP_UUID,
-            task_type_code: 'FIELDTREATMENT',
-          }),
+          body: JSON.stringify(body),
         });
         const json = await res.json();
         if (!active || !res.ok || json?.ok === false) return;
@@ -1399,6 +1420,10 @@ export function TaskProgressDashboardPage() {
             next[`*:${keyNormalized}`] = codeOrName;
           }
         });
+        sprayMasterCache.set(cacheKey, {
+          data: next,
+          expiresAt: Date.now() + (12 * 60 * 60 * 1000),
+        });
         setSprayCategoryMap(next);
       } catch {
         if (!active) return;
@@ -1410,7 +1435,7 @@ export function TaskProgressDashboardPage() {
       active = false;
       controller.abort();
     };
-  }, [auth?.login?.login_token, auth?.api_token, snapshotTasks, submittedFarms]);
+  }, [auth?.login?.login_token, auth?.api_token, snapshotTasks]);
 
   useEffect(() => {
     if (!snapshotLoading) {
