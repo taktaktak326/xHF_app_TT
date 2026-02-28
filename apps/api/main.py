@@ -2911,12 +2911,17 @@ async def jobs_hfr_snapshot(
             chunk_size = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_SIZE", "30")), 100))
             chunk_attempts = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_ATTEMPTS", "3")), 8))
             retry_backoff_sec = max(0.1, float(os.getenv("HFR_SNAPSHOT_CHUNK_RETRY_BACKOFF_SEC", "2.0")))
+            require_complete_chunk = str(os.getenv("HFR_SNAPSHOT_REQUIRE_COMPLETE_CHUNK", "1")).lower() in (
+                "1",
+                "true",
+                "yes",
+            )
             collected_fields: List[Dict[str, Any]] = []
             farm_chunks = _chunk_list(matched_farm_uuids, chunk_size)
             total_chunks = len(farm_chunks)
             _progress(
                 f"step3: task fetch started chunk_size={chunk_size} total_chunks={total_chunks} "
-                f"attempts={chunk_attempts}"
+                f"attempts={chunk_attempts} require_complete_chunk={require_complete_chunk}"
             )
 
             for idx, farm_chunk in enumerate(farm_chunks, start=1):
@@ -2949,6 +2954,43 @@ async def jobs_hfr_snapshot(
                             )
                         )
                         combined_json = _response_to_json(combined_resp)
+                        if not isinstance(combined_json, dict):
+                            raise HTTPException(502, {"reason": "snapshot_chunk_invalid_response"})
+                        if combined_json.get("ok", True) is False:
+                            status_code = int(combined_json.get("status") or 502)
+                            raise HTTPException(
+                                status_code,
+                                {
+                                    "reason": "snapshot_chunk_upstream_failed",
+                                    "chunk_index": idx,
+                                    "chunk_total": total_chunks,
+                                    "chunk_farm_count": len(farm_chunk),
+                                    "upstream": combined_json,
+                                },
+                            )
+
+                        chunk_fields = (((combined_json.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
+                        if not isinstance(chunk_fields, list):
+                            raise HTTPException(502, {"reason": "snapshot_chunk_missing_fields"})
+
+                        covered_farms = set(_extract_farm_uuids_from_fields(chunk_fields))
+                        missing_farms = [u for u in farm_chunk if u not in covered_farms]
+                        if missing_farms and require_complete_chunk:
+                            raise HTTPException(
+                                502,
+                                {
+                                    "reason": "snapshot_chunk_incomplete",
+                                    "chunk_index": idx,
+                                    "chunk_total": total_chunks,
+                                    "missing_farm_uuids": missing_farms[:50],
+                                    "covered_farm_count": len(covered_farms),
+                                    "requested_farm_count": len(farm_chunk),
+                                },
+                            )
+                        if missing_farms:
+                            _progress(
+                                f"step3: chunk {idx}/{total_chunks} warning missing_farms={len(missing_farms)}"
+                            )
                         break
                     except HTTPException as exc:
                         last_http_exc = exc
