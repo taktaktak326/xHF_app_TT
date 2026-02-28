@@ -311,7 +311,7 @@ const TYPE_FAMILY_BY_TASK_TYPE: Record<string, string> = {
 function matchesActionFilter(task: DashboardTask, filter: ActionFilterKey, today: string): boolean {
   if (filter === 'none') return true;
   const planned = getScheduledDay(task);
-  const done = isCompleted(task);
+  const done = task.completed;
   const in7days = addDaysToKey(today, 7);
   if (filter === 'incomplete') return !done;
   if (filter === 'overdue') return Boolean(planned && planned < today && !done);
@@ -562,289 +562,6 @@ function addDaysToKey(dayKey: string, offset: number): string {
   if (!y || !m || !d) return dayKey;
   const utc = Date.UTC(y, m - 1, d + offset, 0, 0, 0);
   return getJstDayKey(new Date(utc));
-}
-
-function statusClass(rate: number): 'good' | 'warn' | 'bad' {
-  if (rate < 15) return 'good';
-  if (rate < 30) return 'warn';
-  return 'bad';
-}
-
-function rate(numerator: number, denominator: number): number {
-  if (denominator <= 0) return 0;
-  return Number(((numerator / denominator) * 100).toFixed(1));
-}
-
-function isCompleted(task: DashboardTask): boolean {
-  return task.completed;
-}
-
-
-function getTaskTypeLabel(task: DashboardTask): string {
-  return `${task.typeFamily} ${task.occurrence}回目`;
-}
-
-function getTypeDisplayOrder(taskTypeLabel: string): number {
-  const match = taskTypeLabel.match(/^(.*)\s(\d+)回目$/);
-  if (!match) return 99999;
-  const family = match[1];
-  const occurrence = Number(match[2]);
-  const idx = TYPE_FAMILY_ORDER.indexOf(family);
-  const base = idx >= 0 ? idx : 99;
-  return base * 100 + (Number.isFinite(occurrence) ? occurrence : 99);
-}
-
-function buildDashboardBundle(
-  tasksAll: DashboardTask[],
-  selectedFamilies: Set<string>,
-  referenceDay: string,
-  asOfValue?: string,
-): DashboardBundle {
-  void selectedFamilies;
-  const tasks = tasksAll;
-  const asOf = asOfValue || new Date().toISOString();
-  const today = referenceDay || getJstDayKey(new Date());
-  const in7days = addDaysToKey(today, 7);
-
-  const farmersMap = new Map<string, { name: string; fieldSet: Set<string>; tasks: DashboardTask[] }>();
-  tasks.forEach((task) => {
-    const farmerId = task.farmUuid || `name:${task.farmName}`;
-    const prev = farmersMap.get(farmerId) ?? { name: task.farmName, fieldSet: new Set<string>(), tasks: [] };
-    prev.name = task.farmName || prev.name;
-    if (task.fieldUuid) prev.fieldSet.add(task.fieldUuid);
-    prev.tasks.push(task);
-    farmersMap.set(farmerId, prev);
-  });
-
-  const calcCounts = (rows: DashboardTask[]) => {
-    let due = 0;
-    let completed = 0;
-    let overdue = 0;
-    let dueToday = 0;
-    let upcoming3 = 0;
-    let future = 0;
-    let doneCount = 0;
-
-    rows.forEach((task) => {
-      const planned = getScheduledDay(task);
-      const done = isCompleted(task);
-      if (done) doneCount += 1;
-      if (!planned) {
-        // 日付未設定タスクは遅延判定はできないため、未完了分のみ「予定（未着手）」に寄せる。
-        if (!done) future += 1;
-        return;
-      }
-
-      if (planned <= today) {
-        due += 1;
-        if (done) completed += 1;
-      }
-      if (planned < today && !done) overdue += 1;
-      if (planned === today && !done) dueToday += 1;
-      if (planned > today && planned <= in7days && !done) upcoming3 += 1;
-      if (planned > today && !done) future += 1;
-    });
-
-    // 到来済みがゼロだと KPI/グラフが全ゼロ化しやすいため、
-    // 全件が未来予定の期間では「全タスク基準」で表示する。
-    if (due === 0 && rows.length > 0) {
-      due = rows.length;
-      completed = doneCount;
-      overdue = rows.reduce((acc, task) => {
-        const planned = getScheduledDay(task);
-        if (!planned) return acc;
-        return planned < today && !isCompleted(task) ? acc + 1 : acc;
-      }, 0);
-      future = rows.reduce((acc, task) => {
-        const planned = getScheduledDay(task);
-        if (!planned) return !isCompleted(task) ? acc + 1 : acc;
-        return planned > today && !isCompleted(task) ? acc + 1 : acc;
-      }, 0);
-    }
-
-    return { due, completed, overdue, dueToday, upcoming3, future };
-  };
-
-  const makeTypeRows = (rows: DashboardTask[]) => {
-    const typeMap = new Map<string, DashboardTask[]>();
-    rows.forEach((task) => {
-      const label = getTaskTypeLabel(task);
-      if (!typeMap.has(label)) typeMap.set(label, []);
-      typeMap.get(label)?.push(task);
-    });
-
-    return Array.from(typeMap.entries())
-      .sort((a, b) => getTypeDisplayOrder(a[0]) - getTypeDisplayOrder(b[0]))
-      .map(([name, list], idx) => {
-        const c = calcCounts(list);
-        return {
-          name,
-          display_order: idx + 1,
-          due_count: c.due,
-          completed_count: c.completed,
-          overdue_count: c.overdue,
-          pending_count: c.future,
-          completion_rate: rate(c.completed, c.due),
-          delay_rate: rate(c.overdue, c.due),
-        };
-      });
-  };
-
-  const farmer_details: Record<string, FarmerDetail> = {};
-  const farmers: FarmerRow[] = [];
-
-  Array.from(farmersMap.entries()).forEach(([id, item], idx) => {
-    const c = calcCounts(item.tasks);
-    const delayRate = rate(c.overdue, c.due);
-    const completionRate = rate(c.completed, c.due);
-
-    const recent14From = addDaysToKey(today, -13);
-    const prev14From = addDaysToKey(today, -27);
-    const prev14To = addDaysToKey(today, -14);
-    const recentOverdue = item.tasks.filter((task) => {
-      const planned = getScheduledDay(task);
-      return planned >= recent14From && planned <= today && planned < today && !isCompleted(task);
-    }).length;
-    const prevOverdue = item.tasks.filter((task) => {
-      const planned = getScheduledDay(task);
-      return planned >= prev14From && planned <= prev14To && planned < today && !isCompleted(task);
-    }).length;
-    const trend = recentOverdue - prevOverdue;
-    const trend_direction: FarmerRow['trend_direction'] = trend > 2 ? 'worsening' : trend < -2 ? 'improving' : 'stable';
-
-    farmers.push({
-      id,
-      name: item.name || `農業者${idx + 1}`,
-      field_count: item.fieldSet.size,
-      due_task_count: c.due,
-      completed_count: c.completed,
-      overdue_count: c.overdue,
-      due_today_count: c.dueToday,
-      upcoming_3days_count: c.upcoming3,
-      future_task_count: c.future,
-      delay_rate: delayRate,
-      completion_rate: completionRate,
-      delay_status: statusClass(delayRate),
-      trend_direction,
-    });
-
-    farmer_details[id] = {
-      id,
-      name: item.name || `農業者${idx + 1}`,
-      field_count: item.fieldSet.size,
-      summary: {
-        due: c.due,
-        completed: c.completed,
-        overdue: c.overdue,
-        pending: c.future,
-        delay_rate: delayRate,
-        completion_rate: completionRate,
-      },
-      task_types: makeTypeRows(item.tasks),
-    };
-  });
-
-  const allCounts = farmers.reduce(
-    (acc, f) => {
-      acc.due += f.due_task_count;
-      acc.completed += f.completed_count;
-      acc.overdue += f.overdue_count;
-      acc.dueToday += f.due_today_count;
-      acc.upcoming3 += f.upcoming_3days_count;
-      acc.future += f.future_task_count;
-      return acc;
-    },
-    { due: 0, completed: 0, overdue: 0, dueToday: 0, upcoming3: 0, future: 0 }
-  );
-
-  const kpi = {
-    completion_rate: rate(allCounts.completed, allCounts.due),
-    completed_count: allCounts.completed,
-    due_count: allCounts.due,
-    overdue_count: allCounts.overdue,
-    delay_rate: rate(allCounts.overdue, allCounts.due),
-    due_today_count: allCounts.dueToday,
-    upcoming_3days_count: allCounts.upcoming3,
-    future_count: allCounts.future,
-    total_task_count: tasks.length,
-    as_of: asOf,
-  };
-
-  const allTypeRows = makeTypeRows(tasks).map((row) => ({
-    task_type_name: row.name,
-    display_order: row.display_order,
-    due_count: row.due_count,
-    completed_count: row.completed_count,
-    overdue_count: row.overdue_count,
-    pending_count: row.pending_count,
-    completion_rate: row.completion_rate,
-    delay_rate: row.delay_rate,
-  }));
-
-  const buckets: Array<{ bucket: string; min: number; max: number; color: string }> = [
-    { bucket: '0-5%', min: 0, max: 5, color: '#22c55e' },
-    { bucket: '5-10%', min: 5, max: 10, color: '#22c55e' },
-    { bucket: '10-15%', min: 10, max: 15, color: '#22c55e' },
-    { bucket: '15-20%', min: 15, max: 20, color: '#f59e0b' },
-    { bucket: '20-25%', min: 20, max: 25, color: '#f59e0b' },
-    { bucket: '25-30%', min: 25, max: 30, color: '#f59e0b' },
-    { bucket: '30%+', min: 30, max: 1000, color: '#ef4444' },
-  ];
-
-  const distribution = buckets.map((bucket) => ({
-    bucket: bucket.bucket,
-    count: farmers.filter((f) => f.delay_rate >= bucket.min && f.delay_rate < bucket.max).length,
-    color: bucket.color,
-  }));
-
-  const trend: TrendPoint[] = Array.from({ length: 30 }).map((_, i) => {
-    const day = addDaysToKey(today, -(29 - i));
-    let due = 0;
-    let completed = 0;
-    let overdue = 0;
-
-    tasks.forEach((task) => {
-      const planned = getScheduledDay(task);
-      if (!planned || planned > day) return;
-      due += 1;
-      const completedDay = task.executionDay;
-      if (completedDay && completedDay <= day) {
-        completed += 1;
-      } else if (planned < day) {
-        overdue += 1;
-      }
-    });
-
-    if (due === 0 && tasks.length > 0) {
-      due = tasks.length;
-      completed = tasks.filter((task) => {
-        if (!isCompleted(task)) return false;
-        const completedDay = task.executionDay;
-        if (!completedDay) return true;
-        return completedDay <= day;
-      }).length;
-      overdue = tasks.filter((task) => {
-        const planned = getScheduledDay(task);
-        return Boolean(planned && planned < day && !isCompleted(task));
-      }).length;
-    }
-
-    return {
-      date: `${Number(day.slice(5, 7))}/${Number(day.slice(8, 10))}`,
-      completion_rate: rate(completed, due),
-      delay_rate: rate(overdue, due),
-    };
-  });
-
-  return {
-    kpi,
-    farmers,
-    task_types: allTypeRows,
-    distribution,
-    trend,
-    farmer_details,
-    as_of: asOf,
-  };
 }
 
 function trendLabel(direction: FarmerRow['trend_direction']) {
@@ -1150,7 +867,6 @@ export function TaskProgressDashboardPage() {
   const [manualUpdateMsg, setManualUpdateMsg] = useState<string | null>(null);
   const [snapshotLoadingElapsedSec, setSnapshotLoadingElapsedSec] = useState(0);
   const [sprayCategoryMap, setSprayCategoryMap] = useState<Record<string, string>>({});
-  const [summaryReady, setSummaryReady] = useState(false);
   const [isFilterPending, startFilterTransition] = useTransition();
   const [dashboardPending, setDashboardPending] = useState(false);
   const [dashboardState, setDashboardState] = useState<DashboardBundle>(emptyDashboardBundle(getJstDayKey(new Date())));
@@ -1170,7 +886,6 @@ export function TaskProgressDashboardPage() {
       setSnapshotLoading(true);
       setTasksHydrating(false);
       setSnapshotErr(null);
-      setSummaryReady(false);
       try {
         const now = Date.now();
         const metaKey = `${snapshotDate}:meta`;
@@ -1215,7 +930,6 @@ export function TaskProgressDashboardPage() {
             setSnapshotTasks([]);
             setSnapshotTasksLoaded(false);
           }
-          setSummaryReady(true);
           setSnapshotLoading(false);
         }
 
@@ -1242,7 +956,6 @@ export function TaskProgressDashboardPage() {
         const hasRun = Boolean(metaJson?.run?.run_id);
         if (useCachedSummary) {
           summaryJson = activeSummary?.data;
-          setSummaryReady(true);
         } else if (!hasRun) {
           summaryJson = {
             kpi: emptyDashboardBundle(snapshotDate).kpi,
@@ -1253,7 +966,6 @@ export function TaskProgressDashboardPage() {
             farmer_details: {},
             as_of: snapshotDate,
           };
-          setSummaryReady(true);
         }
 
         if (useCachedDates) {
@@ -1328,7 +1040,6 @@ export function TaskProgressDashboardPage() {
                 farmer_details: json?.farmer_details ?? {},
                 as_of: json?.as_of ?? snapshotDate,
               });
-              setSummaryReady(true);
             } catch {
               // 背景ロード失敗は画面全体エラーにしない
             }
@@ -1548,7 +1259,6 @@ export function TaskProgressDashboardPage() {
         snapshotPageCache.set(cacheKey, { data: payload, expiresAt });
         if (!alive) return;
         setDashboardState(payload);
-        setSummaryReady(true);
       } finally {
         if (alive) setDashboardPending(false);
       }
@@ -1589,43 +1299,6 @@ export function TaskProgressDashboardPage() {
     return filtered;
   }, [tasksByFamily, selectedFamily, actionFilter, allTasks, familyOptions]);
 
-  useEffect(() => {
-    if (snapshotTasks.length === 0) {
-      setDashboardPending(false);
-      return;
-    }
-    // 初期表示（全タスク・アクションフィルタなし）は API サマリーをそのまま使う。
-    // ここで再集計しないことで、表示完了までの待ち時間を短縮する。
-    if (summaryReady && selectedFamily === ALL_FAMILY_OPTION && actionFilter === 'none') {
-      setDashboardPending(false);
-      return;
-    }
-    let alive = true;
-    setDashboardPending(true);
-    const today = getJstDayKey(new Date());
-    const asOf = snapshotRun?.finished_at || snapshotRun?.started_at || snapshotRun?.snapshot_date || snapshotDate;
-    const compute = () => {
-      if (!alive) return;
-      const next = buildDashboardBundle(linkedTasks, new Set([selectedFamily]), today, asOf);
-      if (!alive) return;
-      setDashboardState(next);
-      setDashboardPending(false);
-    };
-    const ric = (window as any).requestIdleCallback as ((cb: () => void, opts?: { timeout?: number }) => number) | undefined;
-    const cic = (window as any).cancelIdleCallback as ((id: number) => void) | undefined;
-    if (ric) {
-      const id = ric(compute, { timeout: 250 });
-      return () => {
-        alive = false;
-        if (cic) cic(id);
-      };
-    }
-    const timer = window.setTimeout(compute, 0);
-    return () => {
-      alive = false;
-      window.clearTimeout(timer);
-    };
-  }, [linkedTasks, selectedFamily, actionFilter, summaryReady, snapshotDate, snapshotRun, snapshotTasks.length]);
   const dashboard = dashboardState;
 
   const filteredFarmers = useMemo(() => {
