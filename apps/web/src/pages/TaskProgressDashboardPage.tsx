@@ -323,6 +323,9 @@ function matchesActionFilter(task: DashboardTask, filter: ActionFilterKey, today
 
 function normalizeSprayCategory(categoryRaw: string): string {
   const key = categoryRaw.trim().toUpperCase();
+  if (key === 'H') return '除草剤';
+  if (key === 'F') return '殺菌剤';
+  if (key === 'I') return '殺虫剤';
   if (key === 'HERBICIDE') return '除草剤';
   if (key === 'FUNGICIDE') return '殺菌剤';
   if (key === 'INSECTICIDE') return '殺虫剤';
@@ -1409,7 +1412,7 @@ export function TaskProgressDashboardPage() {
         items.forEach((p: any) => {
           const name = String(p?.product_name || p?.name || '').trim();
           if (!name) return;
-          const codeOrName = String(p?.category_code || p?.category_name || '').trim();
+          const codeOrName = String(p?.category_name || p?.category_code || '').trim();
           if (!codeOrName) return;
           const keyRaw = name.toLowerCase();
           const keyNormalized = normalizeProductToken(name);
