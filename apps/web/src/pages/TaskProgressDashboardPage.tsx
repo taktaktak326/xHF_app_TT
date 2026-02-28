@@ -56,11 +56,13 @@ type SnapshotTask = {
   field_uuid: string;
   field_name: string;
   season_uuid: string;
+  crop_uuid: string;
   task_name: string;
   task_type: string;
   planned_date: string | null;
   execution_date: string | null;
   status: string | null;
+  product: string | null;
   occurrence: number | null;
 };
 
@@ -151,6 +153,7 @@ type DashboardBundle = {
 const TYPE_FAMILY_ORDER: string[] = ['播種', '防除', '施肥', '生育調査', '収穫', '水管理', '土づくり', '種子処理', '育苗箱処理'];
 const DEFAULT_SELECTED_FAMILIES = new Set<string>(['防除', '播種']);
 const SNAPSHOT_LOAD_ESTIMATE_SEC = 20;
+const COUNTRY_UUID_JP = '0f59ff55-c86b-4b7b-4eaa-eb003d47dcd3';
 
 const TYPE_FAMILY_BY_TASK_TYPE: Record<string, string> = {
   Harvest: '収穫',
@@ -163,13 +166,45 @@ const TYPE_FAMILY_BY_TASK_TYPE: Record<string, string> = {
   SeedBoxTreatment: '育苗箱処理',
 };
 
-function resolveTaskFamilyFromSnapshot(task: SnapshotTask): string {
+function normalizeSprayCategory(categoryRaw: string): string {
+  const key = categoryRaw.trim().toUpperCase();
+  if (key === 'HERBICIDE') return '除草剤';
+  if (key === 'FUNGICIDE') return '殺菌剤';
+  if (key === 'INSECTICIDE') return '殺虫剤';
+  return categoryRaw.trim();
+}
+
+function splitProductNames(productRaw: string | null | undefined): string[] {
+  if (!productRaw) return [];
+  return productRaw
+    .split('/')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function resolveTaskFamilyFromSnapshot(
+  task: SnapshotTask,
+  sprayCategoryMap: Record<string, string>,
+): string {
+  if (task.task_type === 'Spraying') {
+    const cropUuid = (task.crop_uuid || '').trim();
+    const products = splitProductNames(task.product);
+    const categories = products
+      .map((name) => sprayCategoryMap[`${cropUuid}:${name.toLowerCase()}`] || '')
+      .filter(Boolean);
+    if (categories.length > 0) {
+      const herb = categories.find((c) => c.toUpperCase() === 'HERBICIDE');
+      const picked = herb || categories[0];
+      return `防除（${normalizeSprayCategory(picked)}）`;
+    }
+    return '防除';
+  }
   const byName = (task.task_name || '').trim();
   if (byName) return byName;
   return TYPE_FAMILY_BY_TASK_TYPE[task.task_type] || task.task_type || 'その他';
 }
 
-function tasksFromSnapshot(snapshotTasks: SnapshotTask[]): DashboardTask[] {
+function tasksFromSnapshot(snapshotTasks: SnapshotTask[], sprayCategoryMap: Record<string, string>): DashboardTask[] {
   return snapshotTasks.map((task, idx) => ({
     uuid: task.task_uuid || `task-${idx + 1}`,
     farmUuid: task.farm_uuid || '',
@@ -177,7 +212,7 @@ function tasksFromSnapshot(snapshotTasks: SnapshotTask[]): DashboardTask[] {
     fieldUuid: task.field_uuid || '',
     fieldName: task.field_name || '不明圃場',
     seasonKey: task.season_uuid || 'field',
-    typeFamily: resolveTaskFamilyFromSnapshot(task),
+    typeFamily: resolveTaskFamilyFromSnapshot(task, sprayCategoryMap),
     plannedDate: task.planned_date,
     executionDate: task.execution_date,
     state: task.status,
@@ -479,6 +514,7 @@ export function TaskProgressDashboardPage() {
   const [manualUpdateLoading, setManualUpdateLoading] = useState(false);
   const [manualUpdateMsg, setManualUpdateMsg] = useState<string | null>(null);
   const [snapshotLoadingElapsedSec, setSnapshotLoadingElapsedSec] = useState(0);
+  const [sprayCategoryMap, setSprayCategoryMap] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let active = true;
@@ -533,6 +569,79 @@ export function TaskProgressDashboardPage() {
   }, [snapshotDate, refreshToken]);
 
   useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    const loadSprayMaster = async () => {
+      if (!auth?.login?.login_token || !auth?.api_token) {
+        setSprayCategoryMap({});
+        return;
+      }
+      const sprayTasks = snapshotTasks.filter((t) => t.task_type === 'Spraying');
+      const cropUuids = Array.from(
+        new Set(
+          sprayTasks
+            .map((t) => String(t.crop_uuid || '').trim())
+            .filter(Boolean),
+        ),
+      );
+      if (cropUuids.length === 0) {
+        setSprayCategoryMap({});
+        return;
+      }
+      const farmUuids = Array.from(
+        new Set(
+          (submittedFarms.length > 0 ? submittedFarms : sprayTasks.map((t) => String(t.farm_uuid || '').trim()))
+            .filter(Boolean),
+        ),
+      );
+      if (farmUuids.length === 0) {
+        setSprayCategoryMap({});
+        return;
+      }
+      try {
+        const res = await fetch(withApiBase('/crop-protection-products/bulk'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            login_token: auth.login.login_token,
+            api_token: auth.api_token,
+            farm_uuids: farmUuids,
+            country_uuid: COUNTRY_UUID_JP,
+            crop_uuids: cropUuids,
+            task_type_code: 'FIELDTREATMENT',
+          }),
+        });
+        const json = await res.json();
+        if (!active || !res.ok || json?.ok === false) return;
+        const items = json?.items || {};
+        const next: Record<string, string> = {};
+        Object.entries(items).forEach(([cropUuid, products]) => {
+          if (!Array.isArray(products)) return;
+          products.forEach((p: any) => {
+            const name = String(p?.name || '').trim();
+            if (!name) return;
+            const categories = Array.isArray(p?.categories) ? p.categories : [];
+            const first = categories.find((c: any) => c?.code || c?.name);
+            const codeOrName = String(first?.code || first?.name || '').trim();
+            if (!codeOrName) return;
+            next[`${cropUuid}:${name.toLowerCase()}`] = codeOrName;
+          });
+        });
+        setSprayCategoryMap(next);
+      } catch {
+        if (!active) return;
+        setSprayCategoryMap({});
+      }
+    };
+    void loadSprayMaster();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [auth?.login?.login_token, auth?.api_token, snapshotTasks, submittedFarms]);
+
+  useEffect(() => {
     if (!snapshotLoading) {
       setSnapshotLoadingElapsedSec(0);
       return;
@@ -545,7 +654,7 @@ export function TaskProgressDashboardPage() {
     return () => window.clearInterval(timer);
   }, [snapshotLoading]);
 
-  const allTasks = useMemo(() => tasksFromSnapshot(snapshotTasks), [snapshotTasks]);
+  const allTasks = useMemo(() => tasksFromSnapshot(snapshotTasks, sprayCategoryMap), [snapshotTasks, sprayCategoryMap]);
   const familyOptions = useMemo(() => {
     const set = new Set<string>();
     allTasks.forEach((task) => set.add(task.typeFamily));
@@ -564,7 +673,7 @@ export function TaskProgressDashboardPage() {
     setSelectedFamilies((prev) => {
       const normalized = new Set(Array.from(prev).filter((family) => familyOptions.includes(family)));
       if (normalized.size > 0) return normalized;
-      const defaults = Array.from(DEFAULT_SELECTED_FAMILIES).filter((family) => familyOptions.includes(family));
+      const defaults = familyOptions.filter((family) => family === '播種' || family.startsWith('防除'));
       if (defaults.length > 0) return new Set(defaults);
       return new Set([familyOptions[0]]);
     });

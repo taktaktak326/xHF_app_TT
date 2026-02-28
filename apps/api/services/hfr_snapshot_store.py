@@ -83,6 +83,7 @@ def ensure_schema() -> None:
                   task_uuid TEXT NOT NULL,
                   field_uuid TEXT NOT NULL,
                   season_uuid TEXT NOT NULL DEFAULT '',
+                  crop_uuid TEXT,
                   farm_uuid TEXT,
                   farm_name TEXT,
                   field_name TEXT,
@@ -102,6 +103,12 @@ def ensure_schema() -> None:
                   fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                   PRIMARY KEY (snapshot_date, task_uuid)
                 )
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE hfr_snapshot_tasks
+                ADD COLUMN IF NOT EXISTS crop_uuid TEXT
                 """
             )
         conn.commit()
@@ -239,13 +246,13 @@ def upsert_tasks(rows: List[Dict[str, Any]]) -> int:
             cur.executemany(
                 """
                 INSERT INTO hfr_snapshot_tasks (
-                  snapshot_date, run_id, task_uuid, field_uuid, season_uuid,
+                  snapshot_date, run_id, task_uuid, field_uuid, season_uuid, crop_uuid,
                   farm_uuid, farm_name, field_name, user_name,
                   task_name, task_type, task_date,
                   planned_date, execution_date, status, assignee_name,
                   product, dosage, bbch_index, bbch_scale, occurrence
                 ) VALUES (
-                  %(snapshot_date)s, %(run_id)s, %(task_uuid)s, %(field_uuid)s, %(season_uuid)s,
+                  %(snapshot_date)s, %(run_id)s, %(task_uuid)s, %(field_uuid)s, %(season_uuid)s, %(crop_uuid)s,
                   %(farm_uuid)s, %(farm_name)s, %(field_name)s, %(user_name)s,
                   %(task_name)s, %(task_type)s, %(task_date)s,
                   %(planned_date)s, %(execution_date)s, %(status)s, %(assignee_name)s,
@@ -256,6 +263,7 @@ def upsert_tasks(rows: List[Dict[str, Any]]) -> int:
                   run_id = EXCLUDED.run_id,
                   field_uuid = EXCLUDED.field_uuid,
                   season_uuid = EXCLUDED.season_uuid,
+                  crop_uuid = EXCLUDED.crop_uuid,
                   farm_uuid = EXCLUDED.farm_uuid,
                   farm_name = EXCLUDED.farm_name,
                   field_name = EXCLUDED.field_name,

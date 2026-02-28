@@ -2726,6 +2726,7 @@ def _extract_snapshot_rows(
             crop = season.get("crop") or {}
             variety = season.get("variety") or {}
             active = season.get("activeGrowthStage") or {}
+            crop_uuid = str((crop or {}).get("uuid") or "")
             crop_name = str((crop or {}).get("name") or "")
             variety_name = str((variety or {}).get("name") or "")
             bbch_index = str((active or {}).get("index") or "")
@@ -2814,6 +2815,7 @@ def _extract_snapshot_rows(
                             "task_uuid": task_uuid,
                             "field_uuid": field_uuid,
                             "season_uuid": season_uuid,
+                            "crop_uuid": crop_uuid,
                             "farm_uuid": farm_uuid,
                             "farm_name": farm_name,
                             "field_name": field_name,
