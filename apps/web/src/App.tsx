@@ -16,6 +16,7 @@ import { WeatherSelectionPage } from './pages/WeatherSelectionPage';
 import { NdviPage } from './pages/NdviPage';
 import { SatelliteMapPage } from './pages/SatelliteMapPage';
 import { CropRegistrationPage } from './pages/CropRegistrationPage';
+import { TaskProgressDashboardPage } from './pages/TaskProgressDashboardPage';
 import { WarmupToast } from './components/WarmupToast';
 import { CombinedDataToast } from './components/CombinedDataToast';
 
@@ -38,6 +39,7 @@ function AppRoutes() {
         <Route path="/" element={<ProtectedRoute />}>
           <Route path="/farms" element={<FarmsPage />} />
           <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/task-progress-dashboard" element={<TaskProgressDashboardPage />} />
           <Route path="/ndvi" element={<NdviPage />} />
           <Route path="/satellite-map" element={<SatelliteMapPage />} />
           <Route path="crop-registration" element={<CropRegistrationPage />} />
@@ -46,7 +48,7 @@ function AppRoutes() {
           <Route path="growth-stage-predictions" element={<GrowthStagePredictionPage />} />
           <Route path="weather" element={<WeatherSelectionPage />} />
           <Route path="weather/:fieldUuid" element={<SprayingWeatherPage />} />
-          <Route path="/" element={<Navigate to="/farms" replace />} />
+          <Route path="/" element={<Navigate to="/task-progress-dashboard" replace />} />
         </Route>
       </Route>
     </Routes>

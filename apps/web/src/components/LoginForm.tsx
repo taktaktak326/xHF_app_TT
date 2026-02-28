@@ -85,7 +85,7 @@ export function LoginForm() {
       }
       const authData = await loginAndToken(email, pw, { signal: controller.signal });
       setAuth(authData);
-      navigate('/farms'); // ログイン後に圃場ページへ遷移
+      navigate('/task-progress-dashboard'); // ログイン後に進捗ダッシュボードへ遷移
     } catch (e: any) {
       const fallback = t('login.failed');
       const msg = e?.name === 'AbortError' ? t('login.canceled') : e?.message || fallback;
