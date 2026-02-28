@@ -3058,7 +3058,13 @@ async def jobs_hfr_snapshot(
             if not req.dryRun:
                 fields_saved = hfr_snapshot_store.upsert_fields(extracted["fields"])
                 tasks_saved = hfr_snapshot_store.upsert_tasks(extracted["tasks"])
+                pruned = hfr_snapshot_store.prune_snapshot_date(snapshot_date, run_id)
                 _progress(f"step5: persisted fields_saved={fields_saved} tasks_saved={tasks_saved}")
+                _progress(
+                    f"step5.5: pruned old runs runs_deleted={pruned.get('runs_deleted', 0)} "
+                    f"fields_deleted={pruned.get('fields_deleted', 0)} "
+                    f"tasks_deleted={pruned.get('tasks_deleted', 0)}"
+                )
             else:
                 fields_saved = len(extracted["fields"])
                 tasks_saved = len(extracted["tasks"])

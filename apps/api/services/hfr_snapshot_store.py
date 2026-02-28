@@ -155,6 +155,44 @@ def finish_run(
         conn.commit()
 
 
+def prune_snapshot_date(snapshot_date: date, keep_run_id: str) -> Dict[str, int]:
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM hfr_snapshot_tasks
+                 WHERE snapshot_date = %s
+                   AND run_id <> %s
+                """,
+                (snapshot_date, keep_run_id),
+            )
+            tasks_deleted = int(cur.rowcount or 0)
+            cur.execute(
+                """
+                DELETE FROM hfr_snapshot_fields
+                 WHERE snapshot_date = %s
+                   AND run_id <> %s
+                """,
+                (snapshot_date, keep_run_id),
+            )
+            fields_deleted = int(cur.rowcount or 0)
+            cur.execute(
+                """
+                DELETE FROM hfr_snapshot_runs
+                 WHERE snapshot_date = %s
+                   AND run_id <> %s
+                """,
+                (snapshot_date, keep_run_id),
+            )
+            runs_deleted = int(cur.rowcount or 0)
+        conn.commit()
+    return {
+        "runs_deleted": runs_deleted,
+        "fields_deleted": fields_deleted,
+        "tasks_deleted": tasks_deleted,
+    }
+
+
 def upsert_fields(rows: List[Dict[str, Any]]) -> int:
     if not rows:
         return 0
@@ -254,44 +292,47 @@ def fetch_snapshot(snapshot_date: date, farm_uuid: Optional[str] = None, limit: 
             """
             cur.execute(run_q, (snapshot_date,))
             run = cur.fetchone()
+            run_id = (run or {}).get("run_id")
+            if not run_id:
+                return {"run": run, "fields": [], "tasks": []}
 
             if farm_uuid:
                 field_q = """
                     SELECT *
                       FROM hfr_snapshot_fields
-                     WHERE snapshot_date = %s AND farm_uuid = %s
+                     WHERE snapshot_date = %s AND run_id = %s AND farm_uuid = %s
                      ORDER BY farm_name, field_name, season_uuid
                      LIMIT %s
                 """
                 task_q = """
                     SELECT *
                       FROM hfr_snapshot_tasks
-                     WHERE snapshot_date = %s AND farm_uuid = %s
+                     WHERE snapshot_date = %s AND run_id = %s AND farm_uuid = %s
                      ORDER BY farm_name, field_name, task_date NULLS LAST, task_name
                      LIMIT %s
                 """
-                cur.execute(field_q, (snapshot_date, farm_uuid, limit))
+                cur.execute(field_q, (snapshot_date, run_id, farm_uuid, limit))
                 fields = cur.fetchall() or []
-                cur.execute(task_q, (snapshot_date, farm_uuid, limit))
+                cur.execute(task_q, (snapshot_date, run_id, farm_uuid, limit))
                 tasks = cur.fetchall() or []
             else:
                 field_q = """
                     SELECT *
                       FROM hfr_snapshot_fields
-                     WHERE snapshot_date = %s
+                     WHERE snapshot_date = %s AND run_id = %s
                      ORDER BY farm_name, field_name, season_uuid
                      LIMIT %s
                 """
                 task_q = """
                     SELECT *
                       FROM hfr_snapshot_tasks
-                     WHERE snapshot_date = %s
+                     WHERE snapshot_date = %s AND run_id = %s
                      ORDER BY farm_name, field_name, task_date NULLS LAST, task_name
                      LIMIT %s
                 """
-                cur.execute(field_q, (snapshot_date, limit))
+                cur.execute(field_q, (snapshot_date, run_id, limit))
                 fields = cur.fetchall() or []
-                cur.execute(task_q, (snapshot_date, limit))
+                cur.execute(task_q, (snapshot_date, run_id, limit))
                 tasks = cur.fetchall() or []
 
             return {
@@ -306,15 +347,47 @@ def compare_snapshots(from_date: date, to_date: date) -> Dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 """
+                SELECT run_id
+                  FROM hfr_snapshot_runs
+                 WHERE snapshot_date = %s
+                 ORDER BY started_at DESC
+                 LIMIT 1
+                """,
+                (from_date,),
+            )
+            from_run = cur.fetchone() or {}
+            cur.execute(
+                """
+                SELECT run_id
+                  FROM hfr_snapshot_runs
+                 WHERE snapshot_date = %s
+                 ORDER BY started_at DESC
+                 LIMIT 1
+                """,
+                (to_date,),
+            )
+            to_run = cur.fetchone() or {}
+            from_run_id = from_run.get("run_id")
+            to_run_id = to_run.get("run_id")
+            if not from_run_id or not to_run_id:
+                return {
+                    "from_date": str(from_date),
+                    "to_date": str(to_date),
+                    "summary": {},
+                    "changed_tasks": [],
+                }
+
+            cur.execute(
+                """
                 WITH from_rows AS (
                   SELECT task_uuid, status, planned_date, execution_date
                     FROM hfr_snapshot_tasks
-                   WHERE snapshot_date = %s
+                   WHERE snapshot_date = %s AND run_id = %s
                 ),
                 to_rows AS (
                   SELECT task_uuid, status, planned_date, execution_date
                     FROM hfr_snapshot_tasks
-                   WHERE snapshot_date = %s
+                   WHERE snapshot_date = %s AND run_id = %s
                 )
                 SELECT
                   (SELECT COUNT(*) FROM to_rows) AS to_total_tasks,
@@ -336,7 +409,7 @@ def compare_snapshots(from_date: date, to_date: date) -> Dict[str, Any]:
                      WHERE planned_date::date < %s AND execution_date IS NULL
                   ) AS from_overdue_tasks
                 """,
-                (from_date, to_date, to_date, from_date),
+                (from_date, from_run_id, to_date, to_run_id, to_date, from_date),
             )
             summary = cur.fetchone() or {}
 
@@ -350,12 +423,14 @@ def compare_snapshots(from_date: date, to_date: date) -> Dict[str, Any]:
                   JOIN hfr_snapshot_tasks f
                     ON f.task_uuid = t.task_uuid
                    AND f.snapshot_date = %s
+                   AND f.run_id = %s
                  WHERE t.snapshot_date = %s
+                   AND t.run_id = %s
                    AND COALESCE(f.status, '') <> COALESCE(t.status, '')
                  ORDER BY t.farm_name, t.field_name, t.task_name
                  LIMIT 500
                 """,
-                (from_date, to_date),
+                (from_date, from_run_id, to_date, to_run_id),
             )
             changed_rows = cur.fetchall() or []
 
