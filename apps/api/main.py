@@ -2917,6 +2917,8 @@ async def jobs_hfr_snapshot(
                 "true",
                 "yes",
             )
+            suffix = str(req.suffix or "").strip()
+            suffix_pattern = re.compile(rf"{re.escape(suffix)}$", re.IGNORECASE) if suffix else None
             collected_fields: List[Dict[str, Any]] = []
             farm_chunks = _chunk_list(matched_farm_uuids, chunk_size)
             total_chunks = len(farm_chunks)
@@ -3034,7 +3036,21 @@ async def jobs_hfr_snapshot(
                     _progress(f"step3: chunk {idx}/{total_chunks} completed with no fieldsV2 list")
 
             _progress(f"step3: fetch completed collected_fields={len(collected_fields)}")
-            extracted = _extract_snapshot_rows(run_id=run_id, snapshot_date=snapshot_date, fields=collected_fields)
+            filtered_fields = collected_fields
+            if suffix_pattern is not None:
+                filtered_fields = []
+                for field in collected_fields:
+                    name = str((field or {}).get("name") or "").strip()
+                    if not name:
+                        continue
+                    if suffix_pattern.search(name):
+                        filtered_fields.append(field)
+                _progress(
+                    f"step3.5: suffix filter suffix={suffix} "
+                    f"before={len(collected_fields)} after={len(filtered_fields)}"
+                )
+
+            extracted = _extract_snapshot_rows(run_id=run_id, snapshot_date=snapshot_date, fields=filtered_fields)
             _progress(
                 f"step4: extraction completed field_rows={len(extracted['fields'])} "
                 f"task_rows={len(extracted['tasks'])}"
