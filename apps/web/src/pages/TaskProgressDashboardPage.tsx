@@ -1486,7 +1486,7 @@ export function TaskProgressDashboardPage() {
     const set = new Set<string>();
     allTasks.forEach((task) => set.add(task.typeFamily));
     if (set.size === 0) {
-      (dashboard.task_types || []).forEach((row) => {
+      (dashboardState.task_types || []).forEach((row) => {
         const raw = String(row.task_type_name || '').trim();
         if (!raw) return;
         const m = raw.match(/^(.*)\s\d+回目$/);
@@ -1508,7 +1508,7 @@ export function TaskProgressDashboardPage() {
       if (bi === -1) return -1;
       return ai - bi;
     });
-  }, [allTasks]);
+  }, [allTasks, dashboardState.task_types]);
 
   useEffect(() => {
     if (snapshotLoading) return;
