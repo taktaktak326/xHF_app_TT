@@ -16,6 +16,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useFarms } from '../context/FarmContext';
 import { withApiBase } from '../utils/apiBase';
+import LoadingOverlay from '../components/LoadingOverlay';
 import './TaskProgressDashboardPage.css';
 
 type SortKey = 'name' | 'field_count' | 'due_task_count' | 'overdue_count' | 'delay_rate' | 'completion_rate';
@@ -149,6 +150,7 @@ type DashboardBundle = {
 
 const TYPE_FAMILY_ORDER: string[] = ['播種', '防除', '施肥', '生育調査', '収穫', '水管理', '土づくり', '種子処理', '育苗箱処理'];
 const DEFAULT_SELECTED_FAMILIES = new Set<string>(['防除', '播種']);
+const SNAPSHOT_LOAD_ESTIMATE_SEC = 20;
 
 const TYPE_FAMILY_BY_TASK_TYPE: Record<string, string> = {
   Harvest: '収穫',
@@ -476,6 +478,7 @@ export function TaskProgressDashboardPage() {
   const [refreshToken, setRefreshToken] = useState(0);
   const [manualUpdateLoading, setManualUpdateLoading] = useState(false);
   const [manualUpdateMsg, setManualUpdateMsg] = useState<string | null>(null);
+  const [snapshotLoadingElapsedSec, setSnapshotLoadingElapsedSec] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -528,6 +531,19 @@ export function TaskProgressDashboardPage() {
       controller.abort();
     };
   }, [snapshotDate, refreshToken]);
+
+  useEffect(() => {
+    if (!snapshotLoading) {
+      setSnapshotLoadingElapsedSec(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      setSnapshotLoadingElapsedSec(elapsed);
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [snapshotLoading]);
 
   const allTasks = useMemo(() => tasksFromSnapshot(snapshotTasks), [snapshotTasks]);
   const familyOptions = useMemo(() => {
@@ -666,12 +682,19 @@ export function TaskProgressDashboardPage() {
   };
 
   if (snapshotLoading) {
+    const remainingSec = Math.max(0, SNAPSHOT_LOAD_ESTIMATE_SEC - snapshotLoadingElapsedSec);
+    const progress = Math.min(95, (snapshotLoadingElapsedSec / SNAPSHOT_LOAD_ESTIMATE_SEC) * 100);
     return (
       <div className="task-progress-page">
-        <section className="task-progress-header card">
-          <h2>圃場タスク管理ダッシュボード</h2>
-          <p>スナップショットを読み込んでいます...</p>
-        </section>
+        <LoadingOverlay
+          message="スナップショットを読み込んでいます..."
+          progress={progress}
+          details={[
+            `基準日: ${snapshotDate}`,
+            `経過: ${snapshotLoadingElapsedSec}秒`,
+            `残り目安: ${remainingSec}秒`,
+          ]}
+        />
       </div>
     );
   }
