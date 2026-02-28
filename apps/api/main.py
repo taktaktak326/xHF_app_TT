@@ -732,7 +732,7 @@ async def farms_hfr_candidates(req: HfrFarmCandidatesReq):
 
     suffix = str(req.suffix).strip() if req.suffix is not None else "HFR"
     pattern = re.compile(rf"{re.escape(suffix)}$", re.IGNORECASE) if suffix else None
-    scan_chunk_size = int(os.getenv("HFR_SCAN_CHUNK_SIZE", "50"))
+    scan_chunk_size = int(os.getenv("HFR_SCAN_CHUNK_SIZE", "20"))
 
     matched_farm_uuid_set = set()
     matched_farm_name_by_uuid: Dict[str, str] = {}
@@ -1790,12 +1790,13 @@ async def combined_field_data_tasks(req: CombinedFieldDataTasksReq):
     operation_name = "CombinedFieldData"
     payload = make_payload(operation_name, COMBINED_FIELD_DATA_TASKS, variables)
 
-    # 1. キャッシュを確認
-    cached_response = get_by_operation(operation_name, payload)
-    if cached_response:
-        cached_response["source"] = "cache"
-        print(f"✅ [CACHE] Used cache for operation: {operation_name}")
-        return JSONResponse(cached_response)
+    # 1. キャッシュを確認（snapshot job では forceRefresh で無効化）
+    if not req.forceRefresh:
+        cached_response = get_by_operation(operation_name, payload)
+        if cached_response:
+            cached_response["source"] = "cache"
+            print(f"✅ [CACHE] Used cache for operation: {operation_name}")
+            return JSONResponse(cached_response)
 
     # 2. キャッシュがなければAPIを呼び出す
     out = await call_graphql(payload, req.login_token, req.api_token)
@@ -1806,9 +1807,9 @@ async def combined_field_data_tasks(req: CombinedFieldDataTasksReq):
         if out.get("request", {}).get("headers", {}).get("Cookie"):
             out["request"]["headers"]["Cookie"] = "LOGIN_TOKEN=***; DF_TOKEN=***"
 
-    # 3. 最終的なレスポンスをキャッシュに保存
+    # 3. 最終的なレスポンスをキャッシュに保存（forceRefresh時は保存しない）
     # エラーレスポンスはキャッシュしない
-    if out.get("ok"):
+    if out.get("ok") and not req.forceRefresh:
         save_response(operation_name, payload, out)
         print(f"💾 [CACHE] Saved response for operation: {operation_name}")
 
@@ -2908,9 +2909,9 @@ async def jobs_hfr_snapshot(
         _progress(f"step2: hfr candidate scan completed farms_matched={farms_matched}")
 
         if matched_farm_uuids:
-            chunk_size = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_SIZE", "30")), 100))
-            chunk_attempts = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_ATTEMPTS", "3")), 8))
-            retry_backoff_sec = max(0.1, float(os.getenv("HFR_SNAPSHOT_CHUNK_RETRY_BACKOFF_SEC", "2.0")))
+            chunk_size = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_SIZE", "5")), 100))
+            chunk_attempts = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_ATTEMPTS", "6")), 8))
+            retry_backoff_sec = max(0.1, float(os.getenv("HFR_SNAPSHOT_CHUNK_RETRY_BACKOFF_SEC", "3.0")))
             require_complete_chunk = str(os.getenv("HFR_SNAPSHOT_REQUIRE_COMPLETE_CHUNK", "1")).lower() in (
                 "1",
                 "true",
@@ -2951,6 +2952,7 @@ async def jobs_hfr_snapshot(
                                 withObservations=False,
                                 withSprayingsV2=True,
                                 withSoilSamplingTasks=False,
+                                forceRefresh=True,
                             )
                         )
                         combined_json = _response_to_json(combined_resp)

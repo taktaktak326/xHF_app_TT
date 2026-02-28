@@ -150,6 +150,7 @@ class CombinedFieldDataTasksReq(BaseModel):
     withObservations: bool = False
     withSprayingsV2: bool = True
     withSoilSamplingTasks: bool = False
+    forceRefresh: bool = False
     includeTokens: bool = False
 
 
