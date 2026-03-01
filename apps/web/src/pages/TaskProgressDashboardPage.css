@@ -1,8 +1,10 @@
 .task-progress-page {
   --bg: #0b1120;
   --surface: #111827;
+  --surface-alt: #0d1526;
   --surface-hover: #1a2332;
   --border: #1e293b;
+  --border-subtle: rgba(148, 163, 184, 0.08);
   --text: #e2e8f0;
   --text-muted: #94a3b8;
   --text-dim: #64748b;
@@ -11,19 +13,29 @@
   --red: #ef4444;
   --blue: #3b82f6;
   --gray: #64748b;
+  --accent: #646cff;
+  --radius: 14px;
+  --radius-sm: 10px;
 
   color: var(--text);
   display: grid;
   gap: 14px;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
+/* ---- Card Base ---- */
 .task-progress-page .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 16px;
+  border-radius: var(--radius);
+  padding: 18px;
+  min-width: 0;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
+/* ---- Header ---- */
 .task-progress-header {
   display: flex;
   align-items: center;
@@ -35,11 +47,14 @@
 .task-progress-header h2 {
   margin: 0;
   font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .task-progress-header p {
   margin: 4px 0 0;
   color: var(--text-muted);
+  font-size: 13px;
 }
 
 .manual-update-msg {
@@ -56,12 +71,34 @@
 }
 
 .task-progress-header-tools input {
-  background: #0f172a;
+  background: var(--surface-alt);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   color: var(--text);
-  padding: 8px 10px;
+  padding: 8px 12px;
   min-width: 220px;
+  transition: border-color 0.2s;
+}
+
+.task-progress-header-tools input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(100, 108, 255, 0.15);
+}
+
+.task-progress-header-tools select {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 8px 12px;
+  min-width: 148px;
+  transition: border-color 0.2s;
+}
+
+.task-progress-header-tools select:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
 .task-progress-header-tools span {
@@ -70,17 +107,24 @@
 }
 
 .task-progress-header-tools button {
-  background: #0f172a;
+  background: var(--surface-alt);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   color: var(--text);
-  padding: 8px 10px;
+  padding: 8px 14px;
   cursor: pointer;
   font-size: 12px;
+  font-weight: 500;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
 }
 
 .task-progress-header-tools button:hover {
   background: #182236;
+  border-color: rgba(100, 108, 255, 0.35);
+}
+
+.task-progress-header-tools button:active {
+  transform: scale(0.97);
 }
 
 .snapshot-date-label {
@@ -96,12 +140,14 @@
 }
 
 .task-progress-header-tools .source-tag {
-  color: #cbd5e1;
+  color: var(--text-dim);
   border: 1px solid var(--border);
   padding: 2px 8px;
   border-radius: 999px;
+  font-size: 11px;
 }
 
+/* ---- Family Filter Chips ---- */
 .task-family-filter {
   width: 100%;
   display: grid;
@@ -111,6 +157,9 @@
 .task-family-filter__label {
   font-size: 12px;
   color: var(--text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .task-family-filter__options {
@@ -125,40 +174,85 @@
   gap: 6px;
   border: 1px solid var(--border);
   border-radius: 999px;
-  padding: 4px 10px;
+  padding: 5px 12px;
   font-size: 12px;
   color: var(--text-muted);
   background: rgba(15, 23, 42, 0.65);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.task-family-chip:hover {
+  border-color: rgba(100, 108, 255, 0.3);
+  background: rgba(100, 108, 255, 0.06);
 }
 
 .task-family-chip.checked {
   color: var(--text);
-  border-color: rgba(59, 130, 246, 0.55);
-  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(100, 108, 255, 0.55);
+  background: rgba(100, 108, 255, 0.14);
+  font-weight: 500;
 }
 
 .task-family-chip input {
-  accent-color: #3b82f6;
+  accent-color: var(--accent);
 }
 
+/* ---- KPI Cards ---- */
 .task-progress-kpis {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.kpi-card {
+  position: relative;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
+}
+
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 0.25s;
+  pointer-events: none;
+}
+
+.kpi-card:hover {
+  border-color: #2a3e5f;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+.kpi-card:hover::before {
+  opacity: 1;
+}
+
+.kpi-card.kpi-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(100, 108, 255, 0.2) inset, 0 0 24px rgba(100, 108, 255, 0.08);
 }
 
 .kpi-card h3 {
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-muted);
   font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .kpi-card strong {
   display: block;
-  margin-top: 4px;
-  font-size: 30px;
-  line-height: 1.2;
+  margin-top: 6px;
+  font-size: 32px;
+  line-height: 1.15;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .kpi-card p {
@@ -168,11 +262,19 @@
 }
 
 .kpi-green strong { color: var(--green); }
+.kpi-green::before { background: linear-gradient(135deg, rgba(34, 197, 94, 0.06), transparent 60%); }
 .kpi-red strong { color: var(--red); }
+.kpi-red::before { background: linear-gradient(135deg, rgba(239, 68, 68, 0.06), transparent 60%); }
 .kpi-yellow strong { color: var(--yellow); }
+.kpi-yellow::before { background: linear-gradient(135deg, rgba(245, 158, 11, 0.06), transparent 60%); }
 .kpi-blue strong { color: var(--blue); }
+.kpi-blue::before { background: linear-gradient(135deg, rgba(59, 130, 246, 0.06), transparent 60%); }
 .kpi-gray strong { color: #cbd5e1; }
+.kpi-gray::before { background: linear-gradient(135deg, rgba(203, 213, 225, 0.04), transparent 60%); }
+.kpi-teal strong { color: #2dd4bf; }
+.kpi-teal::before { background: linear-gradient(135deg, rgba(45, 212, 191, 0.06), transparent 60%); }
 
+/* ---- Chart & Ranking Sections ---- */
 .task-progress-layer2,
 .task-progress-layer3 {
   display: grid;
@@ -182,24 +284,120 @@
 
 .chart-card h3,
 .ranking-card h3 {
-  margin: 0 0 12px;
-  font-size: 16px;
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+  padding-left: 10px;
+  border-left: 3px solid var(--accent);
 }
 
 .chart-wrap {
   width: 100%;
   height: 310px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.35);
+  padding: 4px;
 }
 
 .chart-wrap.trend {
-  height: 280px;
+  height: 320px;
 }
 
+/* ---- Month Navigation ---- */
+.chart-month-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.chart-month-nav h3 {
+  margin: 0;
+  white-space: nowrap;
+  border-left: none;
+  padding-left: 0;
+  text-align: center;
+}
+
+.chart-month-nav button {
+  padding: 6px 14px;
+  border: 1px solid rgba(100, 108, 255, 0.35);
+  border-radius: 8px;
+  background: rgba(100, 108, 255, 0.1);
+  color: #c5cae9;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.chart-month-nav button:hover {
+  background: rgba(100, 108, 255, 0.22);
+  border-color: rgba(100, 108, 255, 0.55);
+}
+
+.chart-month-nav button:active {
+  transform: scale(0.96);
+}
+
+/* ---- Action Panel ---- */
+.action-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ---- Tables ---- */
 .table-wrap {
+  width: 100%;
+  max-width: 100%;
   max-height: 420px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt);
+}
+
+.table-wrap-wide table {
+  min-width: 2200px;
+}
+
+.snapshot-table-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.snapshot-table-controls button {
+  background: rgba(100, 108, 255, 0.08);
+  border: 1px solid rgba(100, 108, 255, 0.3);
+  border-radius: 8px;
+  color: #c5cae9;
+  padding: 7px 16px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.snapshot-table-controls button:hover {
+  background: rgba(100, 108, 255, 0.18);
+  border-color: rgba(100, 108, 255, 0.55);
+}
+
+.snapshot-table-controls button:active {
+  transform: scale(0.97);
+}
+
+.snapshot-table-controls button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .ranking-card table {
@@ -210,8 +408,8 @@
 
 .ranking-card th,
 .ranking-card td {
-  border-bottom: 1px solid var(--border);
-  padding: 8px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 9px 8px;
   text-align: left;
   white-space: nowrap;
 }
@@ -220,49 +418,66 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  background: #0f172a;
+  background: linear-gradient(180deg, #0d1526 0%, #111827 100%);
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-weight: 600;
+  padding: 10px 8px;
+  border-bottom: 1px solid rgba(100, 108, 255, 0.15);
 }
 
 .ranking-card th button {
   all: unset;
   cursor: pointer;
   color: var(--text-muted);
+  transition: color 0.15s;
+}
+
+.ranking-card th button:hover {
+  color: var(--text);
 }
 
 .ranking-card tbody tr {
   cursor: pointer;
+  transition: background 0.12s;
+}
+
+.ranking-card tbody tr:nth-child(even) {
+  background: rgba(15, 23, 42, 0.25);
 }
 
 .ranking-card tbody tr:hover {
-  background: var(--surface-hover);
+  background: rgba(100, 108, 255, 0.07);
 }
 
+/* ---- Status Indicators ---- */
 .status-dot {
   width: 8px;
   height: 8px;
   display: inline-block;
   border-radius: 999px;
   margin-right: 7px;
+  box-shadow: 0 0 6px currentColor;
 }
 
-.status-dot.good { background: var(--green); }
-.status-dot.warn { background: var(--yellow); }
-.status-dot.bad { background: var(--red); }
+.status-dot.good { background: var(--green); color: var(--green); }
+.status-dot.warn { background: var(--yellow); color: var(--yellow); }
+.status-dot.bad { background: var(--red); color: var(--red); }
 
 .badge {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
+  padding: 2px 10px;
   border-radius: 999px;
-  font-weight: 700;
+  font-weight: 600;
+  font-size: 11px;
 }
 
 .badge.good {
   color: var(--green);
-  background: rgba(34, 197, 94, 0.1);
+  background: rgba(34, 197, 94, 0.12);
 }
 
 .badge.warn {
@@ -284,6 +499,7 @@
 .trend-stable { color: var(--text-muted); }
 .trend-bad { color: var(--red); }
 
+/* ---- Farmer Detail Panel ---- */
 .farmer-detail-head {
   display: flex;
   justify-content: space-between;
@@ -305,7 +521,16 @@
   background: transparent;
   border: 1px solid var(--border);
   color: var(--text-muted);
-  padding: 6px 10px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.farmer-detail-head button:hover {
+  border-color: var(--accent);
+  color: var(--text);
 }
 
 .farmer-mini-kpi {
@@ -316,20 +541,24 @@
 }
 
 .mini {
-  border-radius: 10px;
-  padding: 8px;
+  border-radius: var(--radius-sm);
+  padding: 10px;
   border: 1px solid transparent;
 }
 
 .mini span {
   color: var(--text-muted);
   font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .mini strong {
   display: block;
   margin-top: 4px;
-  font-size: 18px;
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
 }
 
 .mini.green { border-color: rgba(34, 197, 94, 0.3); background: rgba(34, 197, 94, 0.08); }
@@ -339,15 +568,16 @@
 .mini.warn { border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.1); }
 .mini.bad { border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.12); }
 
+/* ---- Task Breakdown Bars ---- */
 .farmer-task-breakdown {
   margin-top: 14px;
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .breakdown-row {
   display: grid;
-  gap: 6px;
+  gap: 5px;
 }
 
 .breakdown-name {
@@ -359,28 +589,30 @@
   height: 10px;
   border-radius: 99px;
   overflow: hidden;
-  background: #0f172a;
-  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--border-subtle);
   display: flex;
 }
 
 .breakdown-bar span {
   display: block;
   height: 100%;
+  transition: width 0.3s ease;
 }
 
 .seg-completed { background: var(--green); }
 .seg-overdue { background: var(--red); }
-.seg-pending { background: rgba(255, 255, 255, 0.2); }
+.seg-pending { background: rgba(255, 255, 255, 0.15); }
 
 .breakdown-text {
   font-size: 11px;
   color: var(--text-muted);
 }
 
+/* ---- Responsive ---- */
 @media (max-width: 1279px) {
   .task-progress-kpis {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .task-progress-layer2,
@@ -407,10 +639,125 @@
   }
 
   .task-progress-kpis {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .farmer-mini-kpi {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+/* ---- Loading Steps Indicator ---- */
+.loading-overlay__steps {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  min-width: 180px;
+}
+
+.loading-step {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #64748b;
+  transition: color 0.3s;
+}
+
+.loading-step__icon {
+  width: 1.6em;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.loading-step--loading {
+  color: #93c5fd;
+}
+
+.loading-step--loading .loading-step__icon {
+  animation: pulse-icon 1.2s ease-in-out infinite;
+}
+
+.loading-step--done,
+.loading-step--cached {
+  color: #86efac;
+}
+
+@keyframes pulse-icon {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* ---- Custom Chart Tooltip ---- */
+.custom-tooltip {
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(100, 116, 180, 0.28);
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  min-width: 140px;
+  max-width: 280px;
+  font-size: 0.82rem;
+  color: #e2e8f0;
+  line-height: 1.5;
+  pointer-events: none;
+}
+
+.custom-tooltip__title {
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: #f1f5f9;
+  padding-bottom: 0.35rem;
+  margin-bottom: 0.35rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.custom-tooltip__total {
+  font-weight: 400;
+  font-size: 0.78rem;
+  color: #94a3b8;
+}
+
+.custom-tooltip__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.custom-tooltip__row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.custom-tooltip__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.custom-tooltip__label {
+  flex: 1;
+  color: #cbd5e1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.custom-tooltip__value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #f8fafc;
+  white-space: nowrap;
 }

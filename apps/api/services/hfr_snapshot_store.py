@@ -125,6 +125,19 @@ def ensure_schema() -> None:
                 ADD COLUMN IF NOT EXISTS creation_flow_hint TEXT
                 """
             )
+            # Performance indexes for common query patterns
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_snapshot_tasks_date_run
+                ON hfr_snapshot_tasks (snapshot_date, run_id)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_snapshot_fields_date_run
+                ON hfr_snapshot_fields (snapshot_date, run_id)
+                """
+            )
         conn.commit()
 
 
@@ -347,6 +360,10 @@ def fetch_snapshot(
     include_tasks: bool = True,
     field_limit: Optional[int] = None,
     task_limit: Optional[int] = None,
+    task_type_in: Optional[List[str]] = None,
+    action_filter: Optional[str] = None,
+    action_filter_today: Optional[str] = None,
+    action_filter_in3days: Optional[str] = None,
 ) -> Dict[str, Any]:
     with _connect() as conn:
         with conn.cursor() as cur:
@@ -417,6 +434,31 @@ def fetch_snapshot(
             fields: List[Dict[str, Any]] = []
             tasks: List[Dict[str, Any]] = []
 
+            # Build dynamic WHERE clauses for task filtering
+            task_where_extra = ""
+            task_params_extra: List[Any] = []
+            if task_type_in:
+                placeholders = ",".join(["%s"] * len(task_type_in))
+                task_where_extra += f" AND task_type IN ({placeholders})"
+                task_params_extra.extend(task_type_in)
+            if action_filter and action_filter != "none" and action_filter_today:
+                done_condition = "(execution_date IS NOT NULL OR status IN ('DONE','COMPLETED','EXECUTED'))"
+                not_done_condition = f"(execution_date IS NULL AND (status IS NULL OR status NOT IN ('DONE','COMPLETED','EXECUTED')))"
+                if action_filter == "overdue":
+                    task_where_extra += f" AND COALESCE(planned_date::date, task_date) < %s::date AND {not_done_condition}"
+                    task_params_extra.append(action_filter_today)
+                elif action_filter == "due_today":
+                    task_where_extra += f" AND COALESCE(planned_date::date, task_date) = %s::date AND {not_done_condition}"
+                    task_params_extra.append(action_filter_today)
+                elif action_filter == "upcoming_3days":
+                    task_where_extra += f" AND COALESCE(planned_date::date, task_date) > %s::date AND COALESCE(planned_date::date, task_date) <= %s::date AND {not_done_condition}"
+                    task_params_extra.extend([action_filter_today, action_filter_in3days or action_filter_today])
+                elif action_filter == "future":
+                    task_where_extra += f" AND COALESCE(planned_date::date, task_date) > %s::date AND {not_done_condition}"
+                    task_params_extra.append(action_filter_today)
+                elif action_filter == "incomplete":
+                    task_where_extra += f" AND {not_done_condition}"
+
             if farm_uuid:
                 field_q = """
                     SELECT *
@@ -425,10 +467,10 @@ def fetch_snapshot(
                      ORDER BY farm_name, field_name, season_uuid
                      LIMIT %s
                 """
-                task_q = """
+                task_q = f"""
                     SELECT *
                       FROM hfr_snapshot_tasks
-                     WHERE snapshot_date = %s AND run_id = %s AND farm_uuid = %s
+                     WHERE snapshot_date = %s AND run_id = %s AND farm_uuid = %s{task_where_extra}
                      ORDER BY farm_name, field_name, task_date NULLS LAST, task_name
                      LIMIT %s
                 """
@@ -436,7 +478,7 @@ def fetch_snapshot(
                     cur.execute(field_q, (snapshot_date, run_id, farm_uuid, safe_field_limit))
                     fields = cur.fetchall() or []
                 if include_tasks:
-                    cur.execute(task_q, (snapshot_date, run_id, farm_uuid, safe_task_limit))
+                    cur.execute(task_q, (snapshot_date, run_id, farm_uuid, *task_params_extra, safe_task_limit))
                     tasks = cur.fetchall() or []
             else:
                 field_q = """
@@ -446,10 +488,10 @@ def fetch_snapshot(
                      ORDER BY farm_name, field_name, season_uuid
                      LIMIT %s
                 """
-                task_q = """
+                task_q = f"""
                     SELECT *
                       FROM hfr_snapshot_tasks
-                     WHERE snapshot_date = %s AND run_id = %s
+                     WHERE snapshot_date = %s AND run_id = %s{task_where_extra}
                      ORDER BY farm_name, field_name, task_date NULLS LAST, task_name
                      LIMIT %s
                 """
@@ -457,7 +499,7 @@ def fetch_snapshot(
                     cur.execute(field_q, (snapshot_date, run_id, safe_field_limit))
                     fields = cur.fetchall() or []
                 if include_tasks:
-                    cur.execute(task_q, (snapshot_date, run_id, safe_task_limit))
+                    cur.execute(task_q, (snapshot_date, run_id, *task_params_extra, safe_task_limit))
                     tasks = cur.fetchall() or []
 
             return {

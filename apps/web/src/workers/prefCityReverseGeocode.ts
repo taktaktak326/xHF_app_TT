@@ -363,48 +363,49 @@ async function loadTopologyOnce() {
     return;
   }
 
-  let gzStream: ReadableStream;
-  {
-    const urlGz =
-      datasetUrl ??
-      (() => {
-        try {
-          // In some dev setups the worker can be served from a blob: URL; prefer an absolute URL if possible.
-          // eslint-disable-next-line no-undef
-          const origin = (self as any)?.location?.origin;
-          if (origin && origin !== 'null') {
-            return `${origin}/pref_city_p5.topo.json.gz`;
-          }
-        } catch {
-          // ignore
+  const urlGz =
+    datasetUrl ??
+    (() => {
+      try {
+        // In some dev setups the worker can be served from a blob: URL; prefer an absolute URL if possible.
+        // eslint-disable-next-line no-undef
+        const origin = (self as any)?.location?.origin;
+        if (origin && origin !== 'null') {
+          return `${origin}/pref_city_p5.topo.json.gz`;
         }
-        return '/pref_city_p5.topo.json.gz';
-      })();
-
-    let res: Response;
-    try {
-      if (!hasDecompressionStream) {
-        throw noGzipSupportError();
+      } catch {
+        // ignore
       }
-      res = await fetch(urlGz);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(`loadTopologyOnce: failed to fetch dataset (${urlGz}): ${msg}`);
-    }
-    if (!res.ok) throw new Error(`loadTopologyOnce: failed to fetch dataset (${urlGz}): HTTP ${res.status}`);
-    if (!res.body) throw new Error('loadTopologyOnce: dataset response has no body');
-    gzStream = res.body;
-  }
+      return '/pref_city_p5.topo.json.gz';
+    })();
 
-  // Browser-native gzip decompression (fetch branch should always be gzip bytes)
-  let text: string;
+  let bytes: Uint8Array;
   try {
-    // eslint-disable-next-line no-undef
-    const stream = gzStream.pipeThrough(new DecompressionStream('gzip'));
-    text = await new Response(stream).text();
+    const res = await fetch(urlGz, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = await res.arrayBuffer();
+    bytes = new Uint8Array(buf);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`loadTopologyOnce: failed to decompress: ${msg}`);
+    throw new Error(`loadTopologyOnce: failed to fetch dataset (${urlGz}): ${msg}`);
+  }
+
+  const isGzip = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  let text: string;
+  if (isGzip) {
+    if (!hasDecompressionStream) {
+      throw noGzipSupportError();
+    }
+    try {
+      // eslint-disable-next-line no-undef
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+      text = await new Response(stream).text();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`loadTopologyOnce: failed to decompress: ${msg}`);
+    }
+  } else {
+    text = new TextDecoder('utf-8').decode(bytes);
   }
 
   let parsed: Topology;

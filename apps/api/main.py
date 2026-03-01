@@ -1,5 +1,6 @@
 # apps/api/main.py
 import asyncio
+import csv
 import json
 import re
 import math
@@ -137,7 +138,7 @@ DASHBOARD_CACHE_TTL_SEC = int(os.getenv("DASHBOARD_CACHE_TTL", "300"))
 _dashboard_cache: Dict[str, Dict[str, Any]] = {}
 _dashboard_cache_lock = threading.Lock()
 
-HFR_SNAPSHOT_CACHE_TTL_SEC = int(os.getenv("HFR_SNAPSHOT_CACHE_TTL", "180"))
+HFR_SNAPSHOT_CACHE_TTL_SEC = int(os.getenv("HFR_SNAPSHOT_CACHE_TTL", "600"))
 _hfr_snapshot_cache: Dict[str, Dict[str, Any]] = {}
 _hfr_snapshot_cache_lock = threading.Lock()
 
@@ -3306,6 +3307,184 @@ def _snapshot_task_family(task: Dict[str, Any]) -> str:
     return default_map.get(task_type, task_type or "その他")
 
 
+@api_app.get("/hfr-snapshots/fields-csv")
+async def hfr_snapshots_fields_csv(
+    snapshot_date: Optional[str] = None,
+    farm_uuid: Optional[str] = None,
+    refresh: bool = False,
+):
+    """
+    スナップショットを field_uuid 単位で集約した CSV を返す。
+    """
+    try:
+        hfr_snapshot_store.ensure_schema()
+        day = datetime.strptime(snapshot_date, "%Y-%m-%d").date() if snapshot_date else datetime.now(timezone(timedelta(hours=9))).date()
+        cache_key = f"hfr:fields-csv:{day}:{farm_uuid or '*'}"
+        if not refresh:
+            cached = _hfr_snapshot_cache_get(cache_key)
+            if cached and isinstance(cached.get("data", {}).get("content"), str):
+                content = cached["data"]["content"]
+                filename = f"hfr_snapshot_fields_{day.isoformat()}.csv"
+                headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+                return StreamingResponse(io.BytesIO(content.encode("utf-8-sig")), media_type="text/csv; charset=utf-8", headers=headers)
+
+        data = hfr_snapshot_store.fetch_snapshot(
+            day,
+            farm_uuid=farm_uuid,
+            include_fields=True,
+            include_tasks=True,
+            field_limit=50000,
+            task_limit=50000,
+            limit=50000,
+        )
+        run = data.get("run") or {}
+        run_id = str(run.get("run_id") or "")
+        fields = data.get("fields") or []
+        tasks = data.get("tasks") or []
+        today = day.isoformat()
+
+        field_map: Dict[str, Dict[str, Any]] = {}
+        for f in fields:
+            if not isinstance(f, dict):
+                continue
+            field_uuid_key = str(f.get("field_uuid") or "").strip()
+            if not field_uuid_key:
+                continue
+            row = field_map.get(field_uuid_key) or {
+                "snapshot_date": today,
+                "run_id": run_id,
+                "farm_uuid": str(f.get("farm_uuid") or ""),
+                "farm_name": str(f.get("farm_name") or ""),
+                "field_uuid": field_uuid_key,
+                "field_name": str(f.get("field_name") or ""),
+                "user_name": str(f.get("user_name") or ""),
+                "crop_name": str(f.get("crop_name") or ""),
+                "variety_name": str(f.get("variety_name") or ""),
+                "area_m2": f.get("area_m2"),
+                "task_total": 0,
+                "due_count": 0,
+                "completed_count": 0,
+                "overdue_count": 0,
+                "due_today_count": 0,
+                "future_count": 0,
+                "first_planned_date": "",
+                "last_planned_date": "",
+                "task_types": set(),
+            }
+            field_map[field_uuid_key] = row
+
+        for t in tasks:
+            if not isinstance(t, dict):
+                continue
+            field_uuid_key = str(t.get("field_uuid") or "").strip()
+            if not field_uuid_key:
+                continue
+            row = field_map.get(field_uuid_key)
+            if row is None:
+                # fields 側に行がなくても task 側だけで行を作る
+                row = {
+                    "snapshot_date": today,
+                    "run_id": run_id,
+                    "farm_uuid": str(t.get("farm_uuid") or ""),
+                    "farm_name": str(t.get("farm_name") or ""),
+                    "field_uuid": field_uuid_key,
+                    "field_name": str(t.get("field_name") or ""),
+                    "user_name": str(t.get("user_name") or ""),
+                    "crop_name": "",
+                    "variety_name": "",
+                    "area_m2": None,
+                    "task_total": 0,
+                    "due_count": 0,
+                    "completed_count": 0,
+                    "overdue_count": 0,
+                    "due_today_count": 0,
+                    "future_count": 0,
+                    "first_planned_date": "",
+                    "last_planned_date": "",
+                    "task_types": set(),
+                }
+                field_map[field_uuid_key] = row
+
+            planned = _to_day_key(t.get("planned_date")) or _to_day_key(t.get("task_date"))
+            execution = _to_day_key(t.get("execution_date"))
+            status = str(t.get("status") or "").upper()
+            done = bool(execution) or ("DONE" in status or "COMPLETED" in status or "EXECUTED" in status)
+
+            row["task_total"] += 1
+            if planned:
+                row["due_count"] += 1 if planned <= today else 0
+                row["overdue_count"] += 1 if (planned < today and not done) else 0
+                row["due_today_count"] += 1 if (planned == today and not done) else 0
+                row["future_count"] += 1 if (planned > today and not done) else 0
+                if not row["first_planned_date"] or planned < row["first_planned_date"]:
+                    row["first_planned_date"] = planned
+                if not row["last_planned_date"] or planned > row["last_planned_date"]:
+                    row["last_planned_date"] = planned
+            else:
+                if not done:
+                    row["future_count"] += 1
+            row["completed_count"] += 1 if done else 0
+
+            family = _snapshot_task_family(t)
+            if family:
+                row["task_types"].add(family)
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow([
+            "snapshot_date",
+            "run_id",
+            "farm_uuid",
+            "farm_name",
+            "field_uuid",
+            "field_name",
+            "user_name",
+            "crop_name",
+            "variety_name",
+            "area_m2",
+            "task_total",
+            "due_count",
+            "completed_count",
+            "overdue_count",
+            "due_today_count",
+            "future_count",
+            "first_planned_date",
+            "last_planned_date",
+            "task_types",
+        ])
+        for key in sorted(field_map.keys()):
+            row = field_map[key]
+            writer.writerow([
+                row.get("snapshot_date", ""),
+                row.get("run_id", ""),
+                row.get("farm_uuid", ""),
+                row.get("farm_name", ""),
+                row.get("field_uuid", ""),
+                row.get("field_name", ""),
+                row.get("user_name", ""),
+                row.get("crop_name", ""),
+                row.get("variety_name", ""),
+                row.get("area_m2", ""),
+                row.get("task_total", 0),
+                row.get("due_count", 0),
+                row.get("completed_count", 0),
+                row.get("overdue_count", 0),
+                row.get("due_today_count", 0),
+                row.get("future_count", 0),
+                row.get("first_planned_date", ""),
+                row.get("last_planned_date", ""),
+                " | ".join(sorted(row.get("task_types", set()))),
+            ])
+
+        csv_text = output.getvalue()
+        _hfr_snapshot_cache_set(cache_key, {"content": csv_text})
+        filename = f"hfr_snapshot_fields_{day.isoformat()}.csv"
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return StreamingResponse(io.BytesIO(csv_text.encode("utf-8-sig")), media_type="text/csv; charset=utf-8", headers=headers)
+    except Exception as exc:
+        raise HTTPException(500, {"reason": "snapshot_fields_csv_failed", "detail": str(exc)})
+
+
 @api_app.get("/hfr-snapshots/summary")
 async def hfr_snapshots_summary(
     snapshot_date: Optional[str] = None,
@@ -3324,18 +3503,24 @@ async def hfr_snapshots_summary(
             if cached:
                 return {**cached["data"], "source": "cache", "cached_at": cached.get("cached_at")}
 
+        today = str(day)
+        in3days = (day + timedelta(days=3)).isoformat()
+        # Push action_filter to SQL when possible to reduce data transfer
+        sql_action = action_filter if action_filter in ("overdue", "due_today", "upcoming_3days", "future", "incomplete") else None
         data = hfr_snapshot_store.fetch_snapshot(
             day,
             include_fields=False,
             include_tasks=True,
             task_limit=50000,
             limit=50000,
+            action_filter=sql_action,
+            action_filter_today=today if sql_action else None,
+            action_filter_in3days=in3days if sql_action else None,
         )
         tasks = data.get("tasks") or []
-        today = str(day)
-        in3days = (day + timedelta(days=3)).isoformat()
 
         filtered_tasks: List[Dict[str, Any]] = []
+        action_already_sql = sql_action is not None
         for task in tasks:
             if not isinstance(task, dict):
                 continue
@@ -3346,16 +3531,18 @@ async def hfr_snapshots_summary(
             execution = _to_day_key(task.get("execution_date"))
             status = str(task.get("status") or "").upper()
             done = bool(execution) or ("DONE" in status or "COMPLETED" in status or "EXECUTED" in status)
-            if action_filter == "overdue" and not (planned and planned < today and not done):
-                continue
-            if action_filter == "due_today" and not (planned and planned == today and not done):
-                continue
-            if action_filter == "upcoming_3days" and not (planned and today < planned <= in3days and not done):
-                continue
-            if action_filter == "future" and not (planned and planned > today and not done):
-                continue
-            if action_filter == "incomplete" and done:
-                continue
+            # Skip Python-side action_filter when already applied by SQL
+            if not action_already_sql:
+                if action_filter == "overdue" and not (planned and planned < today and not done):
+                    continue
+                if action_filter == "due_today" and not (planned and planned == today and not done):
+                    continue
+                if action_filter == "upcoming_3days" and not (planned and today < planned <= in3days and not done):
+                    continue
+                if action_filter == "future" and not (planned and planned > today and not done):
+                    continue
+                if action_filter == "incomplete" and done:
+                    continue
 
             task["_family"] = family
             task["_planned"] = planned
@@ -3497,29 +3684,69 @@ async def hfr_snapshots_summary(
             cnt = sum(1 for f in farmers if lo <= float(f["delay_rate"]) < hi)
             distribution.append({"bucket": label, "count": cnt, "color": color})
 
+        # --- trend: 1-pass O(n + 30) algorithm instead of O(n*30) ---
+        trend_start = (day - timedelta(days=29)).isoformat()
+        total_done_count = sum(1 for t in filtered_tasks if t.get("_done"))
+        total_tasks = len(filtered_tasks)
+
+        # Bucket tasks by their planned date and completion date
+        planned_on_all: Dict[str, int] = {}       # all tasks with planned == d
+        planned_on_notdone: Dict[str, int] = {}   # not-done tasks with planned == d
+        completed_on: Dict[str, int] = {}          # done tasks: counted at exec_day or planned if no exec_day
+
+        for t in filtered_tasks:
+            planned = str(t.get("_planned") or "")
+            if not planned:
+                continue
+            done = bool(t.get("_done"))
+            planned_on_all[planned] = planned_on_all.get(planned, 0) + 1
+            if not done:
+                planned_on_notdone[planned] = planned_on_notdone.get(planned, 0) + 1
+            else:
+                exec_day = _to_day_key(t.get("execution_date"))
+                c_day = exec_day if exec_day else planned
+                completed_on[c_day] = completed_on.get(c_day, 0) + 1
+
+        # Pre-accumulate counts for days before trend window
+        cum_due = 0
+        cum_completed = 0
+        cum_overdue = 0  # not-done tasks with planned < current day
+        for t in filtered_tasks:
+            planned = str(t.get("_planned") or "")
+            if not planned or planned >= trend_start:
+                continue
+            cum_due += 1
+            done = bool(t.get("_done"))
+            if not done:
+                cum_overdue += 1
+            else:
+                exec_day = _to_day_key(t.get("execution_date"))
+                c_day = exec_day if exec_day else planned
+                if c_day < trend_start:
+                    cum_completed += 1
+
         trend = []
         for offset in range(29, -1, -1):
             day_key = (day - timedelta(days=offset)).isoformat()
-            due = completed = overdue = 0
-            for t in filtered_tasks:
-                planned = str(t.get("_planned") or "")
-                if not planned or planned > day_key:
-                    continue
-                due += 1
-                done = bool(t.get("_done"))
-                exec_day = _to_day_key(t.get("execution_date"))
-                if done and (not exec_day or exec_day <= day_key):
-                    completed += 1
-                elif planned < day_key and not done:
-                    overdue += 1
-            if due == 0 and filtered_tasks:
-                due = len(filtered_tasks)
-                completed = sum(1 for t in filtered_tasks if t.get("_done"))
+            # Accumulate: tasks becoming due on this day (planned <= day_key)
+            cum_due += planned_on_all.get(day_key, 0)
+            # Accumulate: tasks completed on this day
+            cum_completed += completed_on.get(day_key, 0)
+            # cum_overdue = not-done tasks with planned < day_key (already accumulated)
+            effective_due = cum_due
+            effective_completed = cum_completed
+            effective_overdue = cum_overdue
+            if effective_due == 0 and total_tasks > 0:
+                effective_due = total_tasks
+                effective_completed = total_done_count
+                effective_overdue = 0
             trend.append({
                 "date": f"{int(day_key[5:7])}/{int(day_key[8:10])}",
-                "completion_rate": _rate(completed, due),
-                "delay_rate": _rate(overdue, due),
+                "completion_rate": _rate(effective_completed, effective_due),
+                "delay_rate": _rate(effective_overdue, effective_due),
             })
+            # After this day's calculation, tasks due today that are not done become overdue tomorrow
+            cum_overdue += planned_on_notdone.get(day_key, 0)
 
         payload = {
             "ok": True,

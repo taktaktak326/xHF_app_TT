@@ -678,9 +678,22 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
     // 現在のデータが選択中の農場と一致するかチェック
     const hasTasksData = (combined: any) => {
       if (!combined) return false;
+      const payload = (combined.request?.payload as any) || {};
+      if (payload.includeTasks === true) return true;
+
       const subs = combined._sub_responses || {};
       if (subs.tasks?.response?.data?.fieldsV2) return true;
       if (subs.tasks_sprayings?.response?.data?.fieldsV2) return true;
+
+      const fields = combined.response?.data?.fieldsV2;
+      if (Array.isArray(fields) && fields.length > 0) {
+        // Non-stream combined-fields responses often do not carry _sub_responses.
+        // If includeTasks was requested, merged cropSeasonsV2 already includes task-related payload.
+        const hasTaskLikeSeason = fields.some((field: any) =>
+          Array.isArray(field?.cropSeasonsV2) && field.cropSeasonsV2.length > 0
+        );
+        if (hasTaskLikeSeason) return true;
+      }
       return false;
     };
 
