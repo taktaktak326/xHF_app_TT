@@ -13,7 +13,7 @@ export const messages: MessageTable = {
 
   'nav.farms': { ja: '圃場情報', en: 'Fields' },
   'nav.tasks': { ja: 'タスク', en: 'Tasks' },
-  'nav.task_progress_dashboard': { ja: '進捗ダッシュボード', en: 'Progress Dashboard' },
+  'nav.task_progress_dashboard': { ja: 'xHF26ダッシュボード', en: 'Progress Dashboard' },
   'nav.ndvi': { ja: 'リモートセンシング', en: 'Remote Sensing' },
   'nav.satellite_map': { ja: '衛星マップ', en: 'Satellite Map' },
   'nav.crop_registration': { ja: '作付登録', en: 'Crop Registration' },

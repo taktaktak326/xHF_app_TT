@@ -224,19 +224,19 @@ function emptyDashboardBundle(asOf: string): DashboardBundle {
 }
 
 const TYPE_FAMILY_ORDER: string[] = [
-  '播種',
+  '播種タスク',
   '防除タスク（除草剤）',
   '防除タスク（殺菌剤）',
   '防除タスク（殺虫剤）',
   '防除タスク（その他）',
   '施肥タスク',
   '雑草管理タスク',
-  '水管理',
-  '圃場調査',
-  '収穫',
-  '土壌管理',
-  '種子処理',
-  '育苗箱処理',
+  '水管理タスク',
+  '観察記録タスク',
+  '収穫タスク',
+  '土壌管理タスク',
+  '種子処理タスク',
+  '育苗箱処理タスク',
 ];
 const ALL_FAMILY_OPTION = '全部';
 const PROTECTION_FILTER_OPTIONS = [
@@ -312,21 +312,29 @@ function clearSnapshotSessionCache(): void {
 }
 
 const TYPE_FAMILY_BY_TASK_TYPE: Record<string, string> = {
-  Harvest: '収穫',
-  Spraying: '防除タスク（その他）',
-  WaterManagement: '水管理',
-  Scouting: '圃場調査',
-  CropEstablishment: '播種',
-  LandPreparation: '土壌管理',
-  SeedTreatment: '種子処理',
-  SeedBoxTreatment: '育苗箱処理',
+  Harvest: '収穫タスク',
+  Spraying: '散布タスク',
+  WaterManagement: '水管理タスク',
+  Scouting: '観察記録タスク',
+  CropEstablishment: '播種タスク',
+  LandPreparation: '土壌管理タスク',
+  SeedTreatment: '種子処理タスク',
+  SeedBoxTreatment: '育苗箱処理タスク',
 };
 
 function normalizeTaskFamilyLabel(value: string): string {
   const raw = String(value || '').trim();
   if (!raw) return '';
-  if (raw === '生育調査') return '圃場調査';
-  if (raw === '土づくり') return '土壌管理';
+  if (raw === '生育調査') return '観察記録タスク';
+  if (raw === '圃場調査') return '観察記録タスク';
+  if (raw === '観察記録') return '観察記録タスク';
+  if (raw === '土づくり') return '土壌管理タスク';
+  if (raw === '土壌管理') return '土壌管理タスク';
+  if (raw === '収穫') return '収穫タスク';
+  if (raw === '水管理') return '水管理タスク';
+  if (raw === '播種') return '播種タスク';
+  if (raw === '種子処理') return '種子処理タスク';
+  if (raw === '育苗箱処理') return '育苗箱処理タスク';
   if (raw === '防除タスク') return '防除タスク（その他）';
   return raw;
 }
@@ -2103,7 +2111,7 @@ export function TaskProgressDashboardPage() {
     return (
       <div className="task-progress-page">
         <section className="task-progress-header card">
-          <h2>圃場タスク管理ダッシュボード</h2>
+          <h2>xHF for Rita 26タスク管理ダッシュボード</h2>
           <p style={{ color: '#ef4444' }}>{snapshotErr}</p>
         </section>
       </div>
@@ -2114,7 +2122,7 @@ export function TaskProgressDashboardPage() {
     <div className="task-progress-page">
       <section className="task-progress-header card">
         <div>
-          <h2>圃場タスク管理ダッシュボード</h2>
+          <h2>xHF for Rita 26タスク管理ダッシュボード</h2>
           <p>遅延の早期発見にフォーカスした全体監視ビュー</p>
         </div>
         <div className="task-progress-header-tools">
