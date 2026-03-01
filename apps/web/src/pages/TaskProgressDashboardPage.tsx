@@ -224,18 +224,17 @@ function emptyDashboardBundle(asOf: string): DashboardBundle {
 }
 
 const TYPE_FAMILY_ORDER: string[] = [
+  '播種',
   '防除タスク（除草剤）',
   '防除タスク（殺菌剤）',
   '防除タスク（殺虫剤）',
   '防除タスク（その他）',
-  '防除タスク',
-  '雑草管理タスク',
   '施肥タスク',
-  '播種',
-  '生育調査',
-  '収穫',
+  '雑草管理タスク',
   '水管理',
-  '土づくり',
+  '圃場調査',
+  '収穫',
+  '土壌管理',
   '種子処理',
   '育苗箱処理',
 ];
@@ -314,14 +313,23 @@ function clearSnapshotSessionCache(): void {
 
 const TYPE_FAMILY_BY_TASK_TYPE: Record<string, string> = {
   Harvest: '収穫',
-  Spraying: '防除タスク',
+  Spraying: '防除タスク（その他）',
   WaterManagement: '水管理',
-  Scouting: '生育調査',
+  Scouting: '圃場調査',
   CropEstablishment: '播種',
-  LandPreparation: '土づくり',
+  LandPreparation: '土壌管理',
   SeedTreatment: '種子処理',
   SeedBoxTreatment: '育苗箱処理',
 };
+
+function normalizeTaskFamilyLabel(value: string): string {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw === '生育調査') return '圃場調査';
+  if (raw === '土づくり') return '土壌管理';
+  if (raw === '防除タスク') return '防除タスク（その他）';
+  return raw;
+}
 
 function matchesActionFilter(task: DashboardTask, filter: ActionFilterKey, today: string): boolean {
   if (filter === 'none') return true;
@@ -441,11 +449,11 @@ function resolveTaskFamilyFromSnapshot(
       }
       return '防除タスク（その他）';
     }
-    return '防除タスク';
+    return '防除タスク（その他）';
   }
-  const byName = (task.task_name || '').trim();
+  const byName = normalizeTaskFamilyLabel(task.task_name || '');
   if (byName) return byName;
-  return TYPE_FAMILY_BY_TASK_TYPE[task.task_type] || task.task_type || 'その他';
+  return normalizeTaskFamilyLabel(TYPE_FAMILY_BY_TASK_TYPE[task.task_type] || task.task_type || 'その他');
 }
 
 function detectSpraySubtype(
@@ -1674,12 +1682,10 @@ export function TaskProgressDashboardPage() {
         const raw = String(row.task_type_name || '').trim();
         if (!raw) return;
         const m = raw.match(/^(.*)\s\d+回目$/);
-        const family = m ? m[1] : raw;
+        const family = normalizeTaskFamilyLabel(m ? m[1] : raw);
         if (family) set.add(family);
       });
     }
-    const hasProtectionSub = Array.from(set).some((name) => name.startsWith('防除（'));
-    if (hasProtectionSub) set.add('防除');
     const hasSprayingTask = allTasks.some((task) => task.taskType === 'Spraying');
     if (hasSprayingTask) {
       PROTECTION_FILTER_OPTIONS.forEach((name) => set.add(name));
