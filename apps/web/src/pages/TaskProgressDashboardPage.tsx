@@ -4,8 +4,7 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
-  Line,
-  LineChart,
+  Legend,
   ResponsiveContainer,
   Scatter,
   ScatterChart,
@@ -146,6 +145,12 @@ type TrendPoint = {
   delay_rate: number;
 };
 
+type DailyFarmBar = {
+  date: string;
+  _dateKey: string; // YYYY-MM-DD for filtering
+  [farmName: string]: string | number;
+};
+
 type FarmerDetail = {
   id: string;
   name: string;
@@ -187,6 +192,8 @@ type DashboardBundle = {
   task_types: TaskTypeRow[];
   distribution: DistributionRow[];
   trend: TrendPoint[];
+  daily_farm_bars: DailyFarmBar[];
+  daily_farm_names: string[];
   farmer_details: Record<string, FarmerDetail>;
   as_of: string;
 };
@@ -209,6 +216,8 @@ function emptyDashboardBundle(asOf: string): DashboardBundle {
     task_types: [],
     distribution: [],
     trend: [],
+    daily_farm_bars: [],
+    daily_farm_names: [],
     farmer_details: {},
     as_of: asOf,
   };
@@ -238,16 +247,20 @@ const PROTECTION_FILTER_OPTIONS = [
   '防除タスク（殺虫剤）',
   '防除タスク（その他）',
 ] as const;
-const SNAPSHOT_LOAD_ESTIMATE_SEC = 20;
 const COUNTRY_UUID_JP = '0f59ff55-c86b-4b7b-4eaa-eb003d47dcd3';
 const RICE_CROP_UUID = 'e54c5e22-94a0-a5ff-34a6-4fe0f8ad1ccc';
-const SNAPSHOT_CLIENT_CACHE_TTL_MS = 2 * 60 * 1000;
+const SNAPSHOT_CLIENT_CACHE_TTL_MS = 60 * 60 * 1000;
 const SNAPSHOT_TASK_LIMIT = 50000;
 const SNAPSHOT_FIELD_LIMIT = 50000;
 const INITIAL_FIELD_ROWS = 50;
 const INITIAL_TASK_ROWS = 50;
 const FIELD_ROWS_STEP = 50;
 const TASK_ROWS_STEP = 50;
+const FARM_BAR_COLORS = [
+  '#7986ff', '#64b5f6', '#4db6ac', '#81c784', '#aed581',
+  '#dce775', '#ffd54f', '#ffb74d', '#ff8a65', '#e57373',
+  '#ba68c8', '#f06292', '#4dd0e1', '#a1887f', '#90a4ae',
+];
 
 const snapshotPageCache = new Map<string, { expiresAt: number; data: any }>();
 const snapshotDatesCache = new Map<string, { expiresAt: number; data: any }>();
@@ -587,6 +600,294 @@ function formatDate(value: string | null | undefined): string {
   return dt.toLocaleDateString('ja-JP');
 }
 
+function formatAreaHa(areaM2: number | null | undefined): string {
+  if (typeof areaM2 !== 'number' || !Number.isFinite(areaM2)) return '-';
+  const ha = areaM2 / 10000;
+  return `${ha.toLocaleString('ja-JP', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ha`;
+}
+
+/**
+ * Client-side DashboardBundle computation from filtered tasks.
+ * Mirrors the server-side summary logic so filter changes are instant.
+ */
+function computeDashboardBundle(
+  filteredTasks: DashboardTask[],
+  snapshotDate: string,
+  asOf: string,
+): DashboardBundle {
+  const today = getJstDayKey(new Date());
+  const in3days = addDaysToKey(today, 3);
+
+  function rate(a: number, b: number): number {
+    return b > 0 ? Math.round((a * 1000) / b) / 10 : 0;
+  }
+
+  function counts(tasks: DashboardTask[]) {
+    let due = 0, completed = 0, overdue = 0, dueToday = 0, upcoming3 = 0, future = 0;
+    for (const t of tasks) {
+      const planned = getScheduledDay(t);
+      const done = t.completed;
+      if (!planned) {
+        if (!done) future++;
+        continue;
+      }
+      if (planned <= today) {
+        due++;
+        if (done) completed++;
+      }
+      if (planned < today && !done) overdue++;
+      if (planned === today && !done) dueToday++;
+      if (planned > today && planned <= in3days && !done) upcoming3++;
+      if (planned > today && !done) future++;
+    }
+    if (due === 0 && tasks.length > 0) {
+      due = tasks.length;
+      completed = tasks.filter((t) => t.completed).length;
+    }
+    return { due, completed, overdue, dueToday, upcoming3, future };
+  }
+
+  // Group by farmer
+  const farmersMap = new Map<string, { name: string; fieldSet: Set<string>; tasks: DashboardTask[] }>();
+  for (const task of filteredTasks) {
+    const farmerId = task.farmUuid || `name:${task.farmName}`;
+    let entry = farmersMap.get(farmerId);
+    if (!entry) {
+      entry = { name: task.farmName || '', fieldSet: new Set(), tasks: [] };
+      farmersMap.set(farmerId, entry);
+    }
+    if (task.fieldUuid) entry.fieldSet.add(task.fieldUuid);
+    entry.tasks.push(task);
+  }
+
+  const farmers: FarmerRow[] = [];
+  const farmerDetails: Record<string, FarmerDetail> = {};
+  let idx = 0;
+  for (const [farmerId, entry] of farmersMap) {
+    idx++;
+    const c = counts(entry.tasks);
+    const delayRate = rate(c.overdue, c.due);
+    const completionRate = rate(c.completed, c.due);
+    farmers.push({
+      id: farmerId,
+      name: entry.name || `農業者${idx}`,
+      field_count: entry.fieldSet.size,
+      due_task_count: c.due,
+      completed_count: c.completed,
+      overdue_count: c.overdue,
+      due_today_count: c.dueToday,
+      upcoming_3days_count: c.upcoming3,
+      future_task_count: c.future,
+      delay_rate: delayRate,
+      completion_rate: completionRate,
+      delay_status: delayRate < 15 ? 'good' : delayRate < 30 ? 'warn' : 'bad',
+      trend_direction: 'stable',
+    });
+
+    // Per-farmer task type breakdown
+    const typeMap = new Map<string, DashboardTask[]>();
+    for (const t of entry.tasks) {
+      const label = `${t.typeFamily} ${t.occurrence}回目`;
+      if (!typeMap.has(label)) typeMap.set(label, []);
+      typeMap.get(label)!.push(t);
+    }
+    const typeRows: FarmerDetail['task_types'] = [];
+    let order = 0;
+    for (const name of [...typeMap.keys()].sort((a, b) => a.localeCompare(b, 'ja'))) {
+      order++;
+      const tc = counts(typeMap.get(name)!);
+      typeRows.push({
+        name,
+        display_order: order,
+        due_count: tc.due,
+        completed_count: tc.completed,
+        overdue_count: tc.overdue,
+        pending_count: tc.future,
+        completion_rate: rate(tc.completed, tc.due),
+        delay_rate: rate(tc.overdue, tc.due),
+      });
+    }
+    farmerDetails[farmerId] = {
+      id: farmerId,
+      name: entry.name || `農業者${idx}`,
+      field_count: entry.fieldSet.size,
+      summary: { due: c.due, completed: c.completed, overdue: c.overdue, pending: c.future, delay_rate: delayRate, completion_rate: completionRate },
+      task_types: typeRows,
+    };
+  }
+
+  // Global task type breakdown
+  const typeMapAll = new Map<string, DashboardTask[]>();
+  for (const t of filteredTasks) {
+    const label = `${t.typeFamily} ${t.occurrence}回目`;
+    if (!typeMapAll.has(label)) typeMapAll.set(label, []);
+    typeMapAll.get(label)!.push(t);
+  }
+  const taskTypes: TaskTypeRow[] = [];
+  let tOrder = 0;
+  for (const name of [...typeMapAll.keys()].sort((a, b) => a.localeCompare(b, 'ja'))) {
+    tOrder++;
+    const tc = counts(typeMapAll.get(name)!);
+    taskTypes.push({
+      task_type_name: name,
+      display_order: tOrder,
+      due_count: tc.due,
+      completed_count: tc.completed,
+      overdue_count: tc.overdue,
+      pending_count: tc.future,
+      completion_rate: rate(tc.completed, tc.due),
+      delay_rate: rate(tc.overdue, tc.due),
+    });
+  }
+
+  // KPI totals
+  const totalDue = farmers.reduce((s, f) => s + f.due_task_count, 0);
+  const totalCompleted = farmers.reduce((s, f) => s + f.completed_count, 0);
+  const totalOverdue = farmers.reduce((s, f) => s + f.overdue_count, 0);
+  const totalDueToday = farmers.reduce((s, f) => s + f.due_today_count, 0);
+  const totalUpcoming = farmers.reduce((s, f) => s + f.upcoming_3days_count, 0);
+  const totalFuture = farmers.reduce((s, f) => s + f.future_task_count, 0);
+
+  // Distribution buckets
+  const buckets: Array<[number, number, string, string]> = [
+    [0, 5, '#22c55e', '0-5%'], [5, 10, '#22c55e', '5-10%'], [10, 15, '#22c55e', '10-15%'],
+    [15, 20, '#f59e0b', '15-20%'], [20, 25, '#f59e0b', '20-25%'], [25, 30, '#f59e0b', '25-30%'],
+    [30, 1000, '#ef4444', '30%+'],
+  ];
+  const distribution: DistributionRow[] = buckets.map(([lo, hi, color, label]) => ({
+    bucket: label,
+    count: farmers.filter((f) => f.delay_rate >= lo && f.delay_rate < hi).length,
+    color,
+  }));
+
+  // 30-day trend (1-pass O(n+30))
+  const dateObj = snapshotDate ? new Date(snapshotDate + 'T00:00:00+09:00') : new Date();
+  const trendDays: string[] = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(dateObj.getTime() - i * 86400000);
+    trendDays.push(getJstDayKey(d));
+  }
+  const plannedOnAll = new Map<string, number>();
+  const plannedOnNotDone = new Map<string, number>();
+  const completedOn = new Map<string, number>();
+  const totalDoneCount = filteredTasks.filter((t) => t.completed).length;
+  for (const t of filteredTasks) {
+    const planned = getScheduledDay(t);
+    if (!planned) continue;
+    plannedOnAll.set(planned, (plannedOnAll.get(planned) || 0) + 1);
+    if (!t.completed) {
+      plannedOnNotDone.set(planned, (plannedOnNotDone.get(planned) || 0) + 1);
+    } else {
+      const cDay = t.executionDay || planned;
+      completedOn.set(cDay, (completedOn.get(cDay) || 0) + 1);
+    }
+  }
+  // Pre-accumulate before trend window
+  const trendStart = trendDays[0];
+  let cumDue = 0, cumCompleted = 0, cumOverdue = 0;
+  for (const t of filteredTasks) {
+    const planned = getScheduledDay(t);
+    if (!planned || planned >= trendStart) continue;
+    cumDue++;
+    if (!t.completed) {
+      cumOverdue++;
+    } else {
+      const cDay = t.executionDay || planned;
+      if (cDay < trendStart) cumCompleted++;
+    }
+  }
+  const trend: TrendPoint[] = [];
+  for (const dayKey of trendDays) {
+    cumDue += plannedOnAll.get(dayKey) || 0;
+    cumCompleted += completedOn.get(dayKey) || 0;
+    let effDue = cumDue, effCompleted = cumCompleted, effOverdue = cumOverdue;
+    if (effDue === 0 && filteredTasks.length > 0) {
+      effDue = filteredTasks.length;
+      effCompleted = totalDoneCount;
+      effOverdue = 0;
+    }
+    const mm = parseInt(dayKey.slice(5, 7), 10);
+    const dd = parseInt(dayKey.slice(8, 10), 10);
+    trend.push({
+      date: `${mm}/${dd}`,
+      completion_rate: rate(effCompleted, effDue),
+      delay_rate: rate(effOverdue, effDue),
+    });
+    cumOverdue += plannedOnNotDone.get(dayKey) || 0;
+  }
+
+  // Daily per-farm task count (for stacked bar chart)
+  // Group tasks by date × farm
+  const dailyFarmMap = new Map<string, Map<string, number>>();
+  const farmNameSet = new Set<string>();
+  for (const t of filteredTasks) {
+    const planned = getScheduledDay(t);
+    if (!planned) continue;
+    const farmName = t.farmName || '不明';
+    farmNameSet.add(farmName);
+    let dayMap = dailyFarmMap.get(planned);
+    if (!dayMap) {
+      dayMap = new Map();
+      dailyFarmMap.set(planned, dayMap);
+    }
+    dayMap.set(farmName, (dayMap.get(farmName) || 0) + 1);
+  }
+  const dailyFarmNames = [...farmNameSet].sort((a, b) => a.localeCompare(b, 'ja'));
+  // Build continuous date range covering all task dates
+  const taskDates = [...dailyFarmMap.keys()].sort();
+  const rangeStart = taskDates.length > 0 && taskDates[0] < trendDays[0] ? taskDates[0] : trendDays[0];
+  const rangeEnd = taskDates.length > 0 && taskDates[taskDates.length - 1] > trendDays[trendDays.length - 1]
+    ? taskDates[taskDates.length - 1]
+    : trendDays[trendDays.length - 1];
+  const allBarDays: string[] = [];
+  {
+    const startMs = new Date(rangeStart + 'T00:00:00+09:00').getTime();
+    const endMs = new Date(rangeEnd + 'T00:00:00+09:00').getTime();
+    for (let ms = startMs; ms <= endMs; ms += 86400000) {
+      allBarDays.push(getJstDayKey(new Date(ms)));
+    }
+  }
+  const dailyFarmBars: DailyFarmBar[] = allBarDays.map((dayKey) => {
+    const mm = parseInt(dayKey.slice(5, 7), 10);
+    const dd = parseInt(dayKey.slice(8, 10), 10);
+    const row: DailyFarmBar = { date: `${mm}/${dd}`, _dateKey: dayKey };
+    const dayMap = dailyFarmMap.get(dayKey);
+    if (dayMap) {
+      for (const name of dailyFarmNames) {
+        row[name] = dayMap.get(name) || 0;
+      }
+    } else {
+      for (const name of dailyFarmNames) {
+        row[name] = 0;
+      }
+    }
+    return row;
+  });
+
+  return {
+    kpi: {
+      completion_rate: rate(totalCompleted, totalDue),
+      completed_count: totalCompleted,
+      due_count: totalDue,
+      overdue_count: totalOverdue,
+      delay_rate: rate(totalOverdue, totalDue),
+      due_today_count: totalDueToday,
+      upcoming_3days_count: totalUpcoming,
+      future_count: totalFuture,
+      total_task_count: filteredTasks.length,
+      as_of: asOf,
+    },
+    farmers,
+    task_types: taskTypes,
+    distribution,
+    trend,
+    daily_farm_bars: dailyFarmBars,
+    daily_farm_names: dailyFarmNames,
+    farmer_details: farmerDetails,
+    as_of: asOf,
+  };
+}
+
 function quickFilterLabel(filterKey: ActionFilterKey): string {
   if (filterKey === 'overdue') return '遅延中タスク';
   if (filterKey === 'due_today') return '本日期限タスク';
@@ -655,6 +956,96 @@ const TaskFamilyFilterPanel = memo(function TaskFamilyFilterPanel({
   );
 });
 
+// --------------- Custom Tooltip Components ---------------
+
+const tooltipLabelMap: Record<string, string> = {
+  completed_count: '完了',
+  overdue_count: '遅延',
+  pending_count: '未着手',
+  count: '農業者数',
+  x: '到来済みタスク',
+  y: '遅延率',
+  delay_rate: '遅延率',
+  completion_rate: '完了率',
+};
+
+function ChartTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="custom-tooltip">
+      {label != null && <div className="custom-tooltip__title">{label}</div>}
+      <ul className="custom-tooltip__list">
+        {payload.map((entry: any, i: number) => (
+          <li key={i} className="custom-tooltip__row">
+            <span className="custom-tooltip__dot" style={{ background: entry.color || entry.fill }} />
+            <span className="custom-tooltip__label">{tooltipLabelMap[entry.dataKey] ?? entry.name ?? entry.dataKey}</span>
+            <span className="custom-tooltip__value">
+              {typeof entry.value === 'number' ? entry.value.toLocaleString() : entry.value}
+              {entry.unit ?? ''}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ScatterTooltip({ active, payload }: any) {
+  if (!active || !payload?.length) return null;
+  const data = payload[0]?.payload as (FarmerRow & { x: number; y: number; z: number }) | undefined;
+  if (!data) return null;
+  return (
+    <div className="custom-tooltip">
+      <div className="custom-tooltip__title">{data.name}</div>
+      <ul className="custom-tooltip__list">
+        <li className="custom-tooltip__row">
+          <span className="custom-tooltip__dot" style={{ background: '#64b5f6' }} />
+          <span className="custom-tooltip__label">到来済みタスク</span>
+          <span className="custom-tooltip__value">{data.x}</span>
+        </li>
+        <li className="custom-tooltip__row">
+          <span className="custom-tooltip__dot" style={{ background: data.delay_rate >= 30 ? '#ef4444' : data.delay_rate >= 15 ? '#f59e0b' : '#22c55e' }} />
+          <span className="custom-tooltip__label">遅延率</span>
+          <span className="custom-tooltip__value">{data.delay_rate}%</span>
+        </li>
+        <li className="custom-tooltip__row">
+          <span className="custom-tooltip__dot" style={{ background: '#22c55e' }} />
+          <span className="custom-tooltip__label">完了率</span>
+          <span className="custom-tooltip__value">{data.completion_rate}%</span>
+        </li>
+        <li className="custom-tooltip__row">
+          <span className="custom-tooltip__dot" style={{ background: '#94a3b8' }} />
+          <span className="custom-tooltip__label">圃場数</span>
+          <span className="custom-tooltip__value">{data.field_count}</span>
+        </li>
+      </ul>
+    </div>
+  );
+}
+
+function DailyFarmTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  const nonZero = payload.filter((e: any) => e.value > 0);
+  if (nonZero.length === 0) return null;
+  const total = nonZero.reduce((s: number, e: any) => s + (e.value || 0), 0);
+  return (
+    <div className="custom-tooltip">
+      <div className="custom-tooltip__title">{label}  <span className="custom-tooltip__total">合計 {total}</span></div>
+      <ul className="custom-tooltip__list">
+        {nonZero.map((entry: any, i: number) => (
+          <li key={i} className="custom-tooltip__row">
+            <span className="custom-tooltip__dot" style={{ background: entry.color || entry.fill }} />
+            <span className="custom-tooltip__label">{entry.dataKey}</span>
+            <span className="custom-tooltip__value">{entry.value}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// --------------- End Custom Tooltip Components ---------------
+
 type DashboardChartsPanelProps = {
   dashboard: DashboardBundle;
   bubbleRows: Array<FarmerRow & { x: number; y: number; z: number }>;
@@ -674,6 +1065,24 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
   onSelectFarmer,
   onSort,
 }: DashboardChartsPanelProps) {
+  const [chartMonthOffset, setChartMonthOffset] = useState(0);
+
+  // Filter daily_farm_bars to the selected month window
+  const chartBarsFiltered = useMemo(() => {
+    const bars = dashboard.daily_farm_bars ?? [];
+    if (bars.length === 0) return bars;
+    const now = new Date();
+    const baseMonth = new Date(now.getFullYear(), now.getMonth() + chartMonthOffset, 1);
+    const prefix = `${baseMonth.getFullYear()}-${String(baseMonth.getMonth() + 1).padStart(2, '0')}`;
+    return bars.filter((b) => typeof b._dateKey === 'string' && b._dateKey.startsWith(prefix));
+  }, [dashboard.daily_farm_bars, chartMonthOffset]);
+
+  const chartMonthLabel = useMemo(() => {
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth() + chartMonthOffset, 1);
+    return `${d.getFullYear()}年${d.getMonth() + 1}月`;
+  }, [chartMonthOffset]);
+
   return (
     <>
       <section className="task-progress-layer2">
@@ -685,7 +1094,7 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
                 <CartesianGrid strokeDasharray="3 3" stroke="#203047" />
                 <XAxis type="number" dataKey="x" stroke="#94a3b8" name="到来済みタスク" />
                 <YAxis type="number" dataKey="y" stroke="#94a3b8" unit="%" name="遅延率" />
-                <Tooltip cursor={{ strokeDasharray: '3 3' }} />
+                <Tooltip cursor={{ strokeDasharray: '3 3' }} content={<ScatterTooltip />} />
                 <Scatter data={bubbleRows} onClick={(entry) => onSelectFarmer(String((entry as any).id))}>
                   {bubbleRows.map((row) => (
                     <Cell
@@ -795,10 +1204,10 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
                 <CartesianGrid strokeDasharray="3 3" stroke="#203047" />
                 <XAxis type="number" stroke="#94a3b8" />
                 <YAxis dataKey="task_type_name" type="category" width={120} stroke="#94a3b8" />
-                <Tooltip />
-                <Bar dataKey="completed_count" stackId="a" fill="#22c55e" />
-                <Bar dataKey="overdue_count" stackId="a" fill="#ef4444" />
-                <Bar dataKey="pending_count" stackId="a" fill="rgba(255,255,255,0.2)" />
+                <Tooltip content={<ChartTooltip />} />
+                <Bar dataKey="completed_count" stackId="a" fill="#22c55e" name="完了" />
+                <Bar dataKey="overdue_count" stackId="a" fill="#ef4444" name="遅延" />
+                <Bar dataKey="pending_count" stackId="a" fill="rgba(255,255,255,0.2)" name="未着手" />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -812,8 +1221,8 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
                 <CartesianGrid strokeDasharray="3 3" stroke="#203047" />
                 <XAxis dataKey="bucket" stroke="#94a3b8" />
                 <YAxis stroke="#94a3b8" />
-                <Tooltip />
-                <Bar dataKey="count">
+                <Tooltip content={<ChartTooltip />} />
+                <Bar dataKey="count" name="農業者数">
                   {dashboard.distribution.map((row) => (
                     <Cell key={row.bucket} fill={row.color} />
                   ))}
@@ -825,17 +1234,25 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
       </section>
 
       <section className="task-progress-layer4 card chart-card">
-        <h3>遅延率トレンド（過去30日）</h3>
+        <div className="chart-month-nav">
+          <button type="button" onClick={() => setChartMonthOffset((v) => v - 1)}>&lt; 前月</button>
+          <h3>日別タスク数（農場別） — {chartMonthLabel}</h3>
+          <button type="button" onClick={() => setChartMonthOffset((v) => v + 1)}>翌月 &gt;</button>
+        </div>
         <div className="chart-wrap trend">
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={dashboard.trend} margin={{ top: 10, right: 16, left: 8, bottom: 8 }}>
+            <BarChart data={chartBarsFiltered} margin={{ top: 10, right: 16, left: 8, bottom: 8 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#203047" />
-              <XAxis dataKey="date" stroke="#94a3b8" interval={4} />
-              <YAxis stroke="#94a3b8" domain={[0, 100]} unit="%" />
-              <Tooltip />
-              <Line dataKey="delay_rate" stroke="#ef4444" strokeWidth={2.5} dot={false} name="遅延率" />
-              <Line dataKey="completion_rate" stroke="#22c55e" strokeWidth={2.5} dot={false} name="完了率" />
-            </LineChart>
+              <XAxis dataKey="date" stroke="#94a3b8" interval={Math.max(0, Math.floor((chartBarsFiltered.length - 1) / 8))} />
+              <YAxis stroke="#94a3b8" allowDecimals={false} />
+              <Tooltip content={<DailyFarmTooltip />} />
+              {(dashboard.daily_farm_names ?? []).length <= 12 && (
+                <Legend wrapperStyle={{ fontSize: '0.75rem' }} />
+              )}
+              {(dashboard.daily_farm_names ?? []).map((name, i) => (
+                <Bar key={name} dataKey={name} stackId="farm" fill={FARM_BAR_COLORS[i % FARM_BAR_COLORS.length]} />
+              ))}
+            </BarChart>
           </ResponsiveContainer>
         </div>
       </section>
@@ -869,11 +1286,18 @@ export function TaskProgressDashboardPage() {
   const [manualUpdateLoading, setManualUpdateLoading] = useState(false);
   const [manualUpdateMsg, setManualUpdateMsg] = useState<string | null>(null);
   const [snapshotLoadingElapsedSec, setSnapshotLoadingElapsedSec] = useState(0);
+  const [loadingSteps, setLoadingSteps] = useState<Record<string, 'pending' | 'loading' | 'done' | 'cached'>>({});
   const [sprayCategoryMap, setSprayCategoryMap] = useState<Record<string, string>>({});
+  const sprayCategoryMapRef = useRef<Record<string, string>>({});
+  const [sprayMapReady, setSprayMapReady] = useState(false);
   const [isFilterPending, startFilterTransition] = useTransition();
   const [dashboardPending, setDashboardPending] = useState(false);
   const [dashboardState, setDashboardState] = useState<DashboardBundle>(emptyDashboardBundle(getJstDayKey(new Date())));
   const didPickInitialSnapshotDate = useRef(false);
+  const selectedFamilyRef = useRef(selectedFamily);
+  selectedFamilyRef.current = selectedFamily;
+  const actionFilterRef = useRef(actionFilter);
+  actionFilterRef.current = actionFilter;
 
   const applySnapshotDate = useCallback((nextDate: string) => {
     const normalized = String(nextDate || '').trim();
@@ -889,6 +1313,7 @@ export function TaskProgressDashboardPage() {
       setSnapshotLoading(true);
       setTasksHydrating(false);
       setSnapshotErr(null);
+      setLoadingSteps({ meta: 'pending', summary: 'pending', tasks: 'pending', dates: 'pending' });
       try {
         const now = Date.now();
         const metaKey = `${snapshotDate}:meta`;
@@ -924,16 +1349,23 @@ export function TaskProgressDashboardPage() {
             task_types: activeSummary?.data?.task_types ?? [],
             distribution: activeSummary?.data?.distribution ?? [],
             trend: activeSummary?.data?.trend ?? [],
+            daily_farm_bars: activeSummary?.data?.daily_farm_bars ?? [],
+            daily_farm_names: activeSummary?.data?.daily_farm_names ?? [],
             farmer_details: activeSummary?.data?.farmer_details ?? {},
             as_of: cachedAsOf,
           });
           snapshotPageCache.set(summaryDefaultKey, { data: activeSummary?.data, expiresAt: now + SNAPSHOT_CLIENT_CACHE_TTL_MS });
+          setLoadingSteps((prev) => ({ ...prev, meta: 'cached', summary: 'cached' }));
           if (useCachedSnap) {
             setSnapshotTasks((activeSnap?.data?.tasks ?? []) as SnapshotTask[]);
             setSnapshotTasksLoaded(true);
+            setLoadingSteps((prev) => ({ ...prev, tasks: 'cached' }));
           } else {
             setSnapshotTasks([]);
             setSnapshotTasksLoaded(false);
+          }
+          if (useCachedDates) {
+            setLoadingSteps((prev) => ({ ...prev, dates: 'cached' }));
           }
           setSnapshotLoading(false);
         }
@@ -942,8 +1374,11 @@ export function TaskProgressDashboardPage() {
         let summaryJson: any = null;
         let dates: string[] = [];
 
-        if (useCachedMeta) metaJson = activeMeta?.data;
-        if (!useCachedMeta) {
+        if (useCachedMeta) {
+          metaJson = activeMeta?.data;
+          setLoadingSteps((prev) => ({ ...prev, meta: 'cached' }));
+        } else {
+          setLoadingSteps((prev) => ({ ...prev, meta: 'loading' }));
           const metaRes = await fetch(
             withApiBase(`/hfr-snapshots?snapshot_date=${encodeURIComponent(snapshotDate)}&include_fields=false&include_tasks=false`),
             { signal: controller.signal },
@@ -956,11 +1391,13 @@ export function TaskProgressDashboardPage() {
           const expiresAt = now + SNAPSHOT_CLIENT_CACHE_TTL_MS;
           snapshotPageCache.set(metaKey, { data: metaJson, expiresAt });
           writeSessionCache(metaKey, metaJson, expiresAt);
+          if (active) setLoadingSteps((prev) => ({ ...prev, meta: 'done' }));
         }
 
         const hasRun = Boolean(metaJson?.run?.run_id);
         if (useCachedSummary) {
           summaryJson = activeSummary?.data;
+          setLoadingSteps((prev) => ({ ...prev, summary: 'cached' }));
         } else if (!hasRun) {
           summaryJson = {
             kpi: emptyDashboardBundle(snapshotDate).kpi,
@@ -971,13 +1408,16 @@ export function TaskProgressDashboardPage() {
             farmer_details: {},
             as_of: snapshotDate,
           };
+          setLoadingSteps((prev) => ({ ...prev, summary: 'done' }));
         }
 
         if (useCachedDates) {
           const cached = activeDates?.data;
           dates = Array.isArray(cached?.dates) ? cached.dates.filter((d: any) => typeof d === 'string') : [];
+          setLoadingSteps((prev) => ({ ...prev, dates: 'cached' }));
         } else {
           // 日付一覧は表示に必須ではないため、バックグラウンドで更新する。
+          setLoadingSteps((prev) => ({ ...prev, dates: 'loading' }));
           void (async () => {
             try {
               const datesRes = await fetch(withApiBase('/hfr-snapshots/dates?limit=365'), {
@@ -996,8 +1436,9 @@ export function TaskProgressDashboardPage() {
                 ? datesJson.dates.filter((d: any) => typeof d === 'string')
                 : [];
               setAvailableDates(nextDates);
+              setLoadingSteps((prev) => ({ ...prev, dates: 'done' }));
             } catch {
-              // ignore
+              if (active) setLoadingSteps((prev) => ({ ...prev, dates: 'done' }));
             }
           })();
         }
@@ -1019,6 +1460,8 @@ export function TaskProgressDashboardPage() {
           task_types: summaryJson?.task_types ?? prev.task_types ?? [],
           distribution: summaryJson?.distribution ?? prev.distribution ?? [],
           trend: summaryJson?.trend ?? prev.trend ?? [],
+          daily_farm_bars: summaryJson?.daily_farm_bars ?? prev.daily_farm_bars ?? [],
+          daily_farm_names: summaryJson?.daily_farm_names ?? prev.daily_farm_names ?? [],
           farmer_details: summaryJson?.farmer_details ?? prev.farmer_details ?? {},
           as_of: summaryJson?.as_of ?? prev.as_of ?? snapshotDate,
         }));
@@ -1029,6 +1472,7 @@ export function TaskProgressDashboardPage() {
         }
 
         if (!useCachedSummary && hasRun) {
+          setLoadingSteps((prev) => ({ ...prev, summary: 'loading' }));
           void (async () => {
             try {
               const summaryRes = await fetch(
@@ -1041,17 +1485,25 @@ export function TaskProgressDashboardPage() {
               snapshotPageCache.set(summaryKey, { data: json, expiresAt });
               snapshotPageCache.set(summaryDefaultKey, { data: json, expiresAt });
               writeSessionCache(summaryKey, json, expiresAt);
-              setDashboardState({
-                kpi: json?.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
-                farmers: json?.farmers ?? [],
-                task_types: json?.task_types ?? [],
-                distribution: json?.distribution ?? [],
-                trend: json?.trend ?? [],
-                farmer_details: json?.farmer_details ?? {},
-                as_of: json?.as_of ?? snapshotDate,
-              });
+              // Only overwrite dashboardState if user hasn't changed filters
+              const stillDefault = selectedFamilyRef.current === ALL_FAMILY_OPTION && actionFilterRef.current === 'none';
+              if (stillDefault) {
+                setDashboardState({
+                  kpi: json?.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
+                  farmers: json?.farmers ?? [],
+                  task_types: json?.task_types ?? [],
+                  distribution: json?.distribution ?? [],
+                  trend: json?.trend ?? [],
+                  daily_farm_bars: json?.daily_farm_bars ?? [],
+                  daily_farm_names: json?.daily_farm_names ?? [],
+                  farmer_details: json?.farmer_details ?? {},
+                  as_of: json?.as_of ?? snapshotDate,
+                });
+              }
+              setLoadingSteps((prev) => ({ ...prev, summary: 'done' }));
             } catch {
               // 背景ロード失敗は画面全体エラーにしない
+              if (active) setLoadingSteps((prev) => ({ ...prev, summary: 'done' }));
             }
           })();
         }
@@ -1059,8 +1511,10 @@ export function TaskProgressDashboardPage() {
         if (useCachedSnap) {
           setSnapshotTasks((activeSnap?.data?.tasks ?? []) as SnapshotTask[]);
           setSnapshotTasksLoaded(true);
+          setLoadingSteps((prev) => ({ ...prev, tasks: 'cached' }));
         } else {
           setTasksHydrating(true);
+          setLoadingSteps((prev) => ({ ...prev, tasks: 'loading' }));
           void (async () => {
             try {
               const taskRes = await fetch(
@@ -1080,8 +1534,10 @@ export function TaskProgressDashboardPage() {
               writeSessionCache(snapKey, taskJson, expiresAt);
               setSnapshotTasks((taskJson.tasks ?? []) as SnapshotTask[]);
               setSnapshotTasksLoaded(true);
+              setLoadingSteps((prev) => ({ ...prev, tasks: 'done' }));
             } catch {
               // 背景ロード失敗は画面全体エラーにしない
+              if (active) setLoadingSteps((prev) => ({ ...prev, tasks: 'done' }));
             } finally {
               if (active) setTasksHydrating(false);
             }
@@ -1117,17 +1573,22 @@ export function TaskProgressDashboardPage() {
   useEffect(() => {
     let active = true;
     const controller = new AbortController();
+    setSprayMapReady(false);
     const loadSprayMaster = async () => {
-      const sprayTasks = snapshotTasks.filter((t) => t.task_type === 'Spraying');
-      if (sprayTasks.length === 0) {
+      const hasSpraying = snapshotTasks.some((t) => t.task_type === 'Spraying');
+      if (!hasSpraying) {
+        sprayCategoryMapRef.current = {};
         setSprayCategoryMap({});
+        setSprayMapReady(true);
         return;
       }
       const cacheKey = `${COUNTRY_UUID_JP}:${RICE_CROP_UUID}:FIELDTREATMENT`;
       const now = Date.now();
       const cached = sprayMasterCache.get(cacheKey);
       if (cached && cached.expiresAt > now) {
+        sprayCategoryMapRef.current = cached.data;
         setSprayCategoryMap(cached.data);
+        setSprayMapReady(true);
         return;
       }
       try {
@@ -1168,10 +1629,14 @@ export function TaskProgressDashboardPage() {
           data: next,
           expiresAt: Date.now() + (12 * 60 * 60 * 1000),
         });
+        sprayCategoryMapRef.current = next;
         setSprayCategoryMap(next);
       } catch {
         if (!active) return;
+        sprayCategoryMapRef.current = {};
         setSprayCategoryMap({});
+      } finally {
+        if (active) setSprayMapReady(true);
       }
     };
     void loadSprayMaster();
@@ -1194,7 +1659,12 @@ export function TaskProgressDashboardPage() {
     return () => window.clearInterval(timer);
   }, [snapshotLoading]);
 
-  const allTasks = useMemo(() => tasksFromSnapshot(snapshotTasks, sprayCategoryMap), [snapshotTasks, sprayCategoryMap]);
+  // Only compute allTasks once spray master is ready (avoids double-processing 50k tasks)
+  const allTasks = useMemo(
+    () => sprayMapReady ? tasksFromSnapshot(snapshotTasks, sprayCategoryMapRef.current) : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [snapshotTasks, sprayMapReady],
+  );
   const tasksByFamily = useMemo(() => {
     const map = new Map<string, DashboardTask[]>();
     for (const task of allTasks) {
@@ -1231,54 +1701,44 @@ export function TaskProgressDashboardPage() {
     });
   }, [allTasks, dashboardState.task_types]);
 
+  // Client-side dashboard recomputation on filter change — no API call needed
   useEffect(() => {
     if (snapshotLoading) return;
-    let alive = true;
-    const controller = new AbortController();
-    const loadFilteredSummary = async () => {
-      const familyParam = selectedFamily !== ALL_FAMILY_OPTION ? `&families=${encodeURIComponent(selectedFamily)}` : '';
-      const cacheKey = summaryFilterCacheKey(snapshotDate, selectedFamily, actionFilter);
-      const now = Date.now();
-      const cached = snapshotPageCache.get(cacheKey);
-      if (cached && cached.expiresAt > now) {
-        setDashboardState(cached.data as DashboardBundle);
-        setDashboardPending(false);
-        return;
+    // allTasks not ready yet (spray map loading)
+    if (allTasks.length === 0 && !sprayMapReady) return;
+
+    const isDefaultFilter = selectedFamily === ALL_FAMILY_OPTION && actionFilter === 'none';
+    if (isDefaultFilter) {
+      // Try restoring server summary from cache first (more accurate trend data)
+      const summaryDefaultKey = summaryFilterCacheKey(snapshotDate, ALL_FAMILY_OPTION, 'none');
+      const cached = snapshotPageCache.get(summaryDefaultKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        const serverData = cached.data as DashboardBundle;
+        // Server data may lack client-computed chart fields — supplement them
+        if (!serverData.daily_farm_bars || serverData.daily_farm_bars.length === 0) {
+          const supplement = computeDashboardBundle(allTasks, snapshotDate, serverData.as_of || snapshotDate);
+          setDashboardState({ ...serverData, daily_farm_bars: supplement.daily_farm_bars, daily_farm_names: supplement.daily_farm_names });
+        } else {
+          setDashboardState(serverData);
+        }
+      } else {
+        // Cache miss — recompute from all client tasks
+        const bundle = computeDashboardBundle(allTasks, snapshotDate, dashboardState.as_of || snapshotDate);
+        setDashboardState(bundle);
       }
-      try {
-        setDashboardPending(true);
-        const res = await fetch(
-          withApiBase(
-            `/hfr-snapshots/summary?snapshot_date=${encodeURIComponent(snapshotDate)}`
-            + `&action_filter=${encodeURIComponent(actionFilter)}${familyParam}`,
-          ),
-          { signal: controller.signal },
-        );
-        const json = await res.json();
-        if (!alive || !res.ok || json?.ok === false) return;
-        const payload: DashboardBundle = {
-          kpi: json?.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
-          farmers: json?.farmers ?? [],
-          task_types: json?.task_types ?? [],
-          distribution: json?.distribution ?? [],
-          trend: json?.trend ?? [],
-          farmer_details: json?.farmer_details ?? {},
-          as_of: json?.as_of ?? snapshotDate,
-        };
-        const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
-        snapshotPageCache.set(cacheKey, { data: payload, expiresAt });
-        if (!alive) return;
-        setDashboardState(payload);
-      } finally {
-        if (alive) setDashboardPending(false);
-      }
-    };
-    void loadFilteredSummary();
-    return () => {
-      alive = false;
-      controller.abort();
-    };
-  }, [snapshotDate, selectedFamily, actionFilter, snapshotLoading]);
+      setDashboardPending(false);
+      return;
+    }
+
+    const today = getJstDayKey(new Date());
+    const filtered = allTasks
+      .filter((task) => matchesFamilySelection(task, selectedFamily))
+      .filter((task) => matchesActionFilter(task, actionFilter, today));
+    const bundle = computeDashboardBundle(filtered, snapshotDate, dashboardState.as_of || snapshotDate);
+    setDashboardState(bundle);
+    setDashboardPending(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshotDate, selectedFamily, actionFilter, snapshotLoading, allTasks, sprayMapReady]);
 
   useEffect(() => {
     if (familyOptions.length === 0) return;
@@ -1346,6 +1806,24 @@ export function TaskProgressDashboardPage() {
     [sortedFarmers]
   );
 
+  const fieldStats = useMemo(() => {
+    // From dashboard farmers (always available)
+    const farmerCount = dashboard.farmers.length;
+    const fieldCountFromFarmers = dashboard.farmers.reduce((s, f) => s + f.field_count, 0);
+    // From snapshotFields (available after manual load)
+    if (snapshotFields.length > 0) {
+      const uniqueFields = new Map<string, number>();
+      for (const f of snapshotFields) {
+        if (f.field_uuid && !uniqueFields.has(f.field_uuid)) {
+          uniqueFields.set(f.field_uuid, f.area_m2 ?? 0);
+        }
+      }
+      const totalAreaM2 = [...uniqueFields.values()].reduce((s, v) => s + v, 0);
+      return { farmerCount, fieldCount: uniqueFields.size || fieldCountFromFarmers, totalAreaHa: totalAreaM2 / 10000 };
+    }
+    return { farmerCount, fieldCount: fieldCountFromFarmers, totalAreaHa: null };
+  }, [dashboard.farmers, snapshotFields]);
+
   const snapshotTaskByUuid = useMemo(() => {
     const map = new Map<string, SnapshotTask>();
     for (const row of snapshotTasks) {
@@ -1372,14 +1850,24 @@ export function TaskProgressDashboardPage() {
     Boolean(auth?.login?.login_token) &&
     Boolean(auth?.api_token);
 
-  const filteredSnapshotTasks = useMemo(() => {
-    const out: SnapshotTask[] = [];
+  const filteredSnapshotTasksWithMeta = useMemo(() => {
+    const out: Array<SnapshotTask & { _family: string; _subtypeLabel: string; _taskDisplay: string }> = [];
     for (const t of linkedTasks) {
       const row = snapshotTaskByUuid.get(t.uuid);
-      if (row) out.push(row);
+      if (!row) continue;
+      const family = resolveTaskFamilyFromSnapshot(row, sprayCategoryMap);
+      const subtypeInfo = detectSpraySubtype(row, sprayCategoryMap);
+      const occurrence = Number(row.occurrence || 1);
+      out.push({
+        ...row,
+        _family: family,
+        _subtypeLabel: subtypeInfo.subtype !== '-' ? `${subtypeInfo.subtype} (${subtypeInfo.source})` : '-',
+        _taskDisplay: `${family} ${occurrence}回目`,
+      });
     }
     return out;
-  }, [linkedTasks, snapshotTaskByUuid]);
+  }, [linkedTasks, snapshotTaskByUuid, sprayCategoryMap]);
+  const filteredSnapshotTasks = filteredSnapshotTasksWithMeta as SnapshotTask[];
   const filteredSnapshotFields = useMemo(() => {
     if (!snapshotFieldsLoaded) return [] as SnapshotField[];
     const fieldUuidSet = new Set<string>();
@@ -1518,20 +2006,51 @@ export function TaskProgressDashboardPage() {
     setSelectedFarmerId(id);
   }, []);
 
-  if (snapshotLoading) {
-    const remainingSec = Math.max(0, SNAPSHOT_LOAD_ESTIMATE_SEC - snapshotLoadingElapsedSec);
-    const progress = Math.min(95, (snapshotLoadingElapsedSec / SNAPSHOT_LOAD_ESTIMATE_SEC) * 100);
+  const isFullyReady = !snapshotLoading && !tasksHydrating && sprayMapReady;
+  if (!isFullyReady) {
+    const sprayStatus: 'pending' | 'loading' | 'done' | 'cached' = sprayMapReady
+      ? 'done'
+      : snapshotTasksLoaded
+        ? 'loading'
+        : 'pending';
+    const allSteps = { ...loadingSteps, spray: sprayStatus };
+    const doneCount = Object.values(allSteps).filter((s) => s !== 'pending' && s !== 'loading').length;
+    const totalSteps = Math.max(1, Object.keys(allSteps).length);
+    const progress = Math.min(95, (doneCount / totalSteps) * 100);
+    const stepLabels: Record<string, string> = {
+      meta: 'メタデータ',
+      summary: 'サマリー集計',
+      tasks: 'タスク一覧',
+      dates: '日付一覧',
+      spray: '薬剤マスタ',
+    };
+    const stepIcon = (status: string) => {
+      switch (status) {
+        case 'done': return '\u2714';
+        case 'cached': return '\u2714 (cache)';
+        case 'loading': return '\u25CB';
+        default: return '\u2500';
+      }
+    };
     return (
       <div className="task-progress-page">
         <LoadingOverlay
           message="スナップショットを読み込んでいます..."
           progress={progress}
           details={[
-            `基準日: ${getJstDayKey(new Date())}`,
+            `基準日: ${snapshotDate}`,
             `経過: ${snapshotLoadingElapsedSec}秒`,
-            `残り目安: ${remainingSec}秒`,
           ]}
-        />
+        >
+          <ul className="loading-overlay__steps">
+            {Object.entries(allSteps).map(([key, status]) => (
+              <li key={key} className={`loading-step loading-step--${status}`}>
+                <span className="loading-step__icon">{stepIcon(status)}</span>
+                <span>{stepLabels[key] || key}</span>
+              </li>
+            ))}
+          </ul>
+        </LoadingOverlay>
       </div>
     );
   }
@@ -1622,6 +2141,11 @@ export function TaskProgressDashboardPage() {
           <strong>{dashboard.kpi.future_count}</strong>
           <p>未着手タスク</p>
         </article>
+        <article className="card kpi-card kpi-teal">
+          <h3>農業者 / 圃場数</h3>
+          <strong>{fieldStats.farmerCount}<small style={{ fontSize: '0.5em', fontWeight: 400, color: 'var(--text-muted)' }}> 者</small> / {fieldStats.fieldCount}<small style={{ fontSize: '0.5em', fontWeight: 400, color: 'var(--text-muted)' }}> 圃場</small></strong>
+          <p>合計面積 {fieldStats.totalAreaHa !== null ? `${fieldStats.totalAreaHa.toFixed(1)} ha` : '圃場ロード後表示'}</p>
+        </article>
       </section>
 
       <DashboardChartsPanel
@@ -1675,7 +2199,7 @@ export function TaskProgressDashboardPage() {
                 <th>user_name</th>
                 <th>crop_name</th>
                 <th>variety_name</th>
-                <th>area_m2</th>
+                <th>area_ha</th>
                 <th>bbch_index</th>
                 <th>bbch_scale</th>
                 <th>fetched_at</th>
@@ -1694,7 +2218,7 @@ export function TaskProgressDashboardPage() {
                   <td>{row.user_name || '-'}</td>
                   <td>{row.crop_name || '-'}</td>
                   <td>{row.variety_name || '-'}</td>
-                  <td>{typeof row.area_m2 === 'number' ? row.area_m2.toLocaleString('ja-JP') : '-'}</td>
+                  <td>{formatAreaHa(row.area_m2)}</td>
                   <td>{row.bbch_index || '-'}</td>
                   <td>{row.bbch_scale || '-'}</td>
                   <td>{formatDateTime(row.fetched_at)}</td>
@@ -1763,10 +2287,8 @@ export function TaskProgressDashboardPage() {
             </thead>
             <tbody>
               {visibleTasks.map((row, idx) => {
-                const family = resolveTaskFamilyFromSnapshot(row, sprayCategoryMap);
-                const subtypeInfo = detectSpraySubtype(row, sprayCategoryMap);
+                const meta = row as SnapshotTask & { _family?: string; _subtypeLabel?: string; _taskDisplay?: string };
                 const occurrence = Number(row.occurrence || 1);
-                const taskDisplay = `${family} ${occurrence}回目`;
                 return (
                   <tr key={`${row.snapshot_date}-${row.task_uuid}-${idx}`}>
                     <td>{row.snapshot_date || '-'}</td>
@@ -1777,7 +2299,7 @@ export function TaskProgressDashboardPage() {
                     <td>{row.field_uuid || '-'}</td>
                     <td>{row.season_uuid || '-'}</td>
                     <td>{row.crop_uuid || '-'}</td>
-                    <td>{taskDisplay}</td>
+                    <td>{meta._taskDisplay || '-'}</td>
                     <td>{row.task_name || '-'}</td>
                     <td>{row.task_type || '-'}</td>
                     <td>{Number.isFinite(occurrence) ? occurrence : '-'}</td>
@@ -1791,7 +2313,7 @@ export function TaskProgressDashboardPage() {
                     <td>{row.product || '-'}</td>
                     <td>{row.dosage || '-'}</td>
                     <td>{row.spray_category || '-'}</td>
-                    <td>{subtypeInfo.subtype !== '-' ? `${subtypeInfo.subtype} (${subtypeInfo.source})` : '-'}</td>
+                    <td>{meta._subtypeLabel || '-'}</td>
                     <td>{row.creation_flow_hint || '-'}</td>
                     <td>{row.bbch_index || '-'}</td>
                     <td>{row.bbch_scale || '-'}</td>
