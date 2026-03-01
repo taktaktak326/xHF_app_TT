@@ -527,16 +527,17 @@ function tasksFromSnapshot(snapshotTasks: SnapshotTask[], sprayCategoryMap: Reco
     occurrence: Number(task.occurrence || 1),
   }));
 
-  const protectionTasks = mapped
-    .filter((row) => isProtectionFamily(row.typeFamily))
+  const sprayingTasks = mapped
+    .filter((row) => row.taskType === 'Spraying')
     .sort((a, b) => {
       const ka = `${a.farmUuid}|${a.fieldUuid}|${a.seasonKey}|${a.scheduledDay}|${a.taskName}|${a.uuid}`;
       const kb = `${b.farmUuid}|${b.fieldUuid}|${b.seasonKey}|${b.scheduledDay}|${b.taskName}|${b.uuid}`;
       return ka.localeCompare(kb, 'ja');
     });
   const seqByKey = new Map<string, number>();
-  for (const row of protectionTasks) {
-    const key = `${row.fieldUuid}|${row.seasonKey}|防除タスク`;
+  for (const row of sprayingTasks) {
+    // Sprayings は「雑草管理/施肥/防除(サブタイプ)」ごとに回数を採番する。
+    const key = `${row.fieldUuid}|${row.seasonKey}|${row.typeFamily}`;
     const next = (seqByKey.get(key) || 0) + 1;
     seqByKey.set(key, next);
     row.occurrence = next;
@@ -1860,6 +1861,7 @@ export function TaskProgressDashboardPage() {
       const occurrence = Number(row.occurrence || 1);
       out.push({
         ...row,
+        occurrence: Number(t.occurrence || row.occurrence || 1),
         _family: family,
         _subtypeLabel: subtypeInfo.subtype !== '-' ? `${subtypeInfo.subtype} (${subtypeInfo.source})` : '-',
         _taskDisplay: `${family} ${occurrence}回目`,
