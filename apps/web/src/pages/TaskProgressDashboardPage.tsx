@@ -1771,6 +1771,51 @@ export function TaskProgressDashboardPage() {
   }, [tasksByFamily, selectedFamily, actionFilter, allTasks, familyOptions]);
 
   const dashboard = dashboardState;
+  const chartTaskTypes = useMemo(() => {
+    const today = getJstDayKey(new Date());
+    const grouped = new Map<string, { due: number; completed: number; overdue: number; pending: number }>();
+    for (const t of linkedTasks) {
+      const label = `${t.typeFamily} ${t.occurrence}回目`;
+      if (!grouped.has(label)) grouped.set(label, { due: 0, completed: 0, overdue: 0, pending: 0 });
+      const bucket = grouped.get(label)!;
+      const planned = getScheduledDay(t);
+      const done = t.completed;
+      if (!planned) {
+        if (!done) bucket.pending += 1;
+        continue;
+      }
+      if (planned <= today) {
+        bucket.due += 1;
+        if (done) bucket.completed += 1;
+      } else if (!done) {
+        bucket.pending += 1;
+      }
+      if (planned < today && !done) bucket.overdue += 1;
+    }
+
+    const toDisplayOrder = (name: string): number => {
+      const m = name.match(/^(.*)\s(\d+)回目$/);
+      const family = m ? m[1] : name;
+      const occurrence = m ? Number(m[2]) : 99;
+      const idx = TYPE_FAMILY_ORDER.indexOf(family);
+      const base = idx >= 0 ? idx : 99;
+      return base * 100 + (Number.isFinite(occurrence) ? occurrence : 99);
+    };
+    const pct = (n: number, d: number): number => (d > 0 ? Number(((n * 100) / d).toFixed(1)) : 0);
+
+    return Array.from(grouped.entries())
+      .sort((a, b) => toDisplayOrder(a[0]) - toDisplayOrder(b[0]))
+      .map(([task_type_name, c], idx) => ({
+        task_type_name,
+        display_order: idx + 1,
+        due_count: c.due,
+        completed_count: c.completed,
+        overdue_count: c.overdue,
+        pending_count: c.pending,
+        completion_rate: pct(c.completed, c.due),
+        delay_rate: pct(c.overdue, c.due),
+      }));
+  }, [linkedTasks]);
 
   const filteredFarmers = useMemo(() => {
     const q = query.trim();
@@ -2151,7 +2196,7 @@ export function TaskProgressDashboardPage() {
       </section>
 
       <DashboardChartsPanel
-        dashboard={dashboard}
+        dashboard={{ ...dashboard, task_types: chartTaskTypes }}
         bubbleRows={bubbleRows}
         sortedFarmers={sortedFarmers}
         selectedFarmer={selectedFarmer}
