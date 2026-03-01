@@ -241,7 +241,6 @@ const TYPE_FAMILY_ORDER: string[] = [
 ];
 const ALL_FAMILY_OPTION = '全部';
 const PROTECTION_FILTER_OPTIONS = [
-  '防除タスク',
   '防除タスク（除草剤）',
   '防除タスク（殺菌剤）',
   '防除タスク（殺虫剤）',
@@ -487,15 +486,8 @@ function detectSpraySubtype(
   return { subtype: '未判定', source: 'creation_flow_hint_missing' };
 }
 
-function isProtectionFamily(family: string): boolean {
-  return family === '防除タスク' || family.startsWith('防除タスク（');
-}
-
 function matchesFamilySelection(task: DashboardTask, selectedFamily: string): boolean {
   if (selectedFamily === ALL_FAMILY_OPTION) return true;
-  if (selectedFamily === '防除タスク') {
-    return isProtectionFamily(task.typeFamily);
-  }
   return task.typeFamily === selectedFamily;
 }
 
@@ -1762,7 +1754,6 @@ export function TaskProgressDashboardPage() {
     // ユーザーが有効な選択肢を選んで0件になった時は0件をそのまま表示する。
     const selectedIsValid =
       selectedFamily === ALL_FAMILY_OPTION ||
-      selectedFamily === '防除タスク' ||
       familyOptions.includes(selectedFamily);
     if (actionFilter === 'none' && !selectedIsValid) {
       return allTasks.filter((task) => matchesActionFilter(task, actionFilter, today));
