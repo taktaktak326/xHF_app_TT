@@ -1193,10 +1193,10 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
           <h3>タスクタイプ別進捗（回数別）</h3>
           <div className="chart-wrap">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={dashboard.task_types} layout="vertical" margin={{ top: 10, right: 16, left: 20, bottom: 8 }}>
+              <BarChart data={dashboard.task_types} layout="vertical" margin={{ top: 10, right: 16, left: 44, bottom: 8 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#203047" />
                 <XAxis type="number" stroke="#94a3b8" />
-                <YAxis dataKey="task_type_name" type="category" width={120} stroke="#94a3b8" />
+                <YAxis dataKey="task_type_name" type="category" width={170} stroke="#94a3b8" />
                 <Tooltip content={<ChartTooltip />} />
                 <Bar dataKey="completed_count" stackId="a" fill="#22c55e" name="完了" />
                 <Bar dataKey="overdue_count" stackId="a" fill="#ef4444" name="遅延" />
