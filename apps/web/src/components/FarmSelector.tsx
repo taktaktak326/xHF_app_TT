@@ -33,23 +33,51 @@ const normalizeLatLon = (lat: number, lon: number) => {
   return { lat, lon };
 };
 
+const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+const formatErrorDetail = (detail: unknown): string => {
+  if (!detail) return '';
+  if (typeof detail === 'string') return detail;
+  if (typeof detail === 'object') {
+    const d = detail as any;
+    const reason = typeof d.reason === 'string' ? d.reason : '';
+    const inner = typeof d.detail === 'string' ? d.detail : '';
+    if (reason && inner) return `${reason}: ${inner}`;
+    if (reason) return reason;
+    if (inner) return inner;
+    try {
+      return JSON.stringify(detail).slice(0, 500);
+    } catch {
+      return String(detail);
+    }
+  }
+  return String(detail);
+};
+
 async function fetchFarmsApi(auth: LoginAndTokenResp): Promise<FarmsOut> {
   const payload = {
     login_token: auth.login.login_token,
     api_token: auth.api_token,
     includeTokens: false,
   };
-  const { ok, status, json: j } = await postJsonCached<any>(
-    withApiBase('/farms'),
-    payload,
-    undefined,
-    { cacheKey: `farms:list:${auth?.login?.gigya_uuid ?? 'unknown'}`, cache: 'session' },
-  );
-  if (!ok || j?.ok === false) {
-    const detail = j?.detail ?? (typeof j?.response_text === "string" ? j.response_text.slice(0, 300) : "");
-    throw new Error(`GraphQL error (status ${j?.status ?? status})${detail ? " - " + detail : ""}`);
+  let lastErr = '';
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const { ok, status, json: j } = await postJsonCached<any>(
+      withApiBase('/farms'),
+      payload,
+      undefined,
+      { cacheKey: `farms:list:${auth?.login?.gigya_uuid ?? 'unknown'}`, cache: 'session' },
+    );
+    if (ok && j?.ok !== false) return j as FarmsOut;
+
+    const detail = formatErrorDetail(j?.detail ?? (typeof j?.response_text === 'string' ? j.response_text.slice(0, 500) : ''));
+    const upstreamStatus = Number(j?.status ?? status ?? 0);
+    lastErr = `GraphQL error (status ${upstreamStatus || status})${detail ? ` - ${detail}` : ''}`;
+    const retryable = upstreamStatus === 502 || upstreamStatus === 503 || upstreamStatus === 504 || status === 502 || status === 503 || status === 504;
+    if (!retryable || attempt === 3) break;
+    await sleep(400 * attempt);
   }
-  return j as FarmsOut;
+  throw new Error(lastErr || 'GraphQL error (status 502)');
 }
 
 async function fetchHfrFarmCandidatesApi(params: {
@@ -83,7 +111,7 @@ async function fetchHfrFarmCandidatesApi(params: {
       const count = Number(detailObj.received_farms ?? detailObj.receivedFarms ?? farmUuids.length);
       throw new Error(`too_many_farms:${count}:${max}`);
     }
-    const detail = j?.detail ?? (typeof j?.response_text === "string" ? j.response_text.slice(0, 300) : "");
+    const detail = formatErrorDetail(j?.detail ?? (typeof j?.response_text === "string" ? j.response_text.slice(0, 300) : ""));
     throw new Error(`GraphQL error (status ${j?.status ?? status})${detail ? " - " + detail : ""}`);
   }
   return j as HfrFarmCandidatesOut;
@@ -112,7 +140,7 @@ async function fetchHfrCsvFieldsApi(params: {
     { cache: 'none' },
   );
   if (!ok || j?.ok === false) {
-    const detail = j?.detail ?? (typeof j?.response_text === "string" ? j.response_text.slice(0, 300) : "");
+    const detail = formatErrorDetail(j?.detail ?? (typeof j?.response_text === "string" ? j.response_text.slice(0, 300) : ""));
     throw new Error(`HFR csv fields error (status ${j?.status ?? status})${detail ? " - " + detail : ""}`);
   }
   return j as HfrCsvFieldsOut;
@@ -149,7 +177,7 @@ async function fetchCropProtectionProductsBulkApi(params: {
     { cacheKey, cache: 'session' },
   );
   if (!ok || j?.ok === false) {
-    const detail = j?.detail ?? (typeof j?.response_text === 'string' ? j.response_text.slice(0, 300) : '');
+    const detail = formatErrorDetail(j?.detail ?? (typeof j?.response_text === 'string' ? j.response_text.slice(0, 300) : ''));
     throw new Error(`Crop protection products error (status ${j?.status ?? status})${detail ? ` - ${detail}` : ''}`);
   }
   return j as CropProtectionProductsBulkOut;
