@@ -1862,18 +1862,23 @@ export function TaskProgressDashboardPage() {
     const farmerCount = dashboard.farmers.length;
     const fieldCountFromFarmers = dashboard.farmers.reduce((s, f) => s + f.field_count, 0);
     // From snapshotFields (available after manual load)
-    if (snapshotFields.length > 0) {
+    // NOTE: Even if zero fields are returned, show 0.0ha instead of "圃場ロード後表示".
+    if (snapshotFieldsLoaded) {
       const uniqueFields = new Map<string, number>();
       for (const f of snapshotFields) {
         if (f.field_uuid && !uniqueFields.has(f.field_uuid)) {
-          uniqueFields.set(f.field_uuid, f.area_m2 ?? 0);
+          uniqueFields.set(f.field_uuid, Number(f.area_m2 ?? 0) || 0);
         }
       }
       const totalAreaM2 = [...uniqueFields.values()].reduce((s, v) => s + v, 0);
-      return { farmerCount, fieldCount: uniqueFields.size || fieldCountFromFarmers, totalAreaHa: totalAreaM2 / 10000 };
+      return {
+        farmerCount,
+        fieldCount: uniqueFields.size || fieldCountFromFarmers,
+        totalAreaHa: totalAreaM2 / 10000,
+      };
     }
     return { farmerCount, fieldCount: fieldCountFromFarmers, totalAreaHa: null };
-  }, [dashboard.farmers, snapshotFields]);
+  }, [dashboard.farmers, snapshotFields, snapshotFieldsLoaded]);
 
   const snapshotTaskByUuid = useMemo(() => {
     const map = new Map<string, SnapshotTask>();
@@ -1949,7 +1954,7 @@ export function TaskProgressDashboardPage() {
     setRefreshToken((v) => v + 1);
   };
 
-  const loadSnapshotFields = async () => {
+  const loadSnapshotFields = useCallback(async () => {
     if (snapshotFieldsLoading) return;
     setSnapshotFieldsLoading(true);
     try {
@@ -1980,7 +1985,14 @@ export function TaskProgressDashboardPage() {
     } finally {
       setSnapshotFieldsLoading(false);
     }
-  };
+  }, [snapshotDate, snapshotFieldsLoading]);
+
+  useEffect(() => {
+    if (snapshotLoading) return;
+    if (snapshotFieldsLoaded || snapshotFieldsLoading) return;
+    if (!snapshotRun?.run_id) return;
+    void loadSnapshotFields();
+  }, [snapshotLoading, snapshotFieldsLoaded, snapshotFieldsLoading, snapshotRun?.run_id, loadSnapshotFields]);
 
   const handleManualUpdate = async () => {
     if (!canManualUpdate || !auth?.login?.login_token || !auth?.api_token) return;
