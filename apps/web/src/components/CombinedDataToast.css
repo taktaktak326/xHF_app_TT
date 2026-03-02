@@ -2,91 +2,152 @@
   position: fixed;
   top: 50%;
   left: 50%;
-  width: min(560px, 94vw);
+  width: min(520px, 92vw);
   transform: translate(-50%, -50%);
-  background: rgba(24, 26, 32, 0.95);
-  border: 1px solid rgba(121, 134, 255, 0.35);
-  border-radius: 14px;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  background: rgba(15, 18, 28, 0.96);
+  border: 1px solid rgba(100, 108, 255, 0.3);
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(100, 108, 255, 0.08) inset;
   color: #e0e7ff;
   z-index: 2500;
   overflow: hidden;
-  backdrop-filter: blur(6px);
-  animation: combined-toast-fade-in 0.25s ease;
+  backdrop-filter: blur(16px);
+  animation: combined-toast-fade-in 0.3s ease;
 }
 
 .combined-toast__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 1rem 1.2rem 0.8rem;
+  padding: 1rem 1.25rem 0.75rem;
+  border-bottom: 1px solid rgba(100, 108, 255, 0.12);
 }
 
 .combined-toast__title {
-  font-size: 1.12rem;
+  font-size: 1rem;
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .combined-toast__cancel {
-  border: 1px solid rgba(255, 164, 164, 0.45);
-  background: rgba(80, 31, 31, 0.55);
-  color: #ffd7d7;
-  border-radius: 999px;
-  font-size: 0.86rem;
-  padding: 0.38rem 0.85rem;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.1);
+  color: #fca5a5;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  padding: 0.35rem 0.85rem;
   cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
 }
 
 .combined-toast__cancel:hover {
-  background: rgba(113, 40, 40, 0.7);
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.55);
 }
 
 .combined-toast__body {
-  padding: 0.7rem 1.2rem 0.95rem;
-  font-size: 0.98rem;
-  line-height: 1.5;
+  padding: 0.75rem 1.25rem 0.9rem;
 }
 
 .combined-toast__body p {
-  margin: 0.2rem 0;
+  margin: 0;
+  font-size: 0.88rem;
+  color: rgba(203, 213, 225, 0.85);
 }
 
 .combined-toast__progress {
   position: relative;
-  height: 13px;
-  background: rgba(255, 255, 255, 0.12);
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
   border-radius: 999px;
   overflow: hidden;
-  margin-top: 0.55rem;
+  margin-top: 0.35rem;
 }
 
 .combined-toast__progress-bar {
   height: 100%;
-  background: linear-gradient(90deg, rgba(100, 108, 255, 0.9), rgba(121, 134, 255, 0.9));
+  background: linear-gradient(90deg, #646cff, #818cf8);
+  border-radius: 999px;
+  transition: width 0.4s ease;
   width: 0%;
 }
 
 .combined-toast__progress-label {
   display: block;
-  margin-top: 0.45rem;
-  font-size: 0.9rem;
-  color: rgba(224, 231, 255, 0.85);
+  margin-top: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: rgba(203, 213, 225, 0.7);
+  font-variant-numeric: tabular-nums;
 }
 
+/* ---- Step List ---- */
 .combined-toast__details {
-  margin: 0.7rem 0 0;
-  padding-left: 1.35rem;
-  color: rgba(224, 231, 255, 0.9);
-  font-size: 0.95rem;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
 }
 
 .combined-toast__details li {
-  margin: 0.22rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  padding: 0.2rem 0;
+  color: rgba(203, 213, 225, 0.7);
+}
+
+.toast-step__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.3em;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.toast-step--ok {
+  color: #86efac;
+}
+
+.toast-step--ok .toast-step__icon {
+  color: #22c55e;
+}
+
+.toast-step--error {
+  color: #fca5a5;
+}
+
+.toast-step--error .toast-step__icon {
+  color: #ef4444;
+}
+
+.toast-step--pending {
+  color: #93c5fd;
+}
+
+.toast-step--pending .toast-step__icon {
+  animation: toast-pulse 1.2s ease-in-out infinite;
+  color: #60a5fa;
+}
+
+.toast-step--info {
+  color: rgba(203, 213, 225, 0.85);
+  font-weight: 500;
+}
+
+@keyframes toast-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
 }
 
 @keyframes combined-toast-fade-in {
   from {
-    transform: translate(-50%, calc(-50% + 16px));
+    transform: translate(-50%, calc(-50% + 12px));
     opacity: 0;
   }
   to {

@@ -273,6 +273,7 @@ COMBINED_FIELD_DATA_TASKS = """
 query CombinedFieldData(
     $farmUuids: [UUID!]!,
     $languageCode: String!,
+    $countryCode: String = "JP",
     $cropSeasonLifeCycleStates: [LifecycleState]!,
     $fromDate: Date,
     $tillDate: Date,
@@ -312,6 +313,14 @@ query CombinedFieldData(
       crop(languageCode: $languageCode) { uuid name }
       variety(languageCode: $languageCode) { name }
       activeGrowthStage { index gsOrder scale }
+      countryCropGrowthStagePredictions {
+        index
+        startDate
+        endDate
+        scale
+        gsOrder
+        cropGrowthStageV2(languageCode: $languageCode, countryCode: $countryCode) { uuid name code }
+      }
       cropEstablishmentDetails { seedBoxPerArea seedWeightPerSeedBox }
 
       cropSeasonNutritionProgram {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useFarms } from '../context/FarmContext';
 import { useData } from '../context/DataContext';
@@ -209,8 +210,6 @@ const chunkArray = <T,>(arr: T[], chunkSize: number): T[][] => {
   return out;
 };
 
-const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 const csvEscape = (value: unknown): string => {
   const s = String(value ?? '');
   if (!/[",\n]/.test(s)) return s;
@@ -349,9 +348,10 @@ function farmLabel(f: Farm) {
 }
 
 export function FarmSelector() {
+  const navigate = useNavigate();
   const { auth } = useAuth();
-  const { selectedFarms, setSelectedFarms, submitSelectedFarms, replaceSelectedAndSubmittedFarms, cancelCombinedFetch } = useFarms();
-  const { combinedLoading, combinedInProgress } = useData();
+  const { selectedFarms, setSelectedFarms, replaceSelectedAndSubmittedFarms, cancelCombinedFetch } = useFarms();
+  const { combinedLoading, combinedInProgress, setFieldNameFilter } = useData();
   const { status: warmupStatus, startWarmup } = useWarmup();
   const { language, t } = useLanguage();
 
@@ -374,7 +374,6 @@ export function FarmSelector() {
   const [hfrStatus, setHfrStatus] = useState<string | null>(null);
   const [hfrElapsedSec, setHfrElapsedSec] = useState(0);
   const [hfrProgress, setHfrProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
-  const [hfrSuffixInput, setHfrSuffixInput] = useState(DEFAULT_HFR_SUFFIX);
   const [useSuffixScanOnFetch, setUseSuffixScanOnFetch] = useState(false);
   const hfrAbortControllerRef = useRef<AbortController | null>(null);
 
@@ -419,11 +418,9 @@ export function FarmSelector() {
     () => farms.map((farm) => String(farm.uuid ?? '')).filter(Boolean),
     [farms],
   );
-  const hfrSuffix = useMemo(() => {
-    return String(hfrSuffixInput || '').trim();
-  }, [hfrSuffixInput]);
-  const hfrSuffixRegex = useMemo(
-    () => (hfrSuffix ? new RegExp(`${escapeRegExp(hfrSuffix)}$`, 'i') : /^.*$/),
+  const hfrSuffix = DEFAULT_HFR_SUFFIX;
+  const hfrContains = useMemo(
+    () => hfrSuffix.toLowerCase(),
     [hfrSuffix],
   );
 
@@ -717,6 +714,7 @@ export function FarmSelector() {
       }
 
       replaceSelectedAndSubmittedFarms(matchedFarmUuids);
+      setFieldNameFilter(hfrSuffix);
       setHfrStatus(t('farm_selector.hfr_matched_count', { count: matchedFarmUuids.length }));
       setDropdownOpen(false);
     } catch (e: any) {
@@ -738,7 +736,7 @@ export function FarmSelector() {
       setHfrLoading(false);
       setHfrProgress({ current: 0, total: 0 });
     }
-  }, [auth, selectedFarms, allFarmIds, t, replaceSelectedAndSubmittedFarms, hfrSuffix]);
+  }, [auth, selectedFarms, allFarmIds, t, replaceSelectedAndSubmittedFarms, hfrSuffix, setFieldNameFilter]);
 
   const handleFetchData = useCallback(async (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
@@ -746,10 +744,15 @@ export function FarmSelector() {
       await handleFetchHfrFarms(event);
       return;
     }
+    if (selectedFarms.length === 0) {
+      return;
+    }
     setHfrStatus(null);
-    submitSelectedFarms({ mode: 'replace' });
+    setFieldNameFilter('');
     setDropdownOpen(false);
-  }, [useSuffixScanOnFetch, handleFetchHfrFarms, submitSelectedFarms]);
+    navigate('/farms');
+    replaceSelectedAndSubmittedFarms(selectedFarms);
+  }, [useSuffixScanOnFetch, handleFetchHfrFarms, selectedFarms, replaceSelectedAndSubmittedFarms, navigate, setFieldNameFilter]);
 
   const handleDownloadHfrCsv = useCallback(async (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
@@ -800,7 +803,9 @@ export function FarmSelector() {
         const part: any[] = out?.response?.data?.hfrFields || [];
         hfrFields.push(...part.filter((f) => {
           const name = String(f?.name || '').trim();
-          return Boolean(name && hfrSuffixRegex.test(name));
+          if (!name) return false;
+          if (!hfrContains) return true;
+          return name.toLowerCase().includes(hfrContains);
         }));
         setHfrProgress({ current: i + 1, total: totalSteps });
       }
@@ -920,10 +925,12 @@ export function FarmSelector() {
       setHfrCsvLoading(false);
       setHfrProgress({ current: 0, total: 0 });
     }
-  }, [auth, selectedFarms, allFarmIds, t, language, hfrSuffix, hfrSuffixRegex]);
+  }, [auth, selectedFarms, allFarmIds, t, language, hfrSuffix, hfrContains]);
 
   const hfrBusy = hfrLoading || hfrCsvLoading;
   const combinedBusy = combinedLoading || combinedInProgress;
+  const anyBusy = hfrBusy || combinedBusy;
+  const fetchButtonBusy = useSuffixScanOnFetch ? anyBusy : hfrBusy;
   const handleCancelLoading = useCallback((event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
     if (hfrAbortControllerRef.current) {
@@ -942,7 +949,7 @@ export function FarmSelector() {
   }, [hfrBusy, combinedBusy, cancelCombinedFetch, t]);
 
   useEffect(() => {
-    if (!hfrBusy) {
+    if (!anyBusy) {
       setHfrElapsedSec(0);
       return;
     }
@@ -952,7 +959,7 @@ export function FarmSelector() {
       setHfrElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [hfrBusy]);
+  }, [anyBusy]);
 
   return (
     <div className="farm-selection-container">
@@ -963,7 +970,7 @@ export function FarmSelector() {
         aria-label={tooltipText}
       >
         <span>{t('farm_selector.selected_count', { count: selectedFarms.length })}</span>
-        {(combinedLoading || combinedInProgress) && (
+        {anyBusy && (
           <span className="farm-selection-loading" aria-live="polite">
             <LoadingSpinner size={14} />
             <span>{t('farm_selector.loading_inline')}</span>
@@ -987,31 +994,39 @@ export function FarmSelector() {
       {dropdownOpen && (
         <div className="farm-dropdown">
 	          <div className="farm-dropdown-toolbar farm-dropdown-toolbar--sticky">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setSortKey((prev) => (prev === 'name_asc' ? 'name_desc' : 'name_asc'));
-	              }}
-	              title={t('farm_selector.sort_title', { order: t(sortKey === 'name_asc' ? 'order.asc' : 'order.desc') })}
-	              style={{ width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-	            >
-	              {sortKey === 'name_asc' ? '△' : '▽'}
-	            </button>
-	            <input
-	              type="text"
-	              placeholder={t('farm_selector.search_placeholder')}
-	              className="farm-search-input"
-	              value={searchTerm}
-	              onChange={(e) => setSearchTerm(e.target.value)}
-	              onClick={(e) => e.stopPropagation()} // ヘッダーのクリックイベントが発火しないように
-	            />
-            <button
-              type="button"
-              onClick={handleFetchData}
-		              disabled={hfrBusy || loading || (useSuffixScanOnFetch ? allFarmIds.length === 0 : selectedFarms.length === 0)}
-		              className="fields-action-btn fields-action-btn--accent farm-dropdown-submit"
-		            >{useSuffixScanOnFetch ? t('farm_selector.fetch_data_scan') : t('farm_selector.fetch_data')}</button>
+            {!useSuffixScanOnFetch && (
+              <>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSortKey((prev) => (prev === 'name_asc' ? 'name_desc' : 'name_asc'));
+                  }}
+                  title={t('farm_selector.sort_title', { order: t(sortKey === 'name_asc' ? 'order.asc' : 'order.desc') })}
+                  style={{ width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  {sortKey === 'name_asc' ? '△' : '▽'}
+                </button>
+                <input
+                  type="text"
+                  placeholder={t('farm_selector.search_placeholder')}
+                  className="farm-search-input"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onClick={(e) => e.stopPropagation()} // ヘッダーのクリックイベントが発火しないように
+                />
+              </>
+            )}
+            {!useSuffixScanOnFetch && (
+              <button
+                type="button"
+                onClick={handleFetchData}
+                disabled={fetchButtonBusy || loading || selectedFarms.length === 0}
+                className="fields-action-btn fields-action-btn--accent farm-dropdown-submit"
+              >
+                {t('farm_selector.fetch_data')}
+              </button>
+            )}
 
 		            <div className="farm-dropdown-bulk">
               <div className="farm-fetch-mode" role="radiogroup" aria-label={t('farm_selector.fetch_mode_label')}>
@@ -1020,7 +1035,7 @@ export function FarmSelector() {
                     type="radio"
                     name="farm-fetch-mode"
                     checked={!useSuffixScanOnFetch}
-                    onChange={() => setUseSuffixScanOnFetch(false)}
+                    onChange={() => { setUseSuffixScanOnFetch(false); setFieldNameFilter(''); }}
                     onClick={(event) => event.stopPropagation()}
                   />
                   {t('farm_selector.fetch_mode_normal')}
@@ -1042,28 +1057,37 @@ export function FarmSelector() {
                   <input
                     id="farm-hfr-suffix-input"
                     type="text"
-                    value={hfrSuffixInput}
-                    placeholder={t('farm_selector.hfr_suffix_placeholder')}
-                    onChange={(event) => setHfrSuffixInput(event.target.value)}
+                    value={DEFAULT_HFR_SUFFIX}
+                    readOnly
                     onClick={(event) => event.stopPropagation()}
                     title={t('farm_selector.hfr_suffix_title')}
                   />
                 </div>
               )}
               {useSuffixScanOnFetch && (
-                <button
-                  type="button"
-                  onClick={handleDownloadHfrCsv}
-                  disabled={hfrBusy || loading || allFarmIds.length === 0}
-                  className="fields-action-btn farm-hfr-action"
-                  title={t('farm_selector.hfr_csv_tooltip', { suffix: hfrSuffix || t('farm_selector.hfr_suffix_empty') })}
-                >
-                  {hfrCsvLoading
-                    ? t('farm_selector.hfr_csv_building_short')
-                    : t('farm_selector.download_hfr_csv')}
-                </button>
+                <div className="farm-scan-actions">
+                  <button
+                    type="button"
+                    onClick={handleDownloadHfrCsv}
+                    disabled={anyBusy || loading || allFarmIds.length === 0}
+                    className="fields-action-btn farm-hfr-action"
+                    title={t('farm_selector.hfr_csv_tooltip', { suffix: hfrSuffix || t('farm_selector.hfr_suffix_empty') })}
+                  >
+                    {hfrCsvLoading
+                      ? t('farm_selector.hfr_csv_building_short')
+                      : t('farm_selector.download_hfr_csv')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleFetchData}
+                    disabled={fetchButtonBusy || loading || allFarmIds.length === 0}
+                    className="fields-action-btn fields-action-btn--accent farm-hfr-action"
+                  >
+                    {t('farm_selector.fetch_data_scan', { suffix: hfrSuffix || t('farm_selector.hfr_suffix_empty') })}
+                  </button>
+                </div>
               )}
-              {(hfrBusy || combinedBusy) && (
+              {anyBusy && (
                 <button
                   type="button"
                   onClick={handleCancelLoading}
@@ -1073,6 +1097,8 @@ export function FarmSelector() {
                 </button>
               )}
 
+              {!useSuffixScanOnFetch && (
+                <>
 		              <label className="farm-bulk-toggle" title={t('farm_selector.toggle_all_title')}>
 		                <input
 		                  ref={allToggleRef}
@@ -1086,7 +1112,7 @@ export function FarmSelector() {
 	                />
 	                {t('farm_selector.all_label')} <strong>{allFarmIds.length}</strong>
 	              </label>
-	
+
 	              <label className="farm-bulk-toggle" title={t('farm_selector.toggle_visible_title')}>
 	                <input
 	                  ref={visibleToggleRef}
@@ -1112,21 +1138,28 @@ export function FarmSelector() {
 	              >
 	                {t('farm_selector.clear_selection')}
 	              </button>
-	
+
 	              <span className="farm-bulk-meta">
 		                {t('farm_selector.selected_meta', { selected: selectedFarms.length, visible: filteredFarmIds.length })}
 		              </span>
+                </>
+              )}
 		            </div>
               {hfrStatus && (
                 <p className="farm-dropdown-status" aria-live="polite">{hfrStatus}</p>
               )}
-              {hfrBusy && (
+              {anyBusy && !hfrStatus && (
+                <p className="farm-dropdown-status" aria-live="polite">
+                  {t('farm_selector.loading_inline')}
+                </p>
+              )}
+              {anyBusy && (
                 <p className="farm-dropdown-status farm-dropdown-status--sub" aria-live="polite">
                   {t('farm_selector.hfr_elapsed', { seconds: hfrElapsedSec })}
                   {hfrProgress.total > 0 ? ` / ${t('farm_selector.hfr_progress', { current: hfrProgress.current, total: hfrProgress.total })}` : ''}
                 </p>
               )}
-              {hfrBusy && (
+              {anyBusy && (
                 <div className="farm-dropdown-loadingbar" aria-hidden="true">
                   <div className="farm-dropdown-loadingbar__inner" />
                 </div>
@@ -1136,7 +1169,7 @@ export function FarmSelector() {
 	          {loading && <p>{t('farm_selector.loading_farms')}</p>}
 	          {err && <p style={{ color: "crimson" }}>{t('farm_selector.error_prefix', { message: err })}</p>}
 
-	          {filteredFarms.length > 0 && (
+	          {!useSuffixScanOnFetch && filteredFarms.length > 0 && (
 	            <div className="farm-list">
 	              {filteredFarms.map((f) => (
 	                <div

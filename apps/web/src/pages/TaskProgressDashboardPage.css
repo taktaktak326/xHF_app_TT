@@ -66,8 +66,10 @@
 
 .task-progress-header-tools {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .task-progress-header-tools input {
@@ -75,7 +77,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
-  padding: 8px 12px;
+  padding: 9px 12px;
   min-width: 220px;
   transition: border-color 0.2s;
 }
@@ -111,11 +113,12 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
-  padding: 8px 14px;
+  padding: 9px 14px;
   cursor: pointer;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
   transition: background 0.15s, border-color 0.15s, transform 0.1s;
+  white-space: nowrap;
 }
 
 .task-progress-header-tools button:hover {
@@ -127,24 +130,151 @@
   transform: scale(0.97);
 }
 
+.toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar-group--search input {
+  min-width: 280px;
+}
+
+.toolbar-group--search {
+  position: relative;
+}
+
+.toolbar-search-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  min-width: 320px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: linear-gradient(180deg, #0f172a 0%, #0b1324 100%);
+  border: 1px solid rgba(100, 108, 255, 0.28);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 16px 40px rgba(2, 6, 23, 0.58);
+  z-index: 40;
+}
+
+.toolbar-search-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.toolbar-search-option small {
+  color: #a6b2d4;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+.toolbar-search-option:hover,
+.toolbar-search-option.active {
+  background: rgba(100, 108, 255, 0.14);
+  border-color: rgba(100, 108, 255, 0.4);
+}
+
+.toolbar-group--date {
+  border-radius: 10px;
+  border: 1px solid rgba(100, 108, 255, 0.16);
+  background: rgba(99, 102, 241, 0.04);
+  padding: 2px;
+}
+
+.toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.46);
+}
+
 .snapshot-date-label {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   font-size: 12px;
   color: var(--text-muted);
+  padding: 4px 10px;
+  border: 1px solid rgba(100, 108, 255, 0.22);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(100, 108, 255, 0.1), rgba(100, 108, 255, 0.03));
 }
 
 .snapshot-date-label input {
   min-width: 148px;
 }
 
+.snapshot-date-input {
+  appearance: none;
+  -webkit-appearance: none;
+  background: #0f172a;
+  border: 1px solid rgba(100, 108, 255, 0.35);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  min-width: 154px;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+}
+
+.snapshot-date-input:hover {
+  border-color: rgba(100, 108, 255, 0.52);
+  background: #111b30;
+}
+
+.snapshot-date-input:focus {
+  outline: none;
+  border-color: #7f8bff;
+  box-shadow: 0 0 0 2px rgba(100, 108, 255, 0.2);
+}
+
 .task-progress-header-tools .source-tag {
   color: var(--text-dim);
-  border: 1px solid var(--border);
+  border: 1px solid rgba(148, 163, 184, 0.24);
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11px;
+  background: rgba(15, 23, 42, 0.58);
+}
+
+@media (max-width: 1200px) {
+  .task-progress-header-tools {
+    justify-content: flex-start;
+  }
+
+  .toolbar-meta {
+    width: 100%;
+    justify-content: flex-start;
+    border-radius: 10px;
+  }
 }
 
 /* ---- Family Filter Chips ---- */
@@ -166,6 +296,50 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.task-family-filter__hybrid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.task-family-segments {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(100, 108, 255, 0.3);
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.task-family-segment {
+  border: none;
+  border-right: 1px solid rgba(100, 108, 255, 0.22);
+  background: transparent;
+  color: var(--text-muted);
+  padding: 7px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.task-family-segment:last-child {
+  border-right: none;
+}
+
+.task-family-segment:hover {
+  background: rgba(100, 108, 255, 0.12);
+  color: var(--text);
+}
+
+.task-family-segment.active {
+  background: linear-gradient(180deg, rgba(100, 108, 255, 0.42), rgba(100, 108, 255, 0.28));
+  color: #ffffff;
+  font-weight: 700;
+  box-shadow: 0 0 0 1px rgba(149, 159, 255, 0.6) inset, 0 6px 14px rgba(79, 70, 229, 0.35);
+  text-shadow: 0 0 10px rgba(173, 181, 255, 0.35);
 }
 
 .task-family-chip {
@@ -274,6 +448,73 @@
 .kpi-teal strong { color: #2dd4bf; }
 .kpi-teal::before { background: linear-gradient(135deg, rgba(45, 212, 191, 0.06), transparent 60%); }
 
+.task-progress-subkpis {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.subkpi-card {
+  padding: 14px 16px;
+}
+
+.subkpi-card h4 {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.subkpi-card strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 26px;
+  line-height: 1.1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.subkpi-card p {
+  margin: 6px 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.subkpi-card button {
+  margin-top: 8px;
+  background: rgba(100, 108, 255, 0.08);
+  border: 1px solid rgba(100, 108, 255, 0.3);
+  border-radius: 8px;
+  color: #c5cae9;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.subkpi-card button:hover {
+  background: rgba(100, 108, 255, 0.18);
+  border-color: rgba(100, 108, 255, 0.55);
+}
+
+.subkpi-card button:active {
+  transform: scale(0.97);
+}
+
+.subkpi-emerald strong {
+  color: #22c55e;
+}
+
+.subkpi-slate strong {
+  color: #cbd5e1;
+}
+
+.subkpi-indigo strong {
+  color: #a5b4fc;
+}
+
 /* ---- Chart & Ranking Sections ---- */
 .task-progress-layer2,
 .task-progress-layer3 {
@@ -312,12 +553,47 @@
   margin-bottom: 0.5rem;
 }
 
+.chart-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(100, 108, 255, 0.3);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.chart-mode-toggle button {
+  padding: 6px 10px;
+  border: none;
+  border-right: 1px solid rgba(100, 108, 255, 0.2);
+  background: transparent;
+  color: #aeb8d6;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chart-mode-toggle button:last-child {
+  border-right: none;
+}
+
+.chart-mode-toggle button.active {
+  background: rgba(100, 108, 255, 0.22);
+  color: #e6ebff;
+  font-weight: 600;
+}
+
 .chart-month-nav h3 {
   margin: 0;
   white-space: nowrap;
   border-left: none;
   padding-left: 0;
   text-align: center;
+}
+
+.chart-month-nav-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .chart-month-nav button {
@@ -400,6 +676,40 @@
   transform: none;
 }
 
+.snapshot-table-filter-input {
+  flex: 1;
+  min-width: 280px;
+  max-width: 560px;
+  background: #0f172a;
+  border: 1px solid rgba(100, 108, 255, 0.3);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+.snapshot-table-filter-input:focus {
+  outline: none;
+  border-color: #7f8bff;
+  box-shadow: 0 0 0 2px rgba(100, 108, 255, 0.2);
+}
+
+.snapshot-table-controls select {
+  background: #0f172a;
+  border: 1px solid rgba(100, 108, 255, 0.3);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 12px;
+  min-width: 170px;
+}
+
+.snapshot-table-controls select:focus {
+  outline: none;
+  border-color: #7f8bff;
+  box-shadow: 0 0 0 2px rgba(100, 108, 255, 0.2);
+}
+
 .ranking-card table {
   width: 100%;
   border-collapse: collapse;
@@ -450,6 +760,85 @@
 
 .ranking-card tbody tr:hover {
   background: rgba(100, 108, 255, 0.07);
+}
+
+.task-progress-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(2, 6, 23, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.task-progress-modal {
+  width: min(1100px, 96vw);
+  max-height: 86vh;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.task-progress-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-progress-modal-header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.task-progress-modal-header button {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.task-progress-modal-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-progress-modal-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.task-progress-modal-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+}
+
+.task-progress-modal-table {
+  border-color: rgba(100, 108, 255, 0.15);
+}
+
+.task-progress-modal-table tbody tr {
+  cursor: default;
+}
+
+.task-progress-modal-table tbody tr:nth-child(even) {
+  background: rgba(15, 23, 42, 0.2);
+}
+
+.task-progress-modal-table tbody tr:hover {
+  background: rgba(100, 108, 255, 0.05);
 }
 
 /* ---- Status Indicators ---- */

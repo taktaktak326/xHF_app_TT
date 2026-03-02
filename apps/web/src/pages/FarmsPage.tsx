@@ -2286,6 +2286,7 @@ function usePaginatedFields(
     filters?: FieldListFilters;
   },
 ) {
+  const { fieldNameFilter } = useData();
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(50);
   const locationByFieldUuid = opts?.locationByFieldUuid ?? {};
@@ -2334,13 +2335,20 @@ function usePaginatedFields(
         subs?.[key]?.response?.fields;
       if (Array.isArray(f) && f.length > 0) lists.push(f as any[]);
     });
+    let result: Field[];
     if (primary && Array.isArray(primary) && primary.length > 0) {
-      if (lists.length === 0) return primary as Field[];
-      return mergeFieldLists([primary as any[], ...lists]) as Field[];
+      result = lists.length === 0 ? (primary as Field[]) : (mergeFieldLists([primary as any[], ...lists]) as Field[]);
+    } else if (lists.length > 0) {
+      result = mergeFieldLists(lists) as Field[];
+    } else {
+      result = [];
     }
-    if (lists.length > 0) return mergeFieldLists(lists) as Field[];
-    return [];
-  }, [combinedOut]);
+    if (fieldNameFilter) {
+      const lower = fieldNameFilter.toLowerCase();
+      result = result.filter((f) => String(f.name ?? '').toLowerCase().includes(lower));
+    }
+    return result;
+  }, [combinedOut, fieldNameFilter]);
 
   // 圃場と作期の全ペアを作成 (フック内に移動)
   const allFieldSeasonPairs = useMemo((): Omit<FieldSeasonPair, 'nextStage'>[] => {

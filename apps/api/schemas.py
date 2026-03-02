@@ -145,6 +145,7 @@ class CombinedFieldDataTasksReq(BaseModel):
     api_token: str
     farm_uuids: List[str]
     languageCode: str = "ja"
+    countryCode: str = "JP"
     cropSeasonLifeCycleStates: List[str] = ["ACTIVE", "PLANNED"]
     withBoundary: bool = True
     withCropSeasonsV2: bool = True

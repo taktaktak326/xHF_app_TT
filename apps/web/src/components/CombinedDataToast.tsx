@@ -33,16 +33,16 @@ export const CombinedDataToast = () => {
   const progressInfo = (() => {
     if (!combinedFetchProgress) return null;
     const farmsCount = combinedFetchProgress.farmUuids?.length ?? null;
-    const farmsLine = typeof farmsCount === 'number' ? `Farms: ${farmsCount}` : null;
+    const farmsLine = typeof farmsCount === 'number' ? `対象農場: ${farmsCount}` : null;
     if (combinedFetchProgress.mode === 'chunked') {
       const done = combinedFetchProgress.requestsDone;
       const total = combinedFetchProgress.requestsTotal;
       const pct = total ? Math.round((done / Math.max(1, total)) * 100) : null;
-      const details = [`Chunked fetch: ${done}${total ? ` / ${total}` : ''}`];
-      if (farmsLine) details.unshift(farmsLine);
+      const details = [{ icon: '', label: `分割取得: ${done}${total ? ` / ${total}` : ''}`, cls: 'toast-step--info' }];
+      if (farmsLine) details.unshift({ icon: '', label: farmsLine, cls: 'toast-step--info' });
       const active = combinedFetchProgress.activeFarmLabels ?? [];
       if (active.length > 0) {
-        details.push(`Active: ${active.join(', ')}`);
+        details.push({ icon: '', label: `取得中: ${active.join(', ')}`, cls: 'toast-step--pending' });
       }
       return { pct, details };
     }
@@ -62,16 +62,21 @@ export const CombinedDataToast = () => {
       if (k === 'risk2') return 'ステータス（栄養/水/リスク）';
       return k;
     };
+    const statusClass = (status: string | undefined) => {
+      if (status === 'ok') return 'toast-step--ok';
+      if (status === 'error') return 'toast-step--error';
+      return 'toast-step--pending';
+    };
     const iconFor = (status: string | undefined) => {
       if (status === 'ok') return '✓';
-      if (status === 'error') return '!';
+      if (status === 'error') return '✗';
       return '…';
     };
-    const details = keys
+    const detailItems = keys
       .sort()
-      .map((k) => `${iconFor(parts[k]?.status)} ${labelFor(k)}`);
-    if (farmsLine) details.unshift(farmsLine);
-    return { pct, details };
+      .map((k) => ({ icon: iconFor(parts[k]?.status), label: labelFor(k), cls: statusClass(parts[k]?.status) }));
+    if (farmsLine) detailItems.unshift({ icon: '', label: farmsLine, cls: 'toast-step--info' });
+    return { pct, details: detailItems };
   })();
 
   return (
@@ -101,8 +106,11 @@ export const CombinedDataToast = () => {
           )}
           {progressInfo.details.length > 0 && (
             <ul className="combined-toast__details">
-              {progressInfo.details.slice(0, 8).map((line) => (
-                <li key={line}>{line}</li>
+              {progressInfo.details.slice(0, 8).map((item, idx) => (
+                <li key={idx} className={item.cls}>
+                  {item.icon && <span className="toast-step__icon">{item.icon}</span>}
+                  <span>{item.label}</span>
+                </li>
               ))}
             </ul>
           )}

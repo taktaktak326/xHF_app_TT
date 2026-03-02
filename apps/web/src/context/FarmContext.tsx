@@ -442,6 +442,7 @@ interface FarmContextType {
 }
 
 const FarmContext = createContext<FarmContextType | undefined>(undefined);
+const COMBINED_SESSION_STORAGE_MAX_BYTES = 3 * 1024 * 1024;
 
 export const FarmProvider = ({ children }: { children: ReactNode }) => {
   const [selectedFarms, setSelectedFarms] = useState<string[]>([]);
@@ -482,6 +483,8 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
   const requestIdRef = useRef(0);
   const combinedFetchInFlightRef = useRef<Map<string, Promise<void>>>(new Map());
   const combinedAbortControllerRef = useRef<AbortController | null>(null);
+  const storageOversizeLoggedRef = useRef(false);
+  const storagePersistErrorLoggedRef = useRef(false);
 
   const cancelCombinedFetch = useCallback(() => {
     requestIdRef.current += 1;
@@ -585,6 +588,8 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
     if (typeof window === 'undefined') return;
     if (!combinedOut) {
       sessionStorage.removeItem(STORAGE_KEY);
+      storageOversizeLoggedRef.current = false;
+      storagePersistErrorLoggedRef.current = false;
       return;
     }
     // サイズを抑えるため、レスポンス本体のみを保存（_sub_responses 等は除外）
@@ -605,10 +610,39 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
         ...(sprayingsSub ? { tasks_sprayings: sprayingsSub } : {}),
       };
     }
+    let serialized = '';
     try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
+      serialized = JSON.stringify(slim);
     } catch (err) {
-      console.warn('[FarmContext] failed to persist combinedOut to storage', err);
+      if (!storagePersistErrorLoggedRef.current) {
+        console.warn('[FarmContext] failed to serialize combinedOut for storage', err);
+        storagePersistErrorLoggedRef.current = true;
+      }
+      sessionStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+
+    const payloadBytes = new TextEncoder().encode(serialized).length;
+    if (payloadBytes > COMBINED_SESSION_STORAGE_MAX_BYTES) {
+      if (!storageOversizeLoggedRef.current) {
+        console.info(
+          `[FarmContext] skip persist combinedOut (size ${payloadBytes} bytes > ${COMBINED_SESSION_STORAGE_MAX_BYTES} bytes)`,
+        );
+        storageOversizeLoggedRef.current = true;
+      }
+      sessionStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+
+    try {
+      sessionStorage.setItem(STORAGE_KEY, serialized);
+      storageOversizeLoggedRef.current = false;
+      storagePersistErrorLoggedRef.current = false;
+    } catch (err) {
+      if (!storagePersistErrorLoggedRef.current) {
+        console.warn('[FarmContext] failed to persist combinedOut to storage', err);
+        storagePersistErrorLoggedRef.current = true;
+      }
       sessionStorage.removeItem(STORAGE_KEY);
     }
   }, [combinedOut]);

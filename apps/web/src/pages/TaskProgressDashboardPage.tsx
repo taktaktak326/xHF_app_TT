@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useTransition, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import {
   Bar,
   BarChart,
@@ -13,9 +13,9 @@ import {
   YAxis,
 } from 'recharts';
 import { useAuth } from '../context/AuthContext';
-import { useFarms } from '../context/FarmContext';
 import { withApiBase } from '../utils/apiBase';
 import LoadingOverlay from '../components/LoadingOverlay';
+import LoadingSpinner from '../components/LoadingSpinner';
 import './TaskProgressDashboardPage.css';
 
 type SortKey = 'name' | 'field_count' | 'due_task_count' | 'overdue_count' | 'delay_rate' | 'completion_rate';
@@ -89,6 +89,42 @@ type SnapshotTask = {
   fetched_at: string | null;
 };
 
+const REQUIRED_SNAPSHOT_TASK_KEYS: Array<keyof SnapshotTask> = [
+  'snapshot_date',
+  'run_id',
+  'task_uuid',
+  'farm_uuid',
+  'farm_name',
+  'field_uuid',
+  'field_name',
+  'season_uuid',
+  'crop_uuid',
+  'task_name',
+  'task_type',
+  'task_date',
+  'planned_date',
+  'execution_date',
+  'status',
+  'product',
+  'dosage',
+  'spray_category',
+  'creation_flow_hint',
+  'assignee_name',
+  'bbch_index',
+  'bbch_scale',
+  'occurrence',
+  'fetched_at',
+];
+
+function hasRequiredSnapshotTaskKeys(task: unknown): task is SnapshotTask {
+  if (!task || typeof task !== 'object') return false;
+  const row = task as Record<string, unknown>;
+  for (const key of REQUIRED_SNAPSHOT_TASK_KEYS) {
+    if (!(key in row)) return false;
+  }
+  return true;
+}
+
 type SnapshotField = {
   snapshot_date: string;
   run_id: string;
@@ -106,10 +142,51 @@ type SnapshotField = {
   fetched_at: string | null;
 };
 
+type FieldDeltaRow = {
+  diff_type: '増加' | '減少';
+  field_uuid: string;
+  field_name: string;
+  area_m2: number | null;
+};
+
+type FieldTableSortKey =
+  | 'snapshot_date'
+  | 'farm_name'
+  | 'field_name'
+  | 'user_name'
+  | 'area_m2'
+  | 'bbch_index'
+  | 'fetched_at';
+
+type TaskTableSortKey =
+  | 'snapshot_date'
+  | 'farm_name'
+  | 'field_name'
+  | 'task_display'
+  | 'task_name'
+  | 'task_type'
+  | 'occurrence'
+  | 'task_date'
+  | 'planned_date'
+  | 'execution_date'
+  | 'status'
+  | 'user_name'
+  | 'product'
+  | 'spray_subtype'
+  | 'fetched_at';
+
+type TaskTableRow = SnapshotTask & {
+  _family: string;
+  _subtypeLabel: string;
+  _taskDisplay: string;
+};
+
 type FarmerRow = {
   id: string;
   name: string;
   field_count: number;
+  no_task_field_count?: number;
+  is_unranked?: boolean;
   due_task_count: number;
   completed_count: number;
   overdue_count: number;
@@ -176,6 +253,9 @@ type FarmerDetail = {
 };
 
 type DashboardBundle = {
+  farmer_count?: number;
+  field_count?: number;
+  total_area_m2?: number;
   kpi: {
     completion_rate: number;
     completed_count: number;
@@ -195,11 +275,15 @@ type DashboardBundle = {
   daily_farm_bars: DailyFarmBar[];
   daily_farm_names: string[];
   farmer_details: Record<string, FarmerDetail>;
+  no_task_farmers?: Array<{ id: string; name: string; field_count: number; no_task_field_count: number }>;
   as_of: string;
 };
 
 function emptyDashboardBundle(asOf: string): DashboardBundle {
   return {
+    farmer_count: 0,
+    field_count: 0,
+    total_area_m2: 0,
     kpi: {
       completion_rate: 0,
       completed_count: 0,
@@ -219,6 +303,7 @@ function emptyDashboardBundle(asOf: string): DashboardBundle {
     daily_farm_bars: [],
     daily_farm_names: [],
     farmer_details: {},
+    no_task_farmers: [],
     as_of: asOf,
   };
 }
@@ -264,6 +349,10 @@ const snapshotPageCache = new Map<string, { expiresAt: number; data: any }>();
 const snapshotDatesCache = new Map<string, { expiresAt: number; data: any }>();
 const jstDayKeyCache = new Map<string, string>();
 const sprayMasterCache = new Map<string, { expiresAt: number; data: Record<string, string> }>();
+/** Client-side cache for computeDashboardBundle results keyed by filter combination */
+const bundleCache = new Map<string, { tasksLen: number; bundle: DashboardBundle }>();
+const BUNDLE_CACHE_MAX = 20;
+const WORKER_BUNDLE_THRESHOLD = 4000;
 const SNAPSHOT_SS_PREFIX = 'hfr:ss:v1';
 function summaryFilterCacheKey(snapshotDate: string, family: string, action: ActionFilterKey): string {
   return `${snapshotDate}:summary:${family}:${action}`;
@@ -339,18 +428,6 @@ function normalizeTaskFamilyLabel(value: string): string {
   return raw;
 }
 
-function matchesActionFilter(task: DashboardTask, filter: ActionFilterKey, today: string): boolean {
-  if (filter === 'none') return true;
-  const planned = getScheduledDay(task);
-  const done = task.completed;
-  const in7days = addDaysToKey(today, 7);
-  if (filter === 'incomplete') return !done;
-  if (filter === 'overdue') return Boolean(planned && planned < today && !done);
-  if (filter === 'due_today') return Boolean(planned && planned === today && !done);
-  if (filter === 'upcoming_3days') return Boolean(planned && planned > today && planned <= in7days && !done);
-  if (filter === 'future') return Boolean(planned && planned > today && !done);
-  return true;
-}
 
 function normalizeSprayCategory(categoryRaw: string): string {
   const key = categoryRaw.trim().toUpperCase();
@@ -502,11 +579,6 @@ function detectSpraySubtype(
   return { subtype: '未判定', source: 'creation_flow_hint_missing' };
 }
 
-function matchesFamilySelection(task: DashboardTask, selectedFamily: string): boolean {
-  if (selectedFamily === ALL_FAMILY_OPTION) return true;
-  return task.typeFamily === selectedFamily;
-}
-
 function tasksFromSnapshot(snapshotTasks: SnapshotTask[], sprayCategoryMap: Record<string, string>): DashboardTask[] {
   const mapped = snapshotTasks.map((task, idx) => ({
     uuid: task.task_uuid || `task-${idx + 1}`,
@@ -613,6 +685,17 @@ function formatAreaHa(areaM2: number | null | undefined): string {
   if (typeof areaM2 !== 'number' || !Number.isFinite(areaM2)) return '-';
   const ha = areaM2 / 10000;
   return `${ha.toLocaleString('ja-JP', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ha`;
+}
+
+function triggerBlobDownload(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 /**
@@ -856,19 +939,15 @@ function computeDashboardBundle(
       allBarDays.push(getJstDayKey(new Date(ms)));
     }
   }
+  // Only populate days that have task data; skip zero-fill for empty days
+  // (Recharts treats missing keys as 0 for stacked bars)
   const dailyFarmBars: DailyFarmBar[] = allBarDays.map((dayKey) => {
     const mm = parseInt(dayKey.slice(5, 7), 10);
     const dd = parseInt(dayKey.slice(8, 10), 10);
     const row: DailyFarmBar = { date: `${mm}/${dd}`, _dateKey: dayKey };
     const dayMap = dailyFarmMap.get(dayKey);
     if (dayMap) {
-      for (const name of dailyFarmNames) {
-        row[name] = dayMap.get(name) || 0;
-      }
-    } else {
-      for (const name of dailyFarmNames) {
-        row[name] = 0;
-      }
+      dayMap.forEach((count, name) => { row[name] = count; });
     }
     return row;
   });
@@ -897,15 +976,6 @@ function computeDashboardBundle(
   };
 }
 
-function quickFilterLabel(filterKey: ActionFilterKey): string {
-  if (filterKey === 'overdue') return '遅延中タスク';
-  if (filterKey === 'due_today') return '本日期限タスク';
-  if (filterKey === 'upcoming_3days') return '今後7日以内タスク';
-  if (filterKey === 'incomplete') return '未完了タスク';
-  if (filterKey === 'future') return '未来タスク';
-  return '全タスク';
-}
-
 type TaskFamilyFilterPanelProps = {
   familyOptions: string[];
   selectedFamily: string;
@@ -926,41 +996,39 @@ const TaskFamilyFilterPanel = memo(function TaskFamilyFilterPanel({
   onClearActionFilter,
 }: TaskFamilyFilterPanelProps) {
   const options = [ALL_FAMILY_OPTION, ...familyOptions];
+  const segmentOptions = options;
   return (
     <div className="task-family-filter">
-      <span className="task-family-filter__label">表示タスク（単一選択）</span>
-      <div className="task-family-filter__options">
-        {options.map((family) => {
-          const checked = selectedFamily === family;
-          return (
-            <label key={family} className={`task-family-chip ${checked ? 'checked' : ''}`}>
-              <input
-                type="radio"
-                name="task-family-single"
-                checked={checked}
-                onChange={() => onSelectFamily(family)}
-              />
-              <span>{family}</span>
-            </label>
-          );
-        })}
+      <span className="task-family-filter__label">タスクを選択</span>
+      <div className="task-family-filter__hybrid">
+        <div className="task-family-segments" role="radiogroup" aria-label="表示タスク選択">
+          {segmentOptions.map((family) => {
+            const checked = selectedFamily === family;
+            return (
+              <button
+                key={family}
+                type="button"
+                className={`task-family-segment ${checked ? 'active' : ''}`}
+                onClick={() => onSelectFamily(family)}
+                aria-pressed={checked}
+              >
+                {family}
+              </button>
+            );
+          })}
+        </div>
       </div>
-      <span className="task-family-filter__label">
-        KPI・グラフは選択中のタスクで集計しています（{selectedFamily || '-'}）
-      </span>
-      <span className="task-family-filter__label">
-        KPI連動: {quickFilterLabel(actionFilter)}
-        {(isFilterPending || dashboardPending) && '（反映中...）'}
-        {actionFilter !== 'none' && (
-          <>
-            {' '}
-            <button type="button" onClick={onClearActionFilter}>解除</button>
-          </>
-        )}
-      </span>
-      <span className="task-family-filter__label">
-        到来済みタスクが0件の日は、全タスク基準に自動フォールバックして表示します。
-      </span>
+      {(isFilterPending || dashboardPending || actionFilter !== 'none') && (
+        <span className="task-family-filter__label">
+          {(isFilterPending || dashboardPending) && 'フィルター反映中...'}
+          {actionFilter !== 'none' && (
+            <>
+              {(isFilterPending || dashboardPending) ? ' ' : ''}
+              <button type="button" onClick={onClearActionFilter}>解除</button>
+            </>
+          )}
+        </span>
+      )}
     </div>
   );
 });
@@ -1061,6 +1129,7 @@ type DashboardChartsPanelProps = {
   sortedFarmers: FarmerRow[];
   selectedFarmer: FarmerRow | null;
   selectedDetail: FarmerDetail | null;
+  linkedTasks: DashboardTask[];
   onSelectFarmer: (id: string | null) => void;
   onSort: (key: SortKey) => void;
 };
@@ -1071,20 +1140,57 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
   sortedFarmers,
   selectedFarmer,
   selectedDetail,
+  linkedTasks,
   onSelectFarmer,
   onSort,
 }: DashboardChartsPanelProps) {
   const [chartMonthOffset, setChartMonthOffset] = useState(0);
+  const [dailyChartMode, setDailyChartMode] = useState<'scheduled' | 'completed'>('scheduled');
+
+  const completedDailyBars = useMemo(() => {
+    const byDay = new Map<string, Map<string, number>>();
+    const farmSet = new Set<string>();
+    for (const t of linkedTasks) {
+      const dayKey = String(t.executionDay || '').trim();
+      if (!dayKey) continue;
+      const farm = t.farmName || '不明';
+      farmSet.add(farm);
+      if (!byDay.has(dayKey)) byDay.set(dayKey, new Map());
+      const m = byDay.get(dayKey)!;
+      m.set(farm, (m.get(farm) || 0) + 1);
+    }
+    const farmNames = Array.from(farmSet).sort((a, b) => a.localeCompare(b, 'ja'));
+    const dayKeys = Array.from(byDay.keys()).sort();
+    const bars: DailyFarmBar[] = dayKeys.map((dayKey) => {
+      const dt = new Date(`${dayKey}T00:00:00+09:00`);
+      const label = Number.isFinite(dt.getTime())
+        ? dt.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })
+        : dayKey;
+      const row: DailyFarmBar = { date: label, _dateKey: dayKey };
+      farmNames.forEach((farm) => {
+        row[farm] = byDay.get(dayKey)?.get(farm) || 0;
+      });
+      return row;
+    });
+    return { bars, farmNames };
+  }, [linkedTasks]);
+
+  const activeDailyBars = dailyChartMode === 'scheduled'
+    ? (dashboard.daily_farm_bars ?? [])
+    : completedDailyBars.bars;
+  const activeDailyFarmNames = dailyChartMode === 'scheduled'
+    ? (dashboard.daily_farm_names ?? [])
+    : completedDailyBars.farmNames;
 
   // Filter daily_farm_bars to the selected month window
   const chartBarsFiltered = useMemo(() => {
-    const bars = dashboard.daily_farm_bars ?? [];
+    const bars = activeDailyBars;
     if (bars.length === 0) return bars;
     const now = new Date();
     const baseMonth = new Date(now.getFullYear(), now.getMonth() + chartMonthOffset, 1);
     const prefix = `${baseMonth.getFullYear()}-${String(baseMonth.getMonth() + 1).padStart(2, '0')}`;
     return bars.filter((b) => typeof b._dateKey === 'string' && b._dateKey.startsWith(prefix));
-  }, [dashboard.daily_farm_bars, chartMonthOffset]);
+  }, [activeDailyBars, chartMonthOffset]);
 
   const chartMonthLabel = useMemo(() => {
     const now = new Date();
@@ -1128,6 +1234,7 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
                       <th>#</th>
                       <th><button onClick={() => onSort('name')}>農業者名</button></th>
                       <th><button onClick={() => onSort('field_count')}>圃場数</button></th>
+                      <th>未登録圃場</th>
                       <th><button onClick={() => onSort('due_task_count')}>タスク</button></th>
                       <th><button onClick={() => onSort('overdue_count')}>遅延</button></th>
                       <th><button onClick={() => onSort('delay_rate')}>遅延率</button></th>
@@ -1136,16 +1243,21 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
                     </tr>
                   </thead>
                   <tbody>
-                    {sortedFarmers.map((f, idx) => {
+                    {(() => {
+                      let rank = 0;
+                      return sortedFarmers.map((f) => {
+                        const isUnranked = Boolean(f.is_unranked);
+                        if (!isUnranked) rank += 1;
                       const trend = trendLabel(f.trend_direction);
                       return (
-                        <tr key={f.id} onClick={() => onSelectFarmer(f.id)}>
-                          <td>{idx + 1}</td>
+                        <tr key={f.id} onClick={() => (!isUnranked ? onSelectFarmer(f.id) : undefined)}>
+                          <td>{isUnranked ? '-' : rank}</td>
                           <td>
                             <span className={`status-dot ${f.delay_status}`} />
                             {f.name}
                           </td>
                           <td>{f.field_count}</td>
+                          <td>{typeof f.no_task_field_count === 'number' ? f.no_task_field_count : '-'}</td>
                           <td>{f.due_task_count}</td>
                           <td className="danger">{f.overdue_count}</td>
                           <td><span className={`badge ${f.delay_status}`}>{f.delay_rate}%</span></td>
@@ -1153,7 +1265,8 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
                           <td className={trend.className}>{trend.symbol} {trend.text}</td>
                         </tr>
                       );
-                    })}
+                      });
+                    })()}
                   </tbody>
                 </table>
               </div>
@@ -1244,9 +1357,27 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
 
       <section className="task-progress-layer4 card chart-card">
         <div className="chart-month-nav">
-          <button type="button" onClick={() => setChartMonthOffset((v) => v - 1)}>&lt; 前月</button>
-          <h3>日別タスク数（農場別） — {chartMonthLabel}</h3>
-          <button type="button" onClick={() => setChartMonthOffset((v) => v + 1)}>翌月 &gt;</button>
+          <div className="chart-mode-toggle" role="group" aria-label="日別集計モード">
+            <button
+              type="button"
+              className={dailyChartMode === 'scheduled' ? 'active' : ''}
+              onClick={() => setDailyChartMode('scheduled')}
+            >
+              予定日ベース
+            </button>
+            <button
+              type="button"
+              className={dailyChartMode === 'completed' ? 'active' : ''}
+              onClick={() => setDailyChartMode('completed')}
+            >
+              完了日ベース
+            </button>
+          </div>
+          <h3>{dailyChartMode === 'scheduled' ? '日別タスク数（農場別）' : '日別完了タスク数（農場別）'} — {chartMonthLabel}</h3>
+          <div className="chart-month-nav-actions">
+            <button type="button" onClick={() => setChartMonthOffset((v) => v - 1)}>&lt; 前月</button>
+            <button type="button" onClick={() => setChartMonthOffset((v) => v + 1)}>翌月 &gt;</button>
+          </div>
         </div>
         <div className="chart-wrap trend">
           <ResponsiveContainer width="100%" height="100%">
@@ -1255,10 +1386,10 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
               <XAxis dataKey="date" stroke="#94a3b8" interval={Math.max(0, Math.floor((chartBarsFiltered.length - 1) / 8))} />
               <YAxis stroke="#94a3b8" allowDecimals={false} />
               <Tooltip content={<DailyFarmTooltip />} />
-              {(dashboard.daily_farm_names ?? []).length <= 12 && (
+              {activeDailyFarmNames.length <= 12 && (
                 <Legend wrapperStyle={{ fontSize: '0.75rem' }} />
               )}
-              {(dashboard.daily_farm_names ?? []).map((name, i) => (
+              {activeDailyFarmNames.map((name, i) => (
                 <Bar key={name} dataKey={name} stackId="farm" fill={FARM_BAR_COLORS[i % FARM_BAR_COLORS.length]} />
               ))}
             </BarChart>
@@ -1271,7 +1402,6 @@ const DashboardChartsPanel = memo(function DashboardChartsPanel({
 
 export function TaskProgressDashboardPage() {
   const { auth } = useAuth();
-  const { submittedFarms } = useFarms();
   const [query, setQuery] = useState('');
   const [selectedFarmerId, setSelectedFarmerId] = useState<string | null>(null);
   const [actionFilter, setActionFilter] = useState<ActionFilterKey>('none');
@@ -1287,31 +1417,128 @@ export function TaskProgressDashboardPage() {
   const [snapshotTasks, setSnapshotTasks] = useState<SnapshotTask[]>([]);
   const [snapshotFieldsLoaded, setSnapshotFieldsLoaded] = useState(false);
   const [snapshotFieldsLoading, setSnapshotFieldsLoading] = useState(false);
+  const [latestFieldCount, setLatestFieldCount] = useState<number | null>(null);
+  const [fieldDeltaModalOpen, setFieldDeltaModalOpen] = useState(false);
+  const [fieldDeltaRows, setFieldDeltaRows] = useState<FieldDeltaRow[]>([]);
+  const [fieldDeltaLoading, setFieldDeltaLoading] = useState(false);
+  const [fieldDeltaErr, setFieldDeltaErr] = useState<string | null>(null);
+  const [fieldDeltaComparedDate, setFieldDeltaComparedDate] = useState<string>('');
   const [tasksHydrating, setTasksHydrating] = useState(false);
   const [snapshotTasksLoaded, setSnapshotTasksLoaded] = useState(false);
   const [visibleFieldRows, setVisibleFieldRows] = useState(INITIAL_FIELD_ROWS);
   const [visibleTaskRows, setVisibleTaskRows] = useState(INITIAL_TASK_ROWS);
+  const [fieldTableQuery, setFieldTableQuery] = useState('');
+  const [taskTableQuery, setTaskTableQuery] = useState('');
+  const [taskStatusFilter, setTaskStatusFilter] = useState('all');
+  const [taskTypeFilter, setTaskTypeFilter] = useState('all');
+  const [fieldSortKey, setFieldSortKey] = useState<FieldTableSortKey>('farm_name');
+  const [fieldSortDir, setFieldSortDir] = useState<SortDir>('asc');
+  const [taskSortKey, setTaskSortKey] = useState<TaskTableSortKey>('planned_date');
+  const [taskSortDir, setTaskSortDir] = useState<SortDir>('asc');
+  const [showNoTaskFieldsOnly, setShowNoTaskFieldsOnly] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
   const [manualUpdateLoading, setManualUpdateLoading] = useState(false);
   const [manualUpdateMsg, setManualUpdateMsg] = useState<string | null>(null);
   const [snapshotLoadingElapsedSec, setSnapshotLoadingElapsedSec] = useState(0);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchActiveIndex, setSearchActiveIndex] = useState(-1);
   const [loadingSteps, setLoadingSteps] = useState<Record<string, 'pending' | 'loading' | 'done' | 'cached'>>({});
   const [sprayCategoryMap, setSprayCategoryMap] = useState<Record<string, string>>({});
   const sprayCategoryMapRef = useRef<Record<string, string>>({});
   const [sprayMapReady, setSprayMapReady] = useState(false);
   const [isFilterPending, startFilterTransition] = useTransition();
-  const [dashboardPending, setDashboardPending] = useState(false);
+  const [workerPending, setWorkerPending] = useState(false);
+  const [workerDashboard, setWorkerDashboard] = useState<DashboardBundle | null>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const workerReqIdRef = useRef(0);
+  const workerReqKeyRef = useRef<string>('');
+  const workerReqTasksLenRef = useRef(0);
+  const loadingOverlayStartedAtRef = useRef<number | null>(null);
   const [dashboardState, setDashboardState] = useState<DashboardBundle>(emptyDashboardBundle(getJstDayKey(new Date())));
+  const dashboardStateRef = useRef(dashboardState);
+  dashboardStateRef.current = dashboardState;
   const didPickInitialSnapshotDate = useRef(false);
-  const selectedFamilyRef = useRef(selectedFamily);
-  selectedFamilyRef.current = selectedFamily;
-  const actionFilterRef = useRef(actionFilter);
-  actionFilterRef.current = actionFilter;
+  const snapshotFieldTableRef = useRef<HTMLElement | null>(null);
+  const searchBoxRef = useRef<HTMLDivElement | null>(null);
+
+  const fetchSnapshotMeta = useCallback(async (targetDate: string): Promise<any> => {
+    const metaKey = `${targetDate}:meta`;
+    const now = Date.now();
+    const cached = snapshotPageCache.get(metaKey);
+    const ss = !cached || cached.expiresAt <= now ? readSessionCache<any>(metaKey) : null;
+    const active = (cached && cached.expiresAt > now) ? cached : ss;
+    if (active) return active.data;
+
+    const res = await fetch(
+      withApiBase(`/hfr-snapshots?snapshot_date=${encodeURIComponent(targetDate)}&include_fields=false&include_tasks=false`),
+    );
+    const json = await res.json();
+    if (!res.ok || json?.ok === false) {
+      const reason = json?.detail?.reason || json?.reason || `HTTP ${res.status}`;
+      throw new Error(`スナップショット取得失敗: ${reason}`);
+    }
+    const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
+    snapshotPageCache.set(metaKey, { data: json, expiresAt });
+    writeSessionCache(metaKey, json, expiresAt);
+    return json;
+  }, []);
+
+  const fetchSnapshotFieldsForDate = useCallback(async (targetDate: string): Promise<SnapshotField[]> => {
+    const key = `${targetDate}:fields:${SNAPSHOT_FIELD_LIMIT}`;
+    const now = Date.now();
+    const cached = snapshotPageCache.get(key);
+    const ss = !cached || cached.expiresAt <= now ? readSessionCache<any>(key) : null;
+    const active = (cached && cached.expiresAt > now) ? cached : ss;
+    if (active?.data?.fields && Array.isArray(active.data.fields)) {
+      return active.data.fields as SnapshotField[];
+    }
+    const res = await fetch(
+      withApiBase(
+        `/hfr-snapshots?snapshot_date=${encodeURIComponent(targetDate)}`
+        + `&include_fields=true&include_tasks=false&field_limit=${SNAPSHOT_FIELD_LIMIT}&limit=${SNAPSHOT_FIELD_LIMIT}`,
+      ),
+    );
+    const json = await res.json();
+    if (!res.ok || json?.ok === false) {
+      const reason = json?.detail?.reason || json?.reason || `HTTP ${res.status}`;
+      throw new Error(`圃場一覧取得失敗: ${reason}`);
+    }
+    const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
+    snapshotPageCache.set(key, { data: json, expiresAt });
+    writeSessionCache(key, json, expiresAt);
+    return (json?.fields ?? []) as SnapshotField[];
+  }, []);
 
   const applySnapshotDate = useCallback((nextDate: string) => {
     const normalized = String(nextDate || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return;
     setSnapshotDate((prev) => (prev === normalized ? prev : normalized));
+  }, []);
+
+  useEffect(() => {
+    if (typeof Worker === 'undefined') return;
+    const worker = new Worker(new URL('../workers/dashboardBundleWorker.ts', import.meta.url), { type: 'module' });
+    workerRef.current = worker;
+    worker.onmessage = (event: MessageEvent<{ id: number; bundle?: DashboardBundle }>) => {
+      const { id, bundle } = event.data || {};
+      if (id !== workerReqIdRef.current) return;
+      if (bundle) {
+        setWorkerDashboard(bundle);
+        const key = workerReqKeyRef.current;
+        if (key) {
+          if (bundleCache.size >= BUNDLE_CACHE_MAX) {
+            const firstKey = bundleCache.keys().next().value;
+            if (firstKey !== undefined) bundleCache.delete(firstKey);
+          }
+          bundleCache.set(key, { tasksLen: workerReqTasksLenRef.current, bundle });
+        }
+      }
+      setWorkerPending(false);
+    };
+    return () => {
+      worker.terminate();
+      workerRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -1353,6 +1580,9 @@ export function TaskProgressDashboardPage() {
           setSnapshotFields([]);
           setSnapshotFieldsLoaded(false);
           setDashboardState({
+            farmer_count: Number(activeSummary?.data?.farmer_count ?? 0),
+            field_count: Number(activeSummary?.data?.field_count ?? 0),
+            total_area_m2: Number(activeSummary?.data?.total_area_m2 ?? 0),
             kpi: activeSummary?.data?.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
             farmers: activeSummary?.data?.farmers ?? [],
             task_types: activeSummary?.data?.task_types ?? [],
@@ -1361,6 +1591,7 @@ export function TaskProgressDashboardPage() {
             daily_farm_bars: activeSummary?.data?.daily_farm_bars ?? [],
             daily_farm_names: activeSummary?.data?.daily_farm_names ?? [],
             farmer_details: activeSummary?.data?.farmer_details ?? {},
+            no_task_farmers: activeSummary?.data?.no_task_farmers ?? [],
             as_of: cachedAsOf,
           });
           snapshotPageCache.set(summaryDefaultKey, { data: activeSummary?.data, expiresAt: now + SNAPSHOT_CLIENT_CACHE_TTL_MS });
@@ -1403,18 +1634,24 @@ export function TaskProgressDashboardPage() {
           if (active) setLoadingSteps((prev) => ({ ...prev, meta: 'done' }));
         }
 
-        const hasRun = Boolean(metaJson?.run?.run_id);
         if (useCachedSummary) {
           summaryJson = activeSummary?.data;
           setLoadingSteps((prev) => ({ ...prev, summary: 'cached' }));
-        } else if (!hasRun) {
+        } else {
+          const empty = emptyDashboardBundle(snapshotDate);
           summaryJson = {
-            kpi: emptyDashboardBundle(snapshotDate).kpi,
+            farmer_count: Number(metaJson?.farmer_count ?? 0),
+            field_count: Number(metaJson?.field_count ?? 0),
+            total_area_m2: Number(metaJson?.total_area_m2 ?? 0),
+            kpi: empty.kpi,
             farmers: [],
             task_types: [],
             distribution: [],
             trend: [],
+            daily_farm_bars: [],
+            daily_farm_names: [],
             farmer_details: {},
+            no_task_farmers: Array.isArray(metaJson?.no_task_farmers) ? metaJson.no_task_farmers : [],
             as_of: snapshotDate,
           };
           setLoadingSteps((prev) => ({ ...prev, summary: 'done' }));
@@ -1464,57 +1701,24 @@ export function TaskProgressDashboardPage() {
           setSnapshotTasksLoaded(false);
         }
         setDashboardState((prev) => ({
-          kpi: summaryJson?.kpi ?? prev.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
-          farmers: summaryJson?.farmers ?? prev.farmers ?? [],
-          task_types: summaryJson?.task_types ?? prev.task_types ?? [],
-          distribution: summaryJson?.distribution ?? prev.distribution ?? [],
-          trend: summaryJson?.trend ?? prev.trend ?? [],
-          daily_farm_bars: summaryJson?.daily_farm_bars ?? prev.daily_farm_bars ?? [],
-          daily_farm_names: summaryJson?.daily_farm_names ?? prev.daily_farm_names ?? [],
-          farmer_details: summaryJson?.farmer_details ?? prev.farmer_details ?? {},
-          as_of: summaryJson?.as_of ?? prev.as_of ?? snapshotDate,
+          farmer_count: Number(summaryJson?.farmer_count ?? prev.farmer_count ?? 0),
+          field_count: Number(summaryJson?.field_count ?? prev.field_count ?? 0),
+          total_area_m2: Number(summaryJson?.total_area_m2 ?? prev.total_area_m2 ?? 0),
+          kpi: summaryJson?.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
+          farmers: summaryJson?.farmers ?? [],
+          task_types: summaryJson?.task_types ?? [],
+          distribution: summaryJson?.distribution ?? [],
+          trend: summaryJson?.trend ?? [],
+          daily_farm_bars: summaryJson?.daily_farm_bars ?? [],
+          daily_farm_names: summaryJson?.daily_farm_names ?? [],
+          farmer_details: summaryJson?.farmer_details ?? {},
+          no_task_farmers: summaryJson?.no_task_farmers ?? prev.no_task_farmers ?? [],
+          as_of: summaryJson?.as_of ?? snapshotDate,
         }));
         setAvailableDates(dates);
         if (summaryJson) {
           const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
           snapshotPageCache.set(summaryDefaultKey, { data: summaryJson, expiresAt });
-        }
-
-        if (!useCachedSummary && hasRun) {
-          setLoadingSteps((prev) => ({ ...prev, summary: 'loading' }));
-          void (async () => {
-            try {
-              const summaryRes = await fetch(
-                withApiBase(`/hfr-snapshots/summary?snapshot_date=${encodeURIComponent(snapshotDate)}`),
-                { signal: controller.signal },
-              );
-              const json = await summaryRes.json();
-              if (!active || !summaryRes.ok || json?.ok === false) return;
-              const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
-              snapshotPageCache.set(summaryKey, { data: json, expiresAt });
-              snapshotPageCache.set(summaryDefaultKey, { data: json, expiresAt });
-              writeSessionCache(summaryKey, json, expiresAt);
-              // Only overwrite dashboardState if user hasn't changed filters
-              const stillDefault = selectedFamilyRef.current === ALL_FAMILY_OPTION && actionFilterRef.current === 'none';
-              if (stillDefault) {
-                setDashboardState({
-                  kpi: json?.kpi ?? emptyDashboardBundle(snapshotDate).kpi,
-                  farmers: json?.farmers ?? [],
-                  task_types: json?.task_types ?? [],
-                  distribution: json?.distribution ?? [],
-                  trend: json?.trend ?? [],
-                  daily_farm_bars: json?.daily_farm_bars ?? [],
-                  daily_farm_names: json?.daily_farm_names ?? [],
-                  farmer_details: json?.farmer_details ?? {},
-                  as_of: json?.as_of ?? snapshotDate,
-                });
-              }
-              setLoadingSteps((prev) => ({ ...prev, summary: 'done' }));
-            } catch {
-              // 背景ロード失敗は画面全体エラーにしない
-              if (active) setLoadingSteps((prev) => ({ ...prev, summary: 'done' }));
-            }
-          })();
         }
 
         if (useCachedSnap) {
@@ -1526,22 +1730,38 @@ export function TaskProgressDashboardPage() {
           setLoadingSteps((prev) => ({ ...prev, tasks: 'loading' }));
           void (async () => {
             try {
-              const taskRes = await fetch(
+              let taskRes = await fetch(
                 withApiBase(
-                  `/hfr-snapshots?snapshot_date=${encodeURIComponent(snapshotDate)}`
-                  + `&include_fields=false&include_tasks=true&task_limit=${SNAPSHOT_TASK_LIMIT}&limit=${SNAPSHOT_TASK_LIMIT}`,
+                  `/hfr-snapshots/tasks-lite?snapshot_date=${encodeURIComponent(snapshotDate)}`
+                  + `&task_limit=${SNAPSHOT_TASK_LIMIT}&limit=${SNAPSHOT_TASK_LIMIT}`,
                 ),
                 { signal: controller.signal },
               );
-              const taskJson = await taskRes.json();
-              if (!active || !taskRes.ok || taskJson?.ok === false) return;
+              let taskJson = await taskRes.json();
+              let tasks = Array.isArray(taskJson?.tasks) ? taskJson.tasks : [];
+              let valid = tasks.length === 0 || hasRequiredSnapshotTaskKeys(tasks[0]);
+
+              if ((!taskRes.ok || taskJson?.ok === false || !valid) && active) {
+                // Safety fallback: keep dashboard complete even if lite endpoint/schema mismatches.
+                taskRes = await fetch(
+                  withApiBase(
+                    `/hfr-snapshots?snapshot_date=${encodeURIComponent(snapshotDate)}`
+                    + `&include_fields=false&include_tasks=true&task_limit=${SNAPSHOT_TASK_LIMIT}&limit=${SNAPSHOT_TASK_LIMIT}`,
+                  ),
+                  { signal: controller.signal },
+                );
+                taskJson = await taskRes.json();
+                tasks = Array.isArray(taskJson?.tasks) ? taskJson.tasks : [];
+                valid = tasks.length === 0 || hasRequiredSnapshotTaskKeys(tasks[0]);
+              }
+              if (!active || !taskRes.ok || taskJson?.ok === false || !valid) return;
               const expiresAt = Date.now() + SNAPSHOT_CLIENT_CACHE_TTL_MS;
               snapshotPageCache.set(snapKey, {
                 data: taskJson,
                 expiresAt,
               });
               writeSessionCache(snapKey, taskJson, expiresAt);
-              setSnapshotTasks((taskJson.tasks ?? []) as SnapshotTask[]);
+              setSnapshotTasks(tasks as SnapshotTask[]);
               setSnapshotTasksLoaded(true);
               setLoadingSteps((prev) => ({ ...prev, tasks: 'done' }));
             } catch {
@@ -1577,7 +1797,7 @@ export function TaskProgressDashboardPage() {
   useEffect(() => {
     setVisibleFieldRows(INITIAL_FIELD_ROWS);
     setVisibleTaskRows(INITIAL_TASK_ROWS);
-  }, [snapshotDate, snapshotFields.length, snapshotTasks.length]);
+  }, [snapshotDate, snapshotFields.length, snapshotTasks.length, fieldTableQuery, taskTableQuery, taskStatusFilter, taskTypeFilter]);
 
   useEffect(() => {
     let active = true;
@@ -1655,18 +1875,23 @@ export function TaskProgressDashboardPage() {
     };
   }, [auth?.login?.login_token, auth?.api_token, snapshotTasks]);
 
+  const loadingOverlayActive = snapshotLoading || tasksHydrating || !sprayMapReady;
   useEffect(() => {
-    if (!snapshotLoading) {
+    if (!loadingOverlayActive) {
+      loadingOverlayStartedAtRef.current = null;
       setSnapshotLoadingElapsedSec(0);
       return;
     }
-    const startedAt = Date.now();
+    if (!loadingOverlayStartedAtRef.current) {
+      loadingOverlayStartedAtRef.current = Date.now();
+    }
     const timer = window.setInterval(() => {
+      const startedAt = loadingOverlayStartedAtRef.current || Date.now();
       const elapsed = Math.floor((Date.now() - startedAt) / 1000);
       setSnapshotLoadingElapsedSec(elapsed);
     }, 500);
     return () => window.clearInterval(timer);
-  }, [snapshotLoading]);
+  }, [loadingOverlayActive]);
 
   // Only compute allTasks once spray master is ready (avoids double-processing 50k tasks)
   const allTasks = useMemo(
@@ -1674,14 +1899,6 @@ export function TaskProgressDashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [snapshotTasks, sprayMapReady],
   );
-  const tasksByFamily = useMemo(() => {
-    const map = new Map<string, DashboardTask[]>();
-    for (const task of allTasks) {
-      if (!map.has(task.typeFamily)) map.set(task.typeFamily, []);
-      map.get(task.typeFamily)?.push(task);
-    }
-    return map;
-  }, [allTasks]);
   const familyOptions = useMemo(() => {
     const set = new Set<string>();
     allTasks.forEach((task) => set.add(task.typeFamily));
@@ -1708,44 +1925,171 @@ export function TaskProgressDashboardPage() {
     });
   }, [allTasks, dashboardState.task_types]);
 
-  // Client-side dashboard recomputation on filter change — no API call needed
-  useEffect(() => {
-    if (snapshotLoading) return;
-    // allTasks not ready yet (spray map loading)
-    if (allTasks.length === 0 && !sprayMapReady) return;
+  const taskFilterIndex = useMemo(() => {
+    const today = getJstDayKey(new Date());
+    const in7days = addDaysToKey(today, 7);
+    const all = allTasks;
+    const allByAction: Record<Exclude<ActionFilterKey, 'none'>, DashboardTask[]> = {
+      overdue: [],
+      due_today: [],
+      upcoming_3days: [],
+      incomplete: [],
+      future: [],
+    };
+    const byFamily = new Map<string, DashboardTask[]>();
+    const byFamilyAction = new Map<string, Record<Exclude<ActionFilterKey, 'none'>, DashboardTask[]>>();
+
+    const ensureFamily = (family: string) => {
+      if (!byFamily.has(family)) byFamily.set(family, []);
+      if (!byFamilyAction.has(family)) {
+        byFamilyAction.set(family, {
+          overdue: [],
+          due_today: [],
+          upcoming_3days: [],
+          incomplete: [],
+          future: [],
+        });
+      }
+    };
+
+    for (const task of all) {
+      const planned = getScheduledDay(task);
+      const done = task.completed;
+      const family = task.typeFamily;
+      ensureFamily(family);
+      byFamily.get(family)!.push(task);
+      const famAction = byFamilyAction.get(family)!;
+
+      if (!done) {
+        allByAction.incomplete.push(task);
+        famAction.incomplete.push(task);
+      }
+      if (planned && planned < today && !done) {
+        allByAction.overdue.push(task);
+        famAction.overdue.push(task);
+      }
+      if (planned && planned === today && !done) {
+        allByAction.due_today.push(task);
+        famAction.due_today.push(task);
+      }
+      if (planned && planned > today && planned <= in7days && !done) {
+        allByAction.upcoming_3days.push(task);
+        famAction.upcoming_3days.push(task);
+      }
+      if (planned && planned > today && !done) {
+        allByAction.future.push(task);
+        famAction.future.push(task);
+      }
+    }
+    return { all, allByAction, byFamily, byFamilyAction };
+  }, [allTasks]);
+
+  // Shared filtered tasks — computed once, used by both dashboard bundle and linkedTasks
+  const filteredTasksForDashboard = useMemo((): DashboardTask[] => {
+    if (snapshotLoading || (allTasks.length === 0 && !sprayMapReady)) return [];
+    const isDefault = selectedFamily === ALL_FAMILY_OPTION && actionFilter === 'none';
+    if (isDefault) return taskFilterIndex.all;
+
+    const selectedIsValid = selectedFamily === ALL_FAMILY_OPTION || familyOptions.includes(selectedFamily);
+    const base =
+      selectedFamily === ALL_FAMILY_OPTION
+        ? taskFilterIndex.all
+        : (taskFilterIndex.byFamily.get(selectedFamily) ?? []);
+    const filtered =
+      actionFilter === 'none'
+        ? base
+        : (selectedFamily === ALL_FAMILY_OPTION
+          ? taskFilterIndex.allByAction[actionFilter]
+          : (taskFilterIndex.byFamilyAction.get(selectedFamily)?.[actionFilter] ?? []));
+    if (filtered.length > 0 || actionFilter !== 'none') return filtered;
+
+    // 選択値が古い/無効な場合だけ全タスクへフォールバック
+    if (actionFilter === 'none' && !selectedIsValid) {
+      return taskFilterIndex.all;
+    }
+    return filtered;
+  }, [snapshotLoading, allTasks.length, sprayMapReady, selectedFamily, actionFilter, familyOptions, taskFilterIndex]);
+
+  const useWorkerBundle = filteredTasksForDashboard.length >= WORKER_BUNDLE_THRESHOLD;
+
+  // Client-side dashboard recomputation — useMemo for instant response
+  const computedDashboard = useMemo((): DashboardBundle | null => {
+    if (useWorkerBundle) return null;
+    if (snapshotLoading || (allTasks.length === 0 && !sprayMapReady)) return null;
 
     const isDefaultFilter = selectedFamily === ALL_FAMILY_OPTION && actionFilter === 'none';
     if (isDefaultFilter) {
-      // Try restoring server summary from cache first (more accurate trend data)
       const summaryDefaultKey = summaryFilterCacheKey(snapshotDate, ALL_FAMILY_OPTION, 'none');
       const cached = snapshotPageCache.get(summaryDefaultKey);
       if (cached && cached.expiresAt > Date.now()) {
         const serverData = cached.data as DashboardBundle;
-        // Server data may lack client-computed chart fields — supplement them
         if (!serverData.daily_farm_bars || serverData.daily_farm_bars.length === 0) {
           const supplement = computeDashboardBundle(allTasks, snapshotDate, serverData.as_of || snapshotDate);
-          setDashboardState({ ...serverData, daily_farm_bars: supplement.daily_farm_bars, daily_farm_names: supplement.daily_farm_names });
-        } else {
-          setDashboardState(serverData);
+          return { ...serverData, daily_farm_bars: supplement.daily_farm_bars, daily_farm_names: supplement.daily_farm_names };
         }
-      } else {
-        // Cache miss — recompute from all client tasks
-        const bundle = computeDashboardBundle(allTasks, snapshotDate, dashboardState.as_of || snapshotDate);
-        setDashboardState(bundle);
+        return serverData;
       }
-      setDashboardPending(false);
-      return;
     }
 
-    const today = getJstDayKey(new Date());
-    const filtered = allTasks
-      .filter((task) => matchesFamilySelection(task, selectedFamily))
-      .filter((task) => matchesActionFilter(task, actionFilter, today));
-    const bundle = computeDashboardBundle(filtered, snapshotDate, dashboardState.as_of || snapshotDate);
-    setDashboardState(bundle);
-    setDashboardPending(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshotDate, selectedFamily, actionFilter, snapshotLoading, allTasks, sprayMapReady]);
+    // Check bundle cache for instant filter switching
+    const cacheKey = `${snapshotDate}:${selectedFamily}:${actionFilter}`;
+    const hit = bundleCache.get(cacheKey);
+    if (hit && hit.tasksLen === allTasks.length) {
+      return hit.bundle;
+    }
+
+    const asOf = dashboardStateRef.current.as_of || snapshotDate;
+    const bundle = computeDashboardBundle(filteredTasksForDashboard, snapshotDate, asOf);
+
+    // Store in cache (evict oldest if over limit)
+    if (bundleCache.size >= BUNDLE_CACHE_MAX) {
+      const firstKey = bundleCache.keys().next().value;
+      if (firstKey !== undefined) bundleCache.delete(firstKey);
+    }
+    bundleCache.set(cacheKey, { tasksLen: allTasks.length, bundle });
+    return bundle;
+  }, [snapshotDate, selectedFamily, actionFilter, snapshotLoading, allTasks, sprayMapReady, filteredTasksForDashboard, useWorkerBundle]);
+
+  useEffect(() => {
+    if (!useWorkerBundle) {
+      setWorkerPending(false);
+      setWorkerDashboard(null);
+      return;
+    }
+    if (snapshotLoading || (allTasks.length === 0 && !sprayMapReady)) {
+      setWorkerPending(false);
+      setWorkerDashboard(null);
+      return;
+    }
+    const cacheKey = `${snapshotDate}:${selectedFamily}:${actionFilter}`;
+    const hit = bundleCache.get(cacheKey);
+    if (hit && hit.tasksLen === allTasks.length) {
+      setWorkerDashboard(hit.bundle);
+      setWorkerPending(false);
+      return;
+    }
+    if (!workerRef.current) return;
+    const reqId = workerReqIdRef.current + 1;
+    workerReqIdRef.current = reqId;
+    workerReqKeyRef.current = cacheKey;
+    workerReqTasksLenRef.current = allTasks.length;
+    setWorkerPending(true);
+    workerRef.current.postMessage({
+      id: reqId,
+      tasks: filteredTasksForDashboard,
+      snapshotDate,
+      asOf: dashboardStateRef.current.as_of || snapshotDate,
+    });
+  }, [
+    useWorkerBundle,
+    snapshotLoading,
+    allTasks.length,
+    sprayMapReady,
+    filteredTasksForDashboard,
+    snapshotDate,
+    selectedFamily,
+    actionFilter,
+  ]);
 
   useEffect(() => {
     if (familyOptions.length === 0) return;
@@ -1759,23 +2103,10 @@ export function TaskProgressDashboardPage() {
     setSelectedFamily(familyOptions[0]);
   }, [familyOptions, selectedFamily]);
 
-  const linkedTasks = useMemo(() => {
-    const today = getJstDayKey(new Date());
-    const fromFamilies: DashboardTask[] = allTasks.filter((task) => matchesFamilySelection(task, selectedFamily));
-    const filtered = fromFamilies.filter((task) => matchesActionFilter(task, actionFilter, today));
-    if (filtered.length > 0) return filtered;
-    // 選択値が古い/無効な場合だけ全タスクへフォールバックする。
-    // ユーザーが有効な選択肢を選んで0件になった時は0件をそのまま表示する。
-    const selectedIsValid =
-      selectedFamily === ALL_FAMILY_OPTION ||
-      familyOptions.includes(selectedFamily);
-    if (actionFilter === 'none' && !selectedIsValid) {
-      return allTasks.filter((task) => matchesActionFilter(task, actionFilter, today));
-    }
-    return filtered;
-  }, [tasksByFamily, selectedFamily, actionFilter, allTasks, familyOptions]);
+  // linkedTasks = filteredTasksForDashboard (already computed, no re-filtering needed)
+  const linkedTasks = filteredTasksForDashboard;
 
-  const dashboard = dashboardState;
+  const dashboard = { ...dashboardState, ...(workerDashboard ?? computedDashboard ?? {}) } as DashboardBundle;
   const chartTaskTypes = useMemo(() => {
     const today = getJstDayKey(new Date());
     const grouped = new Map<string, { due: number; completed: number; overdue: number; pending: number }>();
@@ -1822,11 +2153,136 @@ export function TaskProgressDashboardPage() {
       }));
   }, [linkedTasks]);
 
+  const farmerSearchIndex = useMemo(() => {
+    const map = new Map<string, string[]>();
+    const add = (id: string, value: string) => {
+      const key = String(id || '').trim();
+      const v = String(value || '').trim();
+      if (!key || !v) return;
+      if (!map.has(key)) map.set(key, []);
+      const arr = map.get(key)!;
+      if (!arr.includes(v)) arr.push(v);
+    };
+
+    dashboard.farmers.forEach((row) => add(String(row.id || ''), String(row.name || '')));
+    (dashboard.no_task_farmers || []).forEach((row: any) => {
+      add(String(row?.id || ''), String(row?.name || ''));
+    });
+    snapshotTasks.forEach((row) => {
+      const id = String(row.farm_uuid || `name:${row.farm_name || ''}`);
+      add(id, String(row.farm_name || ''));
+      add(id, String(row.user_name || ''));
+    });
+    snapshotFields.forEach((row) => {
+      const id = String(row.farm_uuid || `name:${row.farm_name || ''}`);
+      add(id, String(row.farm_name || ''));
+      add(id, String(row.user_name || ''));
+    });
+
+    return map;
+  }, [dashboard.farmers, dashboard.no_task_farmers, snapshotTasks, snapshotFields]);
+
+  const searchOptions = useMemo(() => {
+    const farmSet = new Set<string>();
+    const userSet = new Set<string>();
+    dashboard.farmers.forEach((row) => {
+      const name = String(row.name || '').trim();
+      if (name) farmSet.add(name);
+    });
+    (dashboard.no_task_farmers || []).forEach((row: any) => {
+      const name = String(row?.name || '').trim();
+      if (name) farmSet.add(name);
+    });
+    snapshotTasks.forEach((row) => {
+      const farm = String(row.farm_name || '').trim();
+      const user = String(row.user_name || '').trim();
+      if (farm) farmSet.add(farm);
+      if (user) userSet.add(user);
+    });
+    snapshotFields.forEach((row) => {
+      const farm = String(row.farm_name || '').trim();
+      const user = String(row.user_name || '').trim();
+      if (farm) farmSet.add(farm);
+      if (user) userSet.add(user);
+    });
+    const farms = Array.from(farmSet).sort((a, b) => a.localeCompare(b, 'ja')).map((label) => ({ label, type: '農場' as const }));
+    const users = Array.from(userSet).sort((a, b) => a.localeCompare(b, 'ja')).map((label) => ({ label, type: 'ユーザー' as const }));
+    return [...farms, ...users];
+  }, [dashboard.farmers, dashboard.no_task_farmers, snapshotTasks, snapshotFields]);
+
+  const searchOptionRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const base = q
+      ? searchOptions.filter((opt) => opt.label.toLowerCase().includes(q))
+      : searchOptions;
+    return base.slice(0, 12);
+  }, [searchOptions, query]);
+
   const filteredFarmers = useMemo(() => {
-    const q = query.trim();
+    const q = query.trim().toLowerCase();
     if (!q) return dashboard.farmers;
-    return dashboard.farmers.filter((row) => row.name.includes(q));
-  }, [dashboard.farmers, query]);
+    return dashboard.farmers.filter((row) => {
+      const id = String(row.id || '');
+      const labels = farmerSearchIndex.get(id) || [String(row.name || '')];
+      return labels.some((v) => String(v || '').toLowerCase().includes(q));
+    });
+  }, [dashboard.farmers, query, farmerSearchIndex]);
+
+  const handleSelectSearchOption = useCallback((value: string) => {
+    setQuery(value);
+    setSearchOpen(false);
+    setSearchActiveIndex(-1);
+  }, []);
+
+  const handleSearchKeyDown = useCallback((e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (!searchOpen) {
+      if (e.key === 'ArrowDown' && searchOptionRows.length > 0) {
+        setSearchOpen(true);
+        setSearchActiveIndex(0);
+        e.preventDefault();
+      }
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSearchActiveIndex((prev) => {
+        const next = prev + 1;
+        return next >= searchOptionRows.length ? 0 : next;
+      });
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSearchActiveIndex((prev) => {
+        const next = prev <= 0 ? searchOptionRows.length - 1 : prev - 1;
+        return Math.max(0, next);
+      });
+      return;
+    }
+    if (e.key === 'Enter') {
+      if (searchActiveIndex >= 0 && searchActiveIndex < searchOptionRows.length) {
+        e.preventDefault();
+        handleSelectSearchOption(searchOptionRows[searchActiveIndex].label);
+      }
+      return;
+    }
+    if (e.key === 'Escape') {
+      setSearchOpen(false);
+      setSearchActiveIndex(-1);
+    }
+  }, [searchOpen, searchOptionRows, searchActiveIndex, handleSelectSearchOption]);
+
+  useEffect(() => {
+    const onDocMouseDown = (event: MouseEvent) => {
+      const el = searchBoxRef.current;
+      if (!el) return;
+      if (event.target instanceof Node && el.contains(event.target)) return;
+      setSearchOpen(false);
+      setSearchActiveIndex(-1);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, []);
 
   const sortedFarmers = useMemo(() => {
     const rows = [...filteredFarmers];
@@ -1857,29 +2313,6 @@ export function TaskProgressDashboardPage() {
     [sortedFarmers]
   );
 
-  const fieldStats = useMemo(() => {
-    // From dashboard farmers (always available)
-    const farmerCount = dashboard.farmers.length;
-    const fieldCountFromFarmers = dashboard.farmers.reduce((s, f) => s + f.field_count, 0);
-    // From snapshotFields (available after manual load)
-    // NOTE: Even if zero fields are returned, show 0.0ha instead of "圃場ロード後表示".
-    if (snapshotFieldsLoaded) {
-      const uniqueFields = new Map<string, number>();
-      for (const f of snapshotFields) {
-        if (f.field_uuid && !uniqueFields.has(f.field_uuid)) {
-          uniqueFields.set(f.field_uuid, Number(f.area_m2 ?? 0) || 0);
-        }
-      }
-      const totalAreaM2 = [...uniqueFields.values()].reduce((s, v) => s + v, 0);
-      return {
-        farmerCount,
-        fieldCount: uniqueFields.size || fieldCountFromFarmers,
-        totalAreaHa: totalAreaM2 / 10000,
-      };
-    }
-    return { farmerCount, fieldCount: fieldCountFromFarmers, totalAreaHa: null };
-  }, [dashboard.farmers, snapshotFields, snapshotFieldsLoaded]);
-
   const snapshotTaskByUuid = useMemo(() => {
     const map = new Map<string, SnapshotTask>();
     for (const row of snapshotTasks) {
@@ -1899,24 +2332,139 @@ export function TaskProgressDashboardPage() {
     }
     return map;
   }, [snapshotFields]);
+  const snapshotTaskFieldUuids = useMemo(() => {
+    const set = new Set<string>();
+    for (const row of snapshotTasks) {
+      const key = String(row.field_uuid || '');
+      if (key) set.add(key);
+    }
+    return set;
+  }, [snapshotTasks]);
+
+  const fieldStats = useMemo(() => {
+    const farmerCountFromSummary = Number(dashboard.farmer_count ?? 0);
+    const farmerCountFromTasks = dashboard.farmers.length;
+    const farmerCount = farmerCountFromSummary > 0 ? farmerCountFromSummary : farmerCountFromTasks;
+    const fieldCountFromFarmers = dashboard.farmers.reduce((s, f) => s + f.field_count, 0);
+    const summaryFieldCount = Number(dashboard.field_count ?? 0);
+    const summaryAreaM2 = Number(dashboard.total_area_m2 ?? 0);
+    const taskFieldCount = snapshotTaskFieldUuids.size;
+    const summaryTaskFieldCount = summaryFieldCount > 0 ? Math.max(0, Math.min(summaryFieldCount, taskFieldCount)) : taskFieldCount;
+    const summaryNoTaskFieldCount = summaryFieldCount > 0 ? Math.max(0, summaryFieldCount - summaryTaskFieldCount) : 0;
+
+    if (snapshotFieldsLoaded) {
+      const uniqueFields = new Map<string, number>();
+      const farmerSet = new Set<string>();
+      let fieldsWithTask = 0;
+      let fieldsWithoutTask = 0;
+      for (const f of snapshotFields) {
+        const fuid = String(f.field_uuid || '');
+        if (fuid && !uniqueFields.has(fuid)) {
+          uniqueFields.set(fuid, Number(f.area_m2 ?? 0) || 0);
+          if (snapshotTaskFieldUuids.has(fuid)) fieldsWithTask += 1;
+          else fieldsWithoutTask += 1;
+        }
+        const farmKey = String(f.farm_uuid || f.farm_name || '').trim();
+        if (farmKey) farmerSet.add(farmKey);
+      }
+      const totalAreaM2 = [...uniqueFields.values()].reduce((s, v) => s + v, 0);
+      return {
+        farmerCount: farmerSet.size || farmerCount,
+        fieldCount: uniqueFields.size || fieldCountFromFarmers,
+        totalAreaHa: totalAreaM2 / 10000,
+        fieldsWithTask,
+        fieldsWithoutTask,
+      };
+    }
+
+    if (summaryFieldCount > 0 || summaryAreaM2 > 0) {
+      return {
+        farmerCount,
+        fieldCount: summaryFieldCount || fieldCountFromFarmers,
+        totalAreaHa: summaryAreaM2 / 10000,
+        fieldsWithTask: summaryTaskFieldCount,
+        fieldsWithoutTask: summaryNoTaskFieldCount,
+      };
+    }
+    return {
+      farmerCount,
+      fieldCount: fieldCountFromFarmers,
+      totalAreaHa: null as number | null,
+      fieldsWithTask: summaryTaskFieldCount,
+      fieldsWithoutTask: summaryNoTaskFieldCount,
+    };
+  }, [dashboard.farmers, dashboard.farmer_count, dashboard.field_count, dashboard.total_area_m2, snapshotFields, snapshotFieldsLoaded, snapshotTaskFieldUuids]);
+
+  const noTaskFieldCountByFarmer = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!snapshotFieldsLoaded) return map;
+    for (const row of snapshotFields) {
+      const farmerId = String(row.farm_uuid || `name:${row.farm_name || ''}`);
+      if (!farmerId) continue;
+      const fieldUuid = String(row.field_uuid || '');
+      if (!fieldUuid || snapshotTaskFieldUuids.has(fieldUuid)) continue;
+      map.set(farmerId, (map.get(farmerId) || 0) + 1);
+    }
+    return map;
+  }, [snapshotFieldsLoaded, snapshotFields, snapshotTaskFieldUuids]);
+
+  const rankingFarmers = useMemo(() => {
+    const base = sortedFarmers.map((f) => ({
+      ...f,
+      no_task_field_count: noTaskFieldCountByFarmer.get(String(f.id || '')) || 0,
+      is_unranked: false,
+    }));
+
+    const existing = new Set(base.map((r) => String(r.id || '')));
+    const q = query.trim();
+    const extras: FarmerRow[] = [];
+    const noTaskFarmers = Array.isArray(dashboard.no_task_farmers) ? dashboard.no_task_farmers : [];
+    noTaskFarmers.forEach((meta: any) => {
+      const farmerId = String(meta?.id || '');
+      if (!farmerId) return;
+      if (existing.has(farmerId)) return;
+      const noTaskCount = Number(meta?.no_task_field_count || 0);
+      if (noTaskCount <= 0) return;
+      const name = String(meta?.name || '').trim() || farmerId.replace(/^name:/, '');
+      if (q && !name.includes(q)) return;
+      extras.push({
+        id: farmerId,
+        name,
+        field_count: Number(meta?.field_count || noTaskCount),
+        no_task_field_count: noTaskCount,
+        is_unranked: true,
+        due_task_count: 0,
+        completed_count: 0,
+        overdue_count: 0,
+        due_today_count: 0,
+        upcoming_3days_count: 0,
+        future_task_count: 0,
+        delay_rate: 0,
+        completion_rate: 0,
+        delay_status: 'good',
+        trend_direction: 'stable',
+      });
+    });
+    extras.sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+    return [...base, ...extras];
+  }, [sortedFarmers, noTaskFieldCountByFarmer, query, dashboard.no_task_farmers]);
 
   const canManualUpdate =
     (auth?.email || '').trim().toLowerCase() === 'am@shonai.inc' &&
-    submittedFarms.length > 0 &&
     Boolean(auth?.login?.login_token) &&
     Boolean(auth?.api_token);
 
-  const filteredSnapshotTasksWithMeta = useMemo(() => {
-    const out: Array<SnapshotTask & { _family: string; _subtypeLabel: string; _taskDisplay: string }> = [];
+  const allTaskRows = useMemo(() => {
+    const out: TaskTableRow[] = [];
     for (const t of linkedTasks) {
       const row = snapshotTaskByUuid.get(t.uuid);
       if (!row) continue;
       const family = resolveTaskFamilyFromSnapshot(row, sprayCategoryMap);
       const subtypeInfo = detectSpraySubtype(row, sprayCategoryMap);
-      const occurrence = Number(row.occurrence || 1);
+      const occurrence = Number(t.occurrence || row.occurrence || 1);
       out.push({
         ...row,
-        occurrence: Number(t.occurrence || row.occurrence || 1),
+        occurrence,
         _family: family,
         _subtypeLabel: subtypeInfo.subtype !== '-' ? `${subtypeInfo.subtype} (${subtypeInfo.source})` : '-',
         _taskDisplay: `${family} ${occurrence}回目`,
@@ -1924,9 +2472,28 @@ export function TaskProgressDashboardPage() {
     }
     return out;
   }, [linkedTasks, snapshotTaskByUuid, sprayCategoryMap]);
-  const filteredSnapshotTasks = filteredSnapshotTasksWithMeta as SnapshotTask[];
-  const filteredSnapshotFields = useMemo(() => {
+
+  const sortedSnapshotFields = useMemo(
+    () => [...snapshotFields].sort((a, b) => {
+      const fa = String(a.farm_name || '');
+      const fb = String(b.farm_name || '');
+      if (fa !== fb) return fa.localeCompare(fb, 'ja');
+      const na = String(a.field_name || '');
+      const nb = String(b.field_name || '');
+      if (na !== nb) return na.localeCompare(nb, 'ja');
+      return String(a.season_uuid || '').localeCompare(String(b.season_uuid || ''), 'ja');
+    }),
+    [snapshotFields],
+  );
+  const baseSnapshotFields = useMemo(() => {
     if (!snapshotFieldsLoaded) return [] as SnapshotField[];
+    const showAllFields = selectedFamily === ALL_FAMILY_OPTION && actionFilter === 'none';
+    if (showAllFields && !showNoTaskFieldsOnly) {
+      return sortedSnapshotFields;
+    }
+    if (showAllFields && showNoTaskFieldsOnly) {
+      return sortedSnapshotFields.filter((row) => !snapshotTaskFieldUuids.has(String(row.field_uuid || '')));
+    }
     const fieldUuidSet = new Set<string>();
     const out: SnapshotField[] = [];
     for (const t of linkedTasks) {
@@ -1936,15 +2503,147 @@ export function TaskProgressDashboardPage() {
       const rows = snapshotFieldsByFieldUuid.get(fuid);
       if (rows && rows.length > 0) out.push(...rows);
     }
+    if (showNoTaskFieldsOnly) {
+      return out.filter((row) => !snapshotTaskFieldUuids.has(String(row.field_uuid || '')));
+    }
     return out;
-  }, [linkedTasks, snapshotFieldsByFieldUuid, snapshotFieldsLoaded]);
-  const visibleFields = useMemo(
-    () => filteredSnapshotFields.slice(0, Math.min(visibleFieldRows, filteredSnapshotFields.length)),
-    [filteredSnapshotFields, visibleFieldRows],
-  );
+  }, [linkedTasks, snapshotFieldsByFieldUuid, snapshotFieldsLoaded, selectedFamily, actionFilter, sortedSnapshotFields, showNoTaskFieldsOnly, snapshotTaskFieldUuids]);
+
+  const filteredSnapshotFields = useMemo(() => {
+    const q = fieldTableQuery.trim().toLowerCase();
+    if (!q) return baseSnapshotFields;
+    return baseSnapshotFields.filter((row) => {
+      const text = [
+        row.farm_name,
+        row.field_name,
+        row.user_name,
+        row.field_uuid,
+        row.crop_name,
+        row.variety_name,
+      ].map((v) => String(v || '').toLowerCase()).join(' ');
+      return text.includes(q);
+    });
+  }, [baseSnapshotFields, fieldTableQuery]);
+
+  const sortedFilteredSnapshotFields = useMemo(() => {
+    const rows = [...filteredSnapshotFields];
+    const toDay = (v: string | null | undefined) => String(v || '');
+    rows.sort((a, b) => {
+      let av: any;
+      let bv: any;
+      switch (fieldSortKey) {
+        case 'snapshot_date':
+          av = toDay(a.snapshot_date); bv = toDay(b.snapshot_date); break;
+        case 'farm_name':
+          av = a.farm_name || ''; bv = b.farm_name || ''; break;
+        case 'field_name':
+          av = a.field_name || ''; bv = b.field_name || ''; break;
+        case 'user_name':
+          av = a.user_name || ''; bv = b.user_name || ''; break;
+        case 'area_m2':
+          av = Number(a.area_m2 || 0); bv = Number(b.area_m2 || 0); break;
+        case 'bbch_index':
+          av = a.bbch_index || ''; bv = b.bbch_index || ''; break;
+        case 'fetched_at':
+          av = Date.parse(String(a.fetched_at || '')) || 0;
+          bv = Date.parse(String(b.fetched_at || '')) || 0;
+          break;
+        default:
+          av = ''; bv = '';
+      }
+      if (typeof av === 'number' && typeof bv === 'number') {
+        const diff = av - bv;
+        return fieldSortDir === 'asc' ? diff : -diff;
+      }
+      const diff = String(av).localeCompare(String(bv), 'ja');
+      return fieldSortDir === 'asc' ? diff : -diff;
+    });
+    return rows;
+  }, [filteredSnapshotFields, fieldSortKey, fieldSortDir]);
+
+  const taskStatusOptions = useMemo(() => {
+    const set = new Set<string>();
+    allTaskRows.forEach((row) => {
+      const s = String(row.status || '').trim();
+      if (s) set.add(s);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'ja'));
+  }, [allTaskRows]);
+
+  const taskTypeOptions = useMemo(() => {
+    const set = new Set<string>();
+    allTaskRows.forEach((row) => {
+      const s = String(row._family || row.task_type || '').trim();
+      if (s) set.add(s);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'ja'));
+  }, [allTaskRows]);
+
+  const filteredTaskRows = useMemo(() => {
+    const q = taskTableQuery.trim().toLowerCase();
+    return allTaskRows.filter((row) => {
+      if (taskStatusFilter !== 'all' && String(row.status || '') !== taskStatusFilter) return false;
+      if (taskTypeFilter !== 'all' && String(row._family || row.task_type || '') !== taskTypeFilter) return false;
+      if (!q) return true;
+      const text = [
+        row.farm_name,
+        row.field_name,
+        row.task_name,
+        row.task_type,
+        row._family,
+        row._subtypeLabel,
+        row.user_name,
+        row.assignee_name,
+        row.product,
+        row.task_uuid,
+      ].map((v) => String(v || '').toLowerCase()).join(' ');
+      return text.includes(q);
+    });
+  }, [allTaskRows, taskTableQuery, taskStatusFilter, taskTypeFilter]);
+
+  const sortedFilteredTaskRows = useMemo(() => {
+    const rows = [...filteredTaskRows];
+    const parseTs = (v: string | null | undefined): number => Date.parse(String(v || '')) || 0;
+    rows.sort((a, b) => {
+      let av: any;
+      let bv: any;
+      switch (taskSortKey) {
+        case 'snapshot_date': av = a.snapshot_date || ''; bv = b.snapshot_date || ''; break;
+        case 'farm_name': av = a.farm_name || ''; bv = b.farm_name || ''; break;
+        case 'field_name': av = a.field_name || ''; bv = b.field_name || ''; break;
+        case 'task_display': av = a._taskDisplay || ''; bv = b._taskDisplay || ''; break;
+        case 'task_name': av = a.task_name || ''; bv = b.task_name || ''; break;
+        case 'task_type': av = a.task_type || ''; bv = b.task_type || ''; break;
+        case 'occurrence': av = Number(a.occurrence || 0); bv = Number(b.occurrence || 0); break;
+        case 'task_date': av = parseTs(a.task_date); bv = parseTs(b.task_date); break;
+        case 'planned_date': av = parseTs(a.planned_date); bv = parseTs(b.planned_date); break;
+        case 'execution_date': av = parseTs(a.execution_date); bv = parseTs(b.execution_date); break;
+        case 'status': av = a.status || ''; bv = b.status || ''; break;
+        case 'user_name': av = a.user_name || ''; bv = b.user_name || ''; break;
+        case 'product': av = a.product || ''; bv = b.product || ''; break;
+        case 'spray_subtype': av = a._subtypeLabel || ''; bv = b._subtypeLabel || ''; break;
+        case 'fetched_at': av = parseTs(a.fetched_at); bv = parseTs(b.fetched_at); break;
+        default: av = ''; bv = '';
+      }
+      if (typeof av === 'number' && typeof bv === 'number') {
+        const diff = av - bv;
+        return taskSortDir === 'asc' ? diff : -diff;
+      }
+      const diff = String(av).localeCompare(String(bv), 'ja');
+      return taskSortDir === 'asc' ? diff : -diff;
+    });
+    return rows;
+  }, [filteredTaskRows, taskSortKey, taskSortDir]);
+
+  const filteredSnapshotTaskCount = sortedFilteredTaskRows.length;
   const visibleTasks = useMemo(
-    () => filteredSnapshotTasks.slice(0, Math.min(visibleTaskRows, filteredSnapshotTasks.length)),
-    [filteredSnapshotTasks, visibleTaskRows],
+    () => sortedFilteredTaskRows.slice(0, Math.min(visibleTaskRows, sortedFilteredTaskRows.length)),
+    [sortedFilteredTaskRows, visibleTaskRows],
+  );
+
+  const visibleFields = useMemo(
+    () => sortedFilteredSnapshotFields.slice(0, Math.min(visibleFieldRows, sortedFilteredSnapshotFields.length)),
+    [sortedFilteredSnapshotFields, visibleFieldRows],
   );
 
   const handleRefresh = () => {
@@ -1958,44 +2657,156 @@ export function TaskProgressDashboardPage() {
     if (snapshotFieldsLoading) return;
     setSnapshotFieldsLoading(true);
     try {
-      const key = `${snapshotDate}:fields:${SNAPSHOT_FIELD_LIMIT}`;
-      const now = Date.now();
-      const cached = snapshotPageCache.get(key);
-      let json: any;
-      if (cached && cached.expiresAt > now) {
-        json = cached.data;
-      } else {
-        const res = await fetch(
-          withApiBase(
-            `/hfr-snapshots?snapshot_date=${encodeURIComponent(snapshotDate)}`
-            + `&include_fields=true&include_tasks=false&field_limit=${SNAPSHOT_FIELD_LIMIT}&limit=${SNAPSHOT_FIELD_LIMIT}`,
-          ),
-        );
-        json = await res.json();
-        if (!res.ok || json?.ok === false) {
-          const reason = json?.detail?.reason || json?.reason || `HTTP ${res.status}`;
-          throw new Error(`圃場一覧取得失敗: ${reason}`);
-        }
-        snapshotPageCache.set(key, { data: json, expiresAt: now + SNAPSHOT_CLIENT_CACHE_TTL_MS });
-      }
-      setSnapshotFields((json?.fields ?? []) as SnapshotField[]);
+      const rows = await fetchSnapshotFieldsForDate(snapshotDate);
+      setSnapshotFields(rows);
       setSnapshotFieldsLoaded(true);
     } catch (err: any) {
       setManualUpdateMsg(err?.message || '圃場一覧の取得に失敗しました');
     } finally {
       setSnapshotFieldsLoading(false);
     }
-  }, [snapshotDate, snapshotFieldsLoading]);
+  }, [snapshotDate, snapshotFieldsLoading, fetchSnapshotFieldsForDate]);
+
+  const latestSnapshotDate = useMemo(() => {
+    const latest = String(availableDates[0] || '').trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(latest) ? latest : '';
+  }, [availableDates]);
 
   useEffect(() => {
-    if (snapshotLoading) return;
-    if (snapshotFieldsLoaded || snapshotFieldsLoading) return;
-    if (!snapshotRun?.run_id) return;
-    void loadSnapshotFields();
-  }, [snapshotLoading, snapshotFieldsLoaded, snapshotFieldsLoading, snapshotRun?.run_id, loadSnapshotFields]);
+    let active = true;
+    const run = async () => {
+      if (!latestSnapshotDate) {
+        setLatestFieldCount(null);
+        return;
+      }
+      if (latestSnapshotDate === snapshotDate) {
+        setLatestFieldCount(Number(dashboardState.field_count ?? 0));
+        return;
+      }
+      try {
+        const meta = await fetchSnapshotMeta(latestSnapshotDate);
+        if (!active) return;
+        setLatestFieldCount(Number(meta?.field_count ?? 0));
+      } catch {
+        if (active) setLatestFieldCount(null);
+      }
+    };
+    void run();
+    return () => {
+      active = false;
+    };
+  }, [latestSnapshotDate, snapshotDate, dashboardState.field_count, fetchSnapshotMeta]);
+
+  const fieldCountDeltaCard = useMemo(() => {
+    const baseCount = Number(dashboardState.field_count ?? 0);
+    const latestCount =
+      latestSnapshotDate === snapshotDate
+        ? baseCount
+        : (typeof latestFieldCount === 'number' ? latestFieldCount : null);
+    const delta = latestCount === null ? null : latestCount - baseCount;
+    return {
+      baseCount,
+      latestCount,
+      delta,
+    };
+  }, [dashboardState.field_count, latestSnapshotDate, snapshotDate, latestFieldCount]);
+
+  const handleOpenFieldDeltaModal = useCallback(async () => {
+    setFieldDeltaModalOpen(true);
+    setFieldDeltaErr(null);
+    setFieldDeltaLoading(true);
+    try {
+      if (!latestSnapshotDate) {
+        setFieldDeltaRows([]);
+        setFieldDeltaComparedDate('');
+        return;
+      }
+      const baseDate = snapshotDate;
+      const latestDate = latestSnapshotDate;
+      setFieldDeltaComparedDate(latestDate);
+
+      if (baseDate === latestDate) {
+        setFieldDeltaRows([]);
+        return;
+      }
+
+      const [baseFields, latestFields] = await Promise.all([
+        fetchSnapshotFieldsForDate(baseDate),
+        fetchSnapshotFieldsForDate(latestDate),
+      ]);
+
+      const toMap = (rows: SnapshotField[]) => {
+        const map = new Map<string, { field_uuid: string; field_name: string; area_m2: number | null }>();
+        for (const row of rows) {
+          const fieldUuid = String(row.field_uuid || '').trim();
+          if (!fieldUuid || map.has(fieldUuid)) continue;
+          map.set(fieldUuid, {
+            field_uuid: fieldUuid,
+            field_name: String(row.field_name || ''),
+            area_m2: typeof row.area_m2 === 'number' ? row.area_m2 : null,
+          });
+        }
+        return map;
+      };
+
+      const baseMap = toMap(baseFields);
+      const latestMap = toMap(latestFields);
+      const rows: FieldDeltaRow[] = [];
+
+      latestMap.forEach((row, uuid) => {
+        if (!baseMap.has(uuid)) {
+          rows.push({ diff_type: '増加', ...row });
+        }
+      });
+      baseMap.forEach((row, uuid) => {
+        if (!latestMap.has(uuid)) {
+          rows.push({ diff_type: '減少', ...row });
+        }
+      });
+
+      rows.sort((a, b) => {
+        if (a.diff_type !== b.diff_type) return a.diff_type === '増加' ? -1 : 1;
+        return a.field_name.localeCompare(b.field_name, 'ja');
+      });
+      setFieldDeltaRows(rows);
+    } catch (error: any) {
+      setFieldDeltaErr(error?.message || '差分圃場の取得に失敗しました');
+    } finally {
+      setFieldDeltaLoading(false);
+    }
+  }, [latestSnapshotDate, snapshotDate, fetchSnapshotFieldsForDate]);
+
+  const handleDownloadFieldDeltaCsv = useCallback(() => {
+    if (fieldDeltaRows.length === 0) return;
+    const header = ['diff_type', 'field_uuid', 'field_name', 'area_ha'];
+    const csvEscape = (value: unknown): string => {
+      const raw = String(value ?? '');
+      if (/[",\n]/.test(raw)) return `"${raw.replace(/"/g, '""')}"`;
+      return raw;
+    };
+    const lines: string[] = [header.join(',')];
+    fieldDeltaRows.forEach((row) => {
+      const areaHa =
+        typeof row.area_m2 === 'number' && Number.isFinite(row.area_m2)
+          ? (row.area_m2 / 10000).toFixed(4)
+          : '';
+      lines.push([
+        csvEscape(row.diff_type),
+        csvEscape(row.field_uuid),
+        csvEscape(row.field_name),
+        csvEscape(areaHa),
+      ].join(','));
+    });
+    const csv = lines.join('\n');
+    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' });
+    const compareDate = fieldDeltaComparedDate || latestSnapshotDate || 'latest';
+    triggerBlobDownload(`hfr_field_delta_${snapshotDate}_vs_${compareDate}.csv`, blob);
+  }, [fieldDeltaRows, snapshotDate, fieldDeltaComparedDate, latestSnapshotDate]);
 
   const handleManualUpdate = async () => {
     if (!canManualUpdate || !auth?.login?.login_token || !auth?.api_token) return;
+    const ok = window.confirm('最新スナップショットを取得してDBを更新します。実行しますか？');
+    if (!ok) return;
     setManualUpdateLoading(true);
     setManualUpdateMsg(null);
     try {
@@ -2006,7 +2817,6 @@ export function TaskProgressDashboardPage() {
           email: auth.email,
           login_token: auth.login.login_token,
           api_token: auth.api_token,
-          farm_uuids: submittedFarms,
           dryRun: false,
           suffix: 'HFR',
           languageCode: 'ja',
@@ -2015,6 +2825,9 @@ export function TaskProgressDashboardPage() {
       const json = await res.json();
       if (!res.ok || json?.ok === false) {
         const reason = json?.detail?.reason || json?.reason || `HTTP ${res.status}`;
+        if (reason === 'snapshot_job_running') {
+          throw new Error('現在スナップショット更新が実行中です。完了後に再実行してください。');
+        }
         throw new Error(`HFR更新に失敗: ${reason}`);
       }
       setManualUpdateMsg(
@@ -2033,9 +2846,47 @@ export function TaskProgressDashboardPage() {
     }
   };
 
+  const handleDownloadFieldsCsv = useCallback(async () => {
+    if (!snapshotFieldsLoaded) return;
+    try {
+      const params = new URLSearchParams({
+        snapshot_date: snapshotDate,
+        action_filter: actionFilter,
+        today: getJstDayKey(new Date()),
+      });
+      if (selectedFamily !== ALL_FAMILY_OPTION) params.set('families', selectedFamily);
+      const res = await fetch(withApiBase(`/hfr-snapshots/fields-csv?${params.toString()}`));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const filename = `hfr_fields_${snapshotDate}.csv`;
+      triggerBlobDownload(filename, blob);
+    } catch (error: any) {
+      setManualUpdateMsg(`圃場CSV出力に失敗: ${error?.message || 'unknown'}`);
+    }
+  }, [snapshotFieldsLoaded, snapshotDate, actionFilter, selectedFamily]);
+
+  const handleDownloadTasksCsv = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({
+        snapshot_date: snapshotDate,
+        action_filter: actionFilter,
+        today: getJstDayKey(new Date()),
+      });
+      if (selectedFamily !== ALL_FAMILY_OPTION) params.set('families', selectedFamily);
+      const res = await fetch(withApiBase(`/hfr-snapshots/tasks-csv?${params.toString()}`));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const filename = `hfr_tasks_${snapshotDate}.csv`;
+      triggerBlobDownload(filename, blob);
+    } catch (error: any) {
+      setManualUpdateMsg(`タスクCSV出力に失敗: ${error?.message || 'unknown'}`);
+    }
+  }, [snapshotDate, actionFilter, selectedFamily]);
+
   useEffect(() => {
     setSelectedFarmerId(null);
     setActionFilter('none');
+    setShowNoTaskFieldsOnly(false);
   }, [snapshotDate]);
 
   useEffect(() => {
@@ -2056,6 +2907,28 @@ export function TaskProgressDashboardPage() {
     setSortDir(nextKey === 'name' ? 'asc' : 'desc');
   }, [sortKey]);
 
+  const handleFieldTableSort = useCallback((nextKey: FieldTableSortKey) => {
+    if (fieldSortKey === nextKey) {
+      setFieldSortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+    setFieldSortKey(nextKey);
+    setFieldSortDir(nextKey === 'area_m2' || nextKey === 'fetched_at' ? 'desc' : 'asc');
+  }, [fieldSortKey]);
+
+  const handleTaskTableSort = useCallback((nextKey: TaskTableSortKey) => {
+    if (taskSortKey === nextKey) {
+      setTaskSortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+    setTaskSortKey(nextKey);
+    setTaskSortDir(
+      nextKey === 'planned_date' || nextKey === 'task_date' || nextKey === 'execution_date' || nextKey === 'occurrence'
+        ? 'desc'
+        : 'asc',
+    );
+  }, [taskSortKey]);
+
   const selectFamily = useCallback((family: string) => {
     startFilterTransition(() => {
       setSelectedFamily(family);
@@ -2069,6 +2942,16 @@ export function TaskProgressDashboardPage() {
   const selectFarmer = useCallback((id: string | null) => {
     setSelectedFarmerId(id);
   }, []);
+
+  const handleShowNoTaskFields = useCallback(async () => {
+    if (!snapshotFieldsLoaded) {
+      await loadSnapshotFields();
+    }
+    setShowNoTaskFieldsOnly(true);
+    setTimeout(() => {
+      snapshotFieldTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 0);
+  }, [snapshotFieldsLoaded, loadSnapshotFields]);
 
   const isFullyReady = !snapshotLoading && !tasksHydrating && sprayMapReady;
   if (!isFullyReady) {
@@ -2135,44 +3018,86 @@ export function TaskProgressDashboardPage() {
       <section className="task-progress-header card">
         <div>
           <h2>xHF for Rita 26タスク管理ダッシュボード</h2>
-          <p>遅延の早期発見にフォーカスした全体監視ビュー</p>
         </div>
         <div className="task-progress-header-tools">
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="農業者名で検索"
-            aria-label="農業者名で検索"
-          />
-          {availableDates.length > 0 && (
-            <label className="snapshot-date-label">
-              保存日
-              <select
-                value={availableDates.includes(snapshotDate) ? snapshotDate : availableDates[0]}
-                onChange={(e) => applySnapshotDate(e.target.value)}
-              >
-                {availableDates.map((d) => (
-                  <option key={d} value={d}>{d}</option>
+          <div className="toolbar-group toolbar-group--search" ref={searchBoxRef}>
+            <input
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setSearchOpen(true);
+                setSearchActiveIndex(-1);
+              }}
+              onFocus={() => setSearchOpen(true)}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="農場名 / ユーザー名で検索"
+              aria-label="農場名またはユーザー名で検索"
+              aria-expanded={searchOpen}
+              aria-autocomplete="list"
+              role="combobox"
+            />
+            {searchOpen && searchOptionRows.length > 0 && (
+              <div className="toolbar-search-dropdown" role="listbox">
+                {searchOptionRows.map((opt, idx) => (
+                  <button
+                    type="button"
+                    key={`${opt.type}:${opt.label}`}
+                    className={`toolbar-search-option ${idx === searchActiveIndex ? 'active' : ''}`}
+                    onMouseEnter={() => setSearchActiveIndex(idx)}
+                    onClick={() => handleSelectSearchOption(opt.label)}
+                  >
+                    <span>{opt.label}</span>
+                    <small>{opt.type}</small>
+                  </button>
                 ))}
-              </select>
-            </label>
+              </div>
+            )}
+          </div>
+          {availableDates.length > 0 && (
+            <div className="toolbar-group toolbar-group--date">
+              <label className="snapshot-date-label">
+                保存日
+                <input
+                  className="snapshot-date-input"
+                  type="date"
+                  value={availableDates.includes(snapshotDate) ? snapshotDate : availableDates[0]}
+                  min={availableDates[availableDates.length - 1]}
+                  max={availableDates[0]}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (!v) return;
+                    if (!availableDates.includes(v)) return;
+                    applySnapshotDate(v);
+                  }}
+                />
+              </label>
+            </div>
           )}
-          <button type="button" onClick={handleRefresh}>再読込</button>
-          {tasksHydrating && <span>詳細タスク読込中...</span>}
-          {canManualUpdate && (
-            <button type="button" onClick={handleManualUpdate} disabled={manualUpdateLoading}>
-              {manualUpdateLoading ? 'HFR更新中...' : 'HFR更新（選択農場）'}
-            </button>
-          )}
-          <span>{new Date(dashboard.as_of).toLocaleString('ja-JP')}</span>
-          <span className="source-tag">snapshot: {snapshotRun?.run_id ?? '-'}</span>
+          <div className="toolbar-actions">
+            <button type="button" onClick={handleRefresh}>再読込</button>
+            {canManualUpdate && (
+              <button type="button" onClick={handleManualUpdate} disabled={manualUpdateLoading}>
+                {manualUpdateLoading ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <LoadingSpinner size={12} />
+                    <span>最新スナップショット取得中...</span>
+                  </span>
+                ) : '最新スナップショット取得（全体）'}
+              </button>
+            )}
+          </div>
+          <div className="toolbar-meta">
+            {tasksHydrating && <span>詳細タスク読込中...</span>}
+            <span>{new Date(dashboard.as_of).toLocaleString('ja-JP')}</span>
+            <span className="source-tag">snapshot: {snapshotRun?.run_id ?? '-'}</span>
+          </div>
         </div>
         {manualUpdateMsg && <p className="manual-update-msg">{manualUpdateMsg}</p>}
         <TaskFamilyFilterPanel
           familyOptions={familyOptions}
           selectedFamily={selectedFamily}
           isFilterPending={isFilterPending}
-          dashboardPending={dashboardPending}
+          dashboardPending={workerPending}
           actionFilter={actionFilter}
           onSelectFamily={selectFamily}
           onClearActionFilter={clearActionFilter}
@@ -2207,41 +3132,87 @@ export function TaskProgressDashboardPage() {
         </article>
         <article className="card kpi-card kpi-teal">
           <h3>農業者 / 圃場数</h3>
-          <strong>{fieldStats.farmerCount}<small style={{ fontSize: '0.5em', fontWeight: 400, color: 'var(--text-muted)' }}> 者</small> / {fieldStats.fieldCount}<small style={{ fontSize: '0.5em', fontWeight: 400, color: 'var(--text-muted)' }}> 圃場</small></strong>
+          <strong>{fieldStats.farmerCount} / {fieldStats.fieldCount}<small style={{ fontSize: '0.5em', fontWeight: 400, color: 'var(--text-muted)' }}> 圃場</small></strong>
           <p>合計面積 {fieldStats.totalAreaHa !== null ? `${fieldStats.totalAreaHa.toFixed(1)} ha` : '圃場ロード後表示'}</p>
+        </article>
+      </section>
+
+      <section className="task-progress-subkpis">
+        <article className="card subkpi-card subkpi-indigo">
+          <h4>総圃場数差分（最新 - 保存日）</h4>
+          <strong>
+            {fieldCountDeltaCard.delta === null
+              ? '-'
+              : `${fieldCountDeltaCard.delta > 0 ? '+' : ''}${fieldCountDeltaCard.delta}`}
+          </strong>
+          <p>
+            保存日 {snapshotDate} / 最新 {latestSnapshotDate || '-'}
+          </p>
+          <button type="button" onClick={handleOpenFieldDeltaModal}>
+            差分圃場を表示
+          </button>
+        </article>
+        <article className="card subkpi-card subkpi-emerald">
+          <h4>タスクあり圃場数</h4>
+          <strong>{fieldStats.fieldsWithTask}</strong>
+          <p>登録済み圃場</p>
+        </article>
+        <article className="card subkpi-card subkpi-slate">
+          <h4>タスクなし圃場数</h4>
+          <strong>{fieldStats.fieldsWithoutTask}</strong>
+          <p>未登録圃場</p>
+          <button type="button" onClick={handleShowNoTaskFields}>
+            タスクなし圃場を表示
+          </button>
         </article>
       </section>
 
       <DashboardChartsPanel
         dashboard={{ ...dashboard, task_types: chartTaskTypes }}
         bubbleRows={bubbleRows}
-        sortedFarmers={sortedFarmers}
+        sortedFarmers={rankingFarmers}
         selectedFarmer={selectedFarmer}
         selectedDetail={selectedDetail}
+        linkedTasks={linkedTasks}
         onSelectFarmer={selectFarmer}
         onSort={handleSort}
       />
 
-      <section className="card ranking-card">
-        <h3>圃場スナップショット一覧（表示 {visibleFields.length} / 全 {filteredSnapshotFields.length}件）</h3>
+      <section className="card ranking-card" ref={snapshotFieldTableRef}>
+        <h3>圃場スナップショット一覧（表示 {visibleFields.length} / 全 {sortedFilteredSnapshotFields.length}件）</h3>
         <p className="manual-update-msg">画面は軽量表示。詳細確認はCSV出力を推奨します。</p>
         <div className="snapshot-table-controls">
           <button type="button" onClick={loadSnapshotFields} disabled={snapshotFieldsLoaded || snapshotFieldsLoading}>
             {snapshotFieldsLoading ? '圃場一覧を読込中...' : snapshotFieldsLoaded ? '圃場一覧ロード済み' : '圃場一覧を読み込む'}
           </button>
+          <button type="button" onClick={handleDownloadFieldsCsv} disabled={!snapshotFieldsLoaded || sortedFilteredSnapshotFields.length === 0}>
+            圃場CSVダウンロード
+          </button>
+          <button type="button" onClick={() => setShowNoTaskFieldsOnly((v) => !v)} disabled={!snapshotFieldsLoaded}>
+            {showNoTaskFieldsOnly ? 'タスクなし圃場フィルター解除' : 'タスクなし圃場のみ'}
+          </button>
+        </div>
+        <div className="snapshot-table-controls">
+          <input
+            className="snapshot-table-filter-input"
+            value={fieldTableQuery}
+            onChange={(e) => setFieldTableQuery(e.target.value)}
+            placeholder="圃場テーブル絞り込み（農場名/圃場名/担当者/UUID）"
+            aria-label="圃場テーブル絞り込み"
+          />
         </div>
         <div className="snapshot-table-controls">
           <button
             type="button"
-            onClick={() => setVisibleFieldRows((v) => Math.min(filteredSnapshotFields.length, v + FIELD_ROWS_STEP))}
-            disabled={visibleFields.length >= filteredSnapshotFields.length}
+            onClick={() => setVisibleFieldRows((v) => Math.min(sortedFilteredSnapshotFields.length, v + FIELD_ROWS_STEP))}
+            disabled={visibleFields.length >= sortedFilteredSnapshotFields.length}
           >
             さらに{FIELD_ROWS_STEP}件表示
           </button>
           <button
             type="button"
-            onClick={() => setVisibleFieldRows(filteredSnapshotFields.length)}
-            disabled={visibleFields.length >= filteredSnapshotFields.length}
+            onClick={() => setVisibleFieldRows(sortedFilteredSnapshotFields.length)}
+            disabled={visibleFields.length >= sortedFilteredSnapshotFields.length}
           >
             すべて表示
           </button>
@@ -2253,20 +3224,20 @@ export function TaskProgressDashboardPage() {
           <table>
             <thead>
               <tr>
-                <th>snapshot_date</th>
+                <th><button type="button" onClick={() => handleFieldTableSort('snapshot_date')}>snapshot_date</button></th>
                 <th>run_id</th>
-                <th>farm_name</th>
+                <th><button type="button" onClick={() => handleFieldTableSort('farm_name')}>farm_name</button></th>
                 <th>farm_uuid</th>
-                <th>field_name</th>
+                <th><button type="button" onClick={() => handleFieldTableSort('field_name')}>field_name</button></th>
                 <th>field_uuid</th>
                 <th>season_uuid</th>
-                <th>user_name</th>
+                <th><button type="button" onClick={() => handleFieldTableSort('user_name')}>user_name</button></th>
                 <th>crop_name</th>
                 <th>variety_name</th>
-                <th>area_ha</th>
-                <th>bbch_index</th>
+                <th><button type="button" onClick={() => handleFieldTableSort('area_m2')}>area_ha</button></th>
+                <th><button type="button" onClick={() => handleFieldTableSort('bbch_index')}>bbch_index</button></th>
                 <th>bbch_scale</th>
-                <th>fetched_at</th>
+                <th><button type="button" onClick={() => handleFieldTableSort('fetched_at')}>fetched_at</button></th>
               </tr>
             </thead>
             <tbody>
@@ -2295,20 +3266,44 @@ export function TaskProgressDashboardPage() {
       </section>
 
       <section className="card ranking-card">
-        <h3>タスクスナップショット一覧（表示 {visibleTasks.length} / 全 {filteredSnapshotTasks.length}件）</h3>
+        <h3>タスクスナップショット一覧（表示 {visibleTasks.length} / 全 {filteredSnapshotTaskCount}件）</h3>
         <p className="manual-update-msg">画面は軽量表示。大量データはCSV出力で確認してください。</p>
         <div className="snapshot-table-controls">
+          <input
+            className="snapshot-table-filter-input"
+            value={taskTableQuery}
+            onChange={(e) => setTaskTableQuery(e.target.value)}
+            placeholder="タスクテーブル絞り込み（農場/圃場/タスク/担当者/薬剤/UUID）"
+            aria-label="タスクテーブル絞り込み"
+          />
+          <select value={taskTypeFilter} onChange={(e) => setTaskTypeFilter(e.target.value)} aria-label="タスク種別絞り込み">
+            <option value="all">タスク種別: すべて</option>
+            {taskTypeOptions.map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+          <select value={taskStatusFilter} onChange={(e) => setTaskStatusFilter(e.target.value)} aria-label="ステータス絞り込み">
+            <option value="all">ステータス: すべて</option>
+            {taskStatusOptions.map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+        </div>
+        <div className="snapshot-table-controls">
+          <button type="button" onClick={handleDownloadTasksCsv} disabled={filteredSnapshotTaskCount === 0}>
+            タスクCSVダウンロード
+          </button>
           <button
             type="button"
-            onClick={() => setVisibleTaskRows((v) => Math.min(filteredSnapshotTasks.length, v + TASK_ROWS_STEP))}
-            disabled={visibleTasks.length >= filteredSnapshotTasks.length}
+            onClick={() => setVisibleTaskRows((v) => Math.min(filteredSnapshotTaskCount, v + TASK_ROWS_STEP))}
+            disabled={visibleTasks.length >= filteredSnapshotTaskCount}
           >
             さらに{TASK_ROWS_STEP}件表示
           </button>
           <button
             type="button"
-            onClick={() => setVisibleTaskRows(filteredSnapshotTasks.length)}
-            disabled={visibleTasks.length >= filteredSnapshotTasks.length}
+            onClick={() => setVisibleTaskRows(filteredSnapshotTaskCount)}
+            disabled={visibleTasks.length >= filteredSnapshotTaskCount}
           >
             すべて表示
           </button>
@@ -2320,33 +3315,33 @@ export function TaskProgressDashboardPage() {
           <table>
             <thead>
               <tr>
-                <th>snapshot_date</th>
+                <th><button type="button" onClick={() => handleTaskTableSort('snapshot_date')}>snapshot_date</button></th>
                 <th>run_id</th>
-                <th>farm_name</th>
+                <th><button type="button" onClick={() => handleTaskTableSort('farm_name')}>farm_name</button></th>
                 <th>farm_uuid</th>
-                <th>field_name</th>
+                <th><button type="button" onClick={() => handleTaskTableSort('field_name')}>field_name</button></th>
                 <th>field_uuid</th>
                 <th>season_uuid</th>
                 <th>crop_uuid</th>
-                <th>task_display</th>
-                <th>task_name</th>
-                <th>task_type</th>
-                <th>occurrence</th>
+                <th><button type="button" onClick={() => handleTaskTableSort('task_display')}>task_display</button></th>
+                <th><button type="button" onClick={() => handleTaskTableSort('task_name')}>task_name</button></th>
+                <th><button type="button" onClick={() => handleTaskTableSort('task_type')}>task_type</button></th>
+                <th><button type="button" onClick={() => handleTaskTableSort('occurrence')}>occurrence</button></th>
                 <th>task_uuid</th>
-                <th>task_date</th>
-                <th>planned_date</th>
-                <th>execution_date</th>
-                <th>status</th>
-                <th>user_name</th>
+                <th><button type="button" onClick={() => handleTaskTableSort('task_date')}>task_date</button></th>
+                <th><button type="button" onClick={() => handleTaskTableSort('planned_date')}>planned_date</button></th>
+                <th><button type="button" onClick={() => handleTaskTableSort('execution_date')}>execution_date</button></th>
+                <th><button type="button" onClick={() => handleTaskTableSort('status')}>status</button></th>
+                <th><button type="button" onClick={() => handleTaskTableSort('user_name')}>user_name</button></th>
                 <th>assignee_name</th>
-                <th>product</th>
+                <th><button type="button" onClick={() => handleTaskTableSort('product')}>product</button></th>
                 <th>dosage</th>
                 <th>spray_category</th>
-                <th>spray_subtype</th>
+                <th><button type="button" onClick={() => handleTaskTableSort('spray_subtype')}>spray_subtype</button></th>
                 <th>creation_flow_hint</th>
                 <th>bbch_index</th>
                 <th>bbch_scale</th>
-                <th>fetched_at</th>
+                <th><button type="button" onClick={() => handleTaskTableSort('fetched_at')}>fetched_at</button></th>
               </tr>
             </thead>
             <tbody>
@@ -2389,6 +3384,61 @@ export function TaskProgressDashboardPage() {
           </table>
         </div>
       </section>
+
+      {fieldDeltaModalOpen && (
+        <div className="task-progress-modal-backdrop" onClick={() => setFieldDeltaModalOpen(false)}>
+          <div className="task-progress-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="task-progress-modal-header">
+              <h3>総圃場数の差分圃場一覧</h3>
+              <div className="task-progress-modal-actions">
+                <button type="button" onClick={handleDownloadFieldDeltaCsv} disabled={fieldDeltaLoading || fieldDeltaRows.length === 0}>
+                  CSVダウンロード
+                </button>
+                <button type="button" onClick={() => setFieldDeltaModalOpen(false)}>閉じる</button>
+              </div>
+            </div>
+            <p className="manual-update-msg">
+              保存日 {snapshotDate} と 最新 {fieldDeltaComparedDate || latestSnapshotDate || '-'} の比較
+            </p>
+            {fieldDeltaErr && <p className="manual-update-msg" style={{ color: '#ef4444' }}>{fieldDeltaErr}</p>}
+            {fieldDeltaLoading ? (
+              <div className="task-progress-modal-loading">
+                <LoadingSpinner size={14} />
+                <p className="manual-update-msg">差分圃場を読み込み中...</p>
+              </div>
+            ) : (
+              <div className="table-wrap task-progress-modal-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>差分</th>
+                      <th>field_uuid</th>
+                      <th>name</th>
+                      <th>面積 (ha)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fieldDeltaRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={4}>差分はありません</td>
+                      </tr>
+                    ) : (
+                      fieldDeltaRows.map((row) => (
+                        <tr key={`${row.diff_type}-${row.field_uuid}`}>
+                          <td>{row.diff_type}</td>
+                          <td>{row.field_uuid}</td>
+                          <td>{row.field_name || '-'}</td>
+                          <td>{formatAreaHa(row.area_m2)}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

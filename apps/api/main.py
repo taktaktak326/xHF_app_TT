@@ -141,6 +141,7 @@ _dashboard_cache_lock = threading.Lock()
 HFR_SNAPSHOT_CACHE_TTL_SEC = int(os.getenv("HFR_SNAPSHOT_CACHE_TTL", "600"))
 _hfr_snapshot_cache: Dict[str, Dict[str, Any]] = {}
 _hfr_snapshot_cache_lock = threading.Lock()
+_hfr_snapshot_job_lock = asyncio.Lock()
 
 
 def _image_cache_get(url: str):
@@ -1814,6 +1815,7 @@ async def combined_field_data_tasks(req: CombinedFieldDataTasksReq):
     variables = {
         "farmUuids": req.farm_uuids,
         "languageCode": req.languageCode,
+        "countryCode": req.countryCode,
         "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
         "withBoundary": req.withBoundary,
         "withCropSeasonsV2": req.withCropSeasonsV2,
@@ -2771,6 +2773,7 @@ def _extract_snapshot_rows(
 ) -> Dict[str, List[Dict[str, Any]]]:
     field_rows: List[Dict[str, Any]] = []
     task_rows: List[Dict[str, Any]] = []
+    growth_stage_rows: List[Dict[str, Any]] = []
 
     for field in fields:
         if not isinstance(field, dict):
@@ -2820,6 +2823,7 @@ def _extract_snapshot_rows(
             variety_name = str((variety or {}).get("name") or "")
             bbch_index = str((active or {}).get("index") or "")
             bbch_scale = str((active or {}).get("scale") or "")
+            predictions = season.get("countryCropGrowthStagePredictions") or []
 
             field_rows.append(
                 {
@@ -2838,6 +2842,36 @@ def _extract_snapshot_rows(
                     "bbch_scale": bbch_scale,
                 }
             )
+
+            if isinstance(predictions, list):
+                for pred in predictions:
+                    if not isinstance(pred, dict):
+                        continue
+                    p_index = str(pred.get("index") or "").strip()
+                    p_start = str(pred.get("startDate") or "").strip()
+                    p_end = str(pred.get("endDate") or "").strip()
+                    p_scale = str(pred.get("scale") or "").strip()
+                    p_gs_order = str(pred.get("gsOrder") or "").strip()
+                    stage = pred.get("cropGrowthStageV2") or {}
+                    stage_uuid = str((stage or {}).get("uuid") or "").strip()
+                    stage_name = str((stage or {}).get("name") or "").strip()
+                    stage_code = str((stage or {}).get("code") or "").strip()
+                    growth_stage_rows.append(
+                        {
+                            "snapshot_date": snapshot_date,
+                            "run_id": run_id,
+                            "field_uuid": field_uuid,
+                            "season_uuid": season_uuid,
+                            "prediction_index": p_index,
+                            "start_date": p_start,
+                            "end_date": p_end,
+                            "scale": p_scale,
+                            "gs_order": p_gs_order,
+                            "stage_uuid": stage_uuid,
+                            "stage_name": stage_name,
+                            "stage_code": stage_code,
+                        }
+                    )
 
             task_lists: List[tuple[str, str, List[Dict[str, Any]]]] = []
             task_lists.append(("Harvest", "収穫", list(season.get("harvests") or [])))
@@ -2945,7 +2979,7 @@ def _extract_snapshot_rows(
                         }
                     )
 
-    return {"fields": field_rows, "tasks": task_rows}
+    return {"fields": field_rows, "tasks": task_rows, "growth_stages": growth_stage_rows}
 
 
 @api_app.post("/jobs/hfr-snapshot")
@@ -2966,306 +3000,315 @@ async def jobs_hfr_snapshot(
         req_email = (req.email or "").strip().lower()
         if not req_email or req_email != allowed_email:
             raise HTTPException(403, {"reason": "manual_snapshot_forbidden"})
-        if not selected_farm_uuids:
-            raise HTTPException(422, {"reason": "manual_snapshot_requires_farms"})
-
-    snapshot_date = datetime.now(timezone(timedelta(hours=9))).date()
-    run_id = f"hfr-{snapshot_date.isoformat()}-{uuid4().hex[:8]}"
-    farms_scanned = 0
-    farms_matched = 0
-    fields_saved = 0
-    tasks_saved = 0
-    should_persist = not req.dryRun
-    started_at = time.perf_counter()
-
-    def _progress(message: str):
-        elapsed = time.perf_counter() - started_at
-        print(f"[HFR_SNAPSHOT][{run_id}] +{elapsed:.1f}s {message}", flush=True)
-
-    _progress(
-        f"job started dryRun={req.dryRun} suffix={req.suffix} language={req.languageCode} "
-        f"manual_mode={manual_mode} selected_farms={len(selected_farm_uuids)}"
-    )
-
-    if should_persist:
-        try:
-            hfr_snapshot_store.ensure_schema()
-        except Exception as exc:
-            raise HTTPException(500, {"reason": "snapshot_store_not_ready", "detail": str(exc)})
-        hfr_snapshot_store.start_run(run_id, snapshot_date, status="running", message="job started")
+    if _hfr_snapshot_job_lock.locked():
+        raise HTTPException(409, {"reason": "snapshot_job_running"})
+    await _hfr_snapshot_job_lock.acquire()
     try:
-        if manual_mode:
-            login_token = (req.login_token or "").strip()
-            api_token = (req.api_token or "").strip()
-            _progress("auth: using manual tokens from logged-in user")
-        else:
-            email = os.getenv("SNAPSHOT_USER_EMAIL", "").strip()
-            password = os.getenv("SNAPSHOT_USER_PASSWORD", "").strip()
-            if not email or not password:
-                raise HTTPException(500, {"reason": "snapshot_credentials_missing"})
+        snapshot_date = datetime.now(timezone(timedelta(hours=9))).date()
+        run_id = f"hfr-{snapshot_date.isoformat()}-{uuid4().hex[:8]}"
+        farms_scanned = 0
+        farms_matched = 0
+        fields_saved = 0
+        tasks_saved = 0
+        should_persist = not req.dryRun
+        started_at = time.perf_counter()
 
-            _progress("auth: gigya login started")
-            login = await gigya_login_impl(email, password)
-            _progress("auth: gigya login completed")
-            four = FourValues(
-                login_token=login.get("login_token") or "",
-                gigya_uuid=login.get("gigya_uuid") or "",
-                gigya_uuid_signature=login.get("gigya_uuid_signature") or "",
-                gigya_signature_timestamp=login.get("gigya_signature_timestamp") or "",
-            )
-            _progress("auth: xarvio token started")
-            api_token = await get_api_token_impl(four)
-            login_token = four.login_token
-            _progress("auth: xarvio token completed")
+        def _progress(message: str):
+            elapsed = time.perf_counter() - started_at
+            print(f"[HFR_SNAPSHOT][{run_id}] +{elapsed:.1f}s {message}", flush=True)
 
-        all_farm_uuids: List[str] = []
-        if selected_farm_uuids:
-            all_farm_uuids = selected_farm_uuids
-            farms_scanned = len(all_farm_uuids)
-            _progress(f"step1: selected farms applied farms_scanned={farms_scanned}")
-        else:
-            _progress("step1: farms overview started")
-            farms_out = await call_graphql(make_payload("FarmsOverview", FARMS_OVERVIEW), login_token, api_token)
-            farms_data = (((farms_out.get("response") or {}).get("data") or {}).get("farms") or [])
-            all_farm_uuids = [str(f.get("uuid")) for f in farms_data if isinstance(f, dict) and f.get("uuid")]
-            farms_scanned = len(all_farm_uuids)
-            _progress(f"step1: farms overview completed farms_scanned={farms_scanned}")
-
-        _progress("step2: hfr candidate scan started")
-        cand_resp = await farms_hfr_candidates(
-            HfrFarmCandidatesReq(
-                login_token=login_token,
-                api_token=api_token,
-                farm_uuids=all_farm_uuids,
-                suffix=req.suffix,
-                includeTokens=False,
-            )
+        _progress(
+            f"job started dryRun={req.dryRun} suffix={req.suffix} language={req.languageCode} "
+            f"manual_mode={manual_mode} selected_farms={len(selected_farm_uuids)}"
         )
-        cand_json = _response_to_json(cand_resp)
-        matched_farm_uuids = (((cand_json.get("response") or {}).get("data") or {}).get("matchedFarmUuids") or [])
-        matched_farm_uuids = [str(u) for u in matched_farm_uuids if str(u)]
-        farms_matched = len(matched_farm_uuids)
-        _progress(f"step2: hfr candidate scan completed farms_matched={farms_matched}")
 
-        if matched_farm_uuids:
-            chunk_size = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_SIZE", "5")), 100))
-            chunk_attempts = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_ATTEMPTS", "6")), 8))
-            retry_backoff_sec = max(0.1, float(os.getenv("HFR_SNAPSHOT_CHUNK_RETRY_BACKOFF_SEC", "3.0")))
-            require_complete_chunk = str(os.getenv("HFR_SNAPSHOT_REQUIRE_COMPLETE_CHUNK", "1")).lower() in (
-                "1",
-                "true",
-                "yes",
+        if should_persist:
+            try:
+                hfr_snapshot_store.ensure_schema()
+            except Exception as exc:
+                raise HTTPException(500, {"reason": "snapshot_store_not_ready", "detail": str(exc)})
+            hfr_snapshot_store.start_run(run_id, snapshot_date, status="running", message="job started")
+        try:
+            if manual_mode:
+                login_token = (req.login_token or "").strip()
+                api_token = (req.api_token or "").strip()
+                _progress("auth: using manual tokens from logged-in user")
+            else:
+                email = os.getenv("SNAPSHOT_USER_EMAIL", "").strip()
+                password = os.getenv("SNAPSHOT_USER_PASSWORD", "").strip()
+                if not email or not password:
+                    raise HTTPException(500, {"reason": "snapshot_credentials_missing"})
+
+                _progress("auth: gigya login started")
+                login = await gigya_login_impl(email, password)
+                _progress("auth: gigya login completed")
+                four = FourValues(
+                    login_token=login.get("login_token") or "",
+                    gigya_uuid=login.get("gigya_uuid") or "",
+                    gigya_uuid_signature=login.get("gigya_uuid_signature") or "",
+                    gigya_signature_timestamp=login.get("gigya_signature_timestamp") or "",
+                )
+                _progress("auth: xarvio token started")
+                api_token = await get_api_token_impl(four)
+                login_token = four.login_token
+                _progress("auth: xarvio token completed")
+
+            all_farm_uuids: List[str] = []
+            if selected_farm_uuids:
+                all_farm_uuids = selected_farm_uuids
+                farms_scanned = len(all_farm_uuids)
+                _progress(f"step1: selected farms applied farms_scanned={farms_scanned}")
+            else:
+                _progress("step1: farms overview started")
+                farms_out = await call_graphql(make_payload("FarmsOverview", FARMS_OVERVIEW), login_token, api_token)
+                farms_data = (((farms_out.get("response") or {}).get("data") or {}).get("farms") or [])
+                all_farm_uuids = [str(f.get("uuid")) for f in farms_data if isinstance(f, dict) and f.get("uuid")]
+                farms_scanned = len(all_farm_uuids)
+                _progress(f"step1: farms overview completed farms_scanned={farms_scanned}")
+
+            _progress("step2: hfr candidate scan started")
+            cand_resp = await farms_hfr_candidates(
+                HfrFarmCandidatesReq(
+                    login_token=login_token,
+                    api_token=api_token,
+                    farm_uuids=all_farm_uuids,
+                    suffix=req.suffix,
+                    includeTokens=False,
+                )
             )
-            suffix = str(req.suffix or "").strip()
-            suffix_lower = suffix.lower() if suffix else ""
-            collected_fields: List[Dict[str, Any]] = []
-            farm_chunks = _chunk_list(matched_farm_uuids, chunk_size)
-            total_chunks = len(farm_chunks)
-            _progress(
-                f"step3: task fetch started chunk_size={chunk_size} total_chunks={total_chunks} "
-                f"attempts={chunk_attempts} require_complete_chunk={require_complete_chunk}"
-            )
+            cand_json = _response_to_json(cand_resp)
+            matched_farm_uuids = (((cand_json.get("response") or {}).get("data") or {}).get("matchedFarmUuids") or [])
+            matched_farm_uuids = [str(u) for u in matched_farm_uuids if str(u)]
+            farms_matched = len(matched_farm_uuids)
+            _progress(f"step2: hfr candidate scan completed farms_matched={farms_matched}")
 
-            for idx, farm_chunk in enumerate(farm_chunks, start=1):
-                _progress(f"step3: chunk {idx}/{total_chunks} started farms={len(farm_chunk)}")
-                combined_json = None
-                last_http_exc: Optional[HTTPException] = None
-                last_exc: Optional[Exception] = None
-                for attempt in range(1, chunk_attempts + 1):
-                    try:
-                        combined_resp = await combined_field_data_tasks(
-                            CombinedFieldDataTasksReq(
-                                login_token=login_token,
-                                api_token=api_token,
-                                farm_uuids=farm_chunk,
-                                languageCode=req.languageCode,
-                                withBoundary=False,
-                                withCropSeasonsV2=True,
-                                withHarvests=True,
-                                withCropEstablishments=True,
-                                withLandPreparations=True,
-                                withDroneFlights=False,
-                                withSeedTreatments=True,
-                                withSeedBoxTreatments=True,
-                                withSmartSprayingTasks=False,
-                                withWaterManagementTasks=True,
-                                withScoutingTasks=True,
-                                withObservations=False,
-                                withSprayingsV2=True,
-                                withSoilSamplingTasks=False,
-                                forceRefresh=True,
-                            )
-                        )
-                        combined_json = _response_to_json(combined_resp)
-                        if not isinstance(combined_json, dict):
-                            raise HTTPException(502, {"reason": "snapshot_chunk_invalid_response"})
-                        if combined_json.get("ok", True) is False:
-                            status_code = int(combined_json.get("status") or 502)
-                            raise HTTPException(
-                                status_code,
-                                {
-                                    "reason": "snapshot_chunk_upstream_failed",
-                                    "chunk_index": idx,
-                                    "chunk_total": total_chunks,
-                                    "chunk_farm_count": len(farm_chunk),
-                                    "upstream": combined_json,
-                                },
-                            )
+            if matched_farm_uuids:
+                chunk_size = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_SIZE", "5")), 100))
+                chunk_attempts = max(1, min(int(os.getenv("HFR_SNAPSHOT_CHUNK_ATTEMPTS", "6")), 8))
+                retry_backoff_sec = max(0.1, float(os.getenv("HFR_SNAPSHOT_CHUNK_RETRY_BACKOFF_SEC", "3.0")))
+                require_complete_chunk = str(os.getenv("HFR_SNAPSHOT_REQUIRE_COMPLETE_CHUNK", "1")).lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
+                suffix = str(req.suffix or "").strip()
+                suffix_lower = suffix.lower() if suffix else ""
+                collected_fields: List[Dict[str, Any]] = []
+                farm_chunks = _chunk_list(matched_farm_uuids, chunk_size)
+                total_chunks = len(farm_chunks)
+                _progress(
+                    f"step3: task fetch started chunk_size={chunk_size} total_chunks={total_chunks} "
+                    f"attempts={chunk_attempts} require_complete_chunk={require_complete_chunk}"
+                )
 
-                        chunk_fields = (((combined_json.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
-                        if not isinstance(chunk_fields, list):
-                            raise HTTPException(502, {"reason": "snapshot_chunk_missing_fields"})
-
-                        covered_farms = set(_extract_farm_uuids_from_fields(chunk_fields))
-                        missing_farms = [u for u in farm_chunk if u not in covered_farms]
-                        if missing_farms and require_complete_chunk:
-                            raise HTTPException(
-                                502,
-                                {
-                                    "reason": "snapshot_chunk_incomplete",
-                                    "chunk_index": idx,
-                                    "chunk_total": total_chunks,
-                                    "missing_farm_uuids": missing_farms[:50],
-                                    "covered_farm_count": len(covered_farms),
-                                    "requested_farm_count": len(farm_chunk),
-                                },
+                for idx, farm_chunk in enumerate(farm_chunks, start=1):
+                    _progress(f"step3: chunk {idx}/{total_chunks} started farms={len(farm_chunk)}")
+                    combined_json = None
+                    last_http_exc: Optional[HTTPException] = None
+                    last_exc: Optional[Exception] = None
+                    for attempt in range(1, chunk_attempts + 1):
+                        try:
+                            combined_resp = await combined_field_data_tasks(
+                                CombinedFieldDataTasksReq(
+                                    login_token=login_token,
+                                    api_token=api_token,
+                                    farm_uuids=farm_chunk,
+                                    languageCode=req.languageCode,
+                                    withBoundary=False,
+                                    withCropSeasonsV2=True,
+                                    withHarvests=True,
+                                    withCropEstablishments=True,
+                                    withLandPreparations=True,
+                                    withDroneFlights=False,
+                                    withSeedTreatments=True,
+                                    withSeedBoxTreatments=True,
+                                    withSmartSprayingTasks=False,
+                                    withWaterManagementTasks=True,
+                                    withScoutingTasks=True,
+                                    withObservations=False,
+                                    withSprayingsV2=True,
+                                    withSoilSamplingTasks=False,
+                                    forceRefresh=True,
+                                )
                             )
-                        if missing_farms:
+                            combined_json = _response_to_json(combined_resp)
+                            if not isinstance(combined_json, dict):
+                                raise HTTPException(502, {"reason": "snapshot_chunk_invalid_response"})
+                            if combined_json.get("ok", True) is False:
+                                status_code = int(combined_json.get("status") or 502)
+                                raise HTTPException(
+                                    status_code,
+                                    {
+                                        "reason": "snapshot_chunk_upstream_failed",
+                                        "chunk_index": idx,
+                                        "chunk_total": total_chunks,
+                                        "chunk_farm_count": len(farm_chunk),
+                                        "upstream": combined_json,
+                                    },
+                                )
+
+                            chunk_fields = (((combined_json.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
+                            if not isinstance(chunk_fields, list):
+                                raise HTTPException(502, {"reason": "snapshot_chunk_missing_fields"})
+
+                            covered_farms = set(_extract_farm_uuids_from_fields(chunk_fields))
+                            missing_farms = [u for u in farm_chunk if u not in covered_farms]
+                            if missing_farms and require_complete_chunk:
+                                raise HTTPException(
+                                    502,
+                                    {
+                                        "reason": "snapshot_chunk_incomplete",
+                                        "chunk_index": idx,
+                                        "chunk_total": total_chunks,
+                                        "missing_farm_uuids": missing_farms[:50],
+                                        "covered_farm_count": len(covered_farms),
+                                        "requested_farm_count": len(farm_chunk),
+                                    },
+                                )
+                            if missing_farms:
+                                _progress(
+                                    f"step3: chunk {idx}/{total_chunks} warning missing_farms={len(missing_farms)}"
+                                )
+                            break
+                        except HTTPException as exc:
+                            last_http_exc = exc
+                            retryable_status = exc.status_code in (429, 500, 502, 503, 504)
+                            if attempt >= chunk_attempts or not retryable_status:
+                                raise
+                            sleep_s = retry_backoff_sec * attempt + random.uniform(0.0, 0.6)
                             _progress(
-                                f"step3: chunk {idx}/{total_chunks} warning missing_farms={len(missing_farms)}"
+                                f"step3: chunk {idx}/{total_chunks} retry {attempt}/{chunk_attempts - 1} "
+                                f"status={exc.status_code} wait={sleep_s:.1f}s"
                             )
-                        break
-                    except HTTPException as exc:
-                        last_http_exc = exc
-                        retryable_status = exc.status_code in (429, 500, 502, 503, 504)
-                        if attempt >= chunk_attempts or not retryable_status:
-                            raise
-                        sleep_s = retry_backoff_sec * attempt + random.uniform(0.0, 0.6)
-                        _progress(
-                            f"step3: chunk {idx}/{total_chunks} retry {attempt}/{chunk_attempts - 1} "
-                            f"status={exc.status_code} wait={sleep_s:.1f}s"
-                        )
-                        await asyncio.sleep(sleep_s)
-                    except Exception as exc:  # pylint: disable=broad-except
-                        last_exc = exc
-                        if attempt >= chunk_attempts:
-                            raise
-                        sleep_s = retry_backoff_sec * attempt + random.uniform(0.0, 0.6)
-                        _progress(
-                            f"step3: chunk {idx}/{total_chunks} retry {attempt}/{chunk_attempts - 1} "
-                            f"error={exc.__class__.__name__} wait={sleep_s:.1f}s"
-                        )
-                        await asyncio.sleep(sleep_s)
+                            await asyncio.sleep(sleep_s)
+                        except Exception as exc:  # pylint: disable=broad-except
+                            last_exc = exc
+                            if attempt >= chunk_attempts:
+                                raise
+                            sleep_s = retry_backoff_sec * attempt + random.uniform(0.0, 0.6)
+                            _progress(
+                                f"step3: chunk {idx}/{total_chunks} retry {attempt}/{chunk_attempts - 1} "
+                                f"error={exc.__class__.__name__} wait={sleep_s:.1f}s"
+                            )
+                            await asyncio.sleep(sleep_s)
 
-                if combined_json is None:
-                    if last_http_exc is not None:
-                        raise last_http_exc
-                    if last_exc is not None:
-                        raise last_exc
-                    raise HTTPException(500, {"reason": "snapshot_chunk_no_response"})
+                    if combined_json is None:
+                        if last_http_exc is not None:
+                            raise last_http_exc
+                        if last_exc is not None:
+                            raise last_exc
+                        raise HTTPException(500, {"reason": "snapshot_chunk_no_response"})
 
-                fields = (((combined_json.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
-                if isinstance(fields, list):
-                    collected_fields.extend([f for f in fields if isinstance(f, dict)])
+                    fields = (((combined_json.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
+                    if isinstance(fields, list):
+                        collected_fields.extend([f for f in fields if isinstance(f, dict)])
+                        _progress(
+                            f"step3: chunk {idx}/{total_chunks} completed "
+                            f"fields_in_chunk={len(fields)} collected_fields={len(collected_fields)}"
+                        )
+                    else:
+                        _progress(f"step3: chunk {idx}/{total_chunks} completed with no fieldsV2 list")
+
+                _progress(f"step3: fetch completed collected_fields={len(collected_fields)}")
+                filtered_fields = collected_fields
+                if suffix_lower:
+                    filtered_fields = []
+                    for field in collected_fields:
+                        name = str((field or {}).get("name") or "").strip()
+                        if not name:
+                            continue
+                        if suffix_lower in name.lower():
+                            filtered_fields.append(field)
                     _progress(
-                        f"step3: chunk {idx}/{total_chunks} completed "
-                        f"fields_in_chunk={len(fields)} collected_fields={len(collected_fields)}"
+                        f"step3.5: suffix filter suffix={suffix} "
+                        f"before={len(collected_fields)} after={len(filtered_fields)}"
+                    )
+
+                extracted = _extract_snapshot_rows(run_id=run_id, snapshot_date=snapshot_date, fields=filtered_fields)
+                _progress(
+                    f"step4: extraction completed field_rows={len(extracted['fields'])} "
+                    f"task_rows={len(extracted['tasks'])} growth_stage_rows={len(extracted.get('growth_stages') or [])}"
+                )
+                if not req.dryRun:
+                    fields_saved = hfr_snapshot_store.upsert_fields(extracted["fields"])
+                    tasks_saved = hfr_snapshot_store.upsert_tasks(extracted["tasks"])
+                    hfr_snapshot_store.upsert_growth_stage_predictions(extracted.get("growth_stages") or [])
+                    pruned = hfr_snapshot_store.prune_snapshot_date(snapshot_date, run_id)
+                    try:
+                        hfr_snapshot_store.rebuild_dashboard_summary_cache(snapshot_date, run_id)
+                        _progress("step5.2: dashboard summary cache rebuilt")
+                    except Exception as exc:  # pragma: no cover
+                        _progress(f"step5.2: dashboard summary cache rebuild failed detail={str(exc)}")
+                    _hfr_snapshot_cache_invalidate_snapshot_date(snapshot_date)
+                    _progress(f"step5: persisted fields_saved={fields_saved} tasks_saved={tasks_saved}")
+                    _progress(
+                        f"step5.5: pruned old runs runs_deleted={pruned.get('runs_deleted', 0)} "
+                        f"fields_deleted={pruned.get('fields_deleted', 0)} "
+                        f"tasks_deleted={pruned.get('tasks_deleted', 0)}"
                     )
                 else:
-                    _progress(f"step3: chunk {idx}/{total_chunks} completed with no fieldsV2 list")
-
-            _progress(f"step3: fetch completed collected_fields={len(collected_fields)}")
-            filtered_fields = collected_fields
-            if suffix_lower:
-                filtered_fields = []
-                for field in collected_fields:
-                    name = str((field or {}).get("name") or "").strip()
-                    if not name:
-                        continue
-                    if suffix_lower in name.lower():
-                        filtered_fields.append(field)
-                _progress(
-                    f"step3.5: suffix filter suffix={suffix} "
-                    f"before={len(collected_fields)} after={len(filtered_fields)}"
-                )
-
-            extracted = _extract_snapshot_rows(run_id=run_id, snapshot_date=snapshot_date, fields=filtered_fields)
-            _progress(
-                f"step4: extraction completed field_rows={len(extracted['fields'])} "
-                f"task_rows={len(extracted['tasks'])}"
-            )
-            if not req.dryRun:
-                fields_saved = hfr_snapshot_store.upsert_fields(extracted["fields"])
-                tasks_saved = hfr_snapshot_store.upsert_tasks(extracted["tasks"])
-                pruned = hfr_snapshot_store.prune_snapshot_date(snapshot_date, run_id)
-                _hfr_snapshot_cache_invalidate_snapshot_date(snapshot_date)
-                _progress(f"step5: persisted fields_saved={fields_saved} tasks_saved={tasks_saved}")
-                _progress(
-                    f"step5.5: pruned old runs runs_deleted={pruned.get('runs_deleted', 0)} "
-                    f"fields_deleted={pruned.get('fields_deleted', 0)} "
-                    f"tasks_deleted={pruned.get('tasks_deleted', 0)}"
-                )
+                    fields_saved = len(extracted["fields"])
+                    tasks_saved = len(extracted["tasks"])
+                    _progress(f"step5: dry run counts fields={fields_saved} tasks={tasks_saved}")
             else:
-                fields_saved = len(extracted["fields"])
-                tasks_saved = len(extracted["tasks"])
-                _progress(f"step5: dry run counts fields={fields_saved} tasks={tasks_saved}")
-        else:
-            _progress("step3: skipped (no matched farms)")
+                _progress("step3: skipped (no matched farms)")
 
-        if should_persist:
-            hfr_snapshot_store.finish_run(
-                run_id,
-                snapshot_date=snapshot_date,
-                status="success",
-                message="snapshot completed",
-                farms_scanned=farms_scanned,
-                farms_matched=farms_matched,
-                fields_saved=fields_saved,
-                tasks_saved=tasks_saved,
+            if should_persist:
+                hfr_snapshot_store.finish_run(
+                    run_id,
+                    snapshot_date=snapshot_date,
+                    status="success",
+                    message="snapshot completed",
+                    farms_scanned=farms_scanned,
+                    farms_matched=farms_matched,
+                    fields_saved=fields_saved,
+                    tasks_saved=tasks_saved,
+                )
+            _progress(
+                f"job completed farms_scanned={farms_scanned} farms_matched={farms_matched} "
+                f"fields={fields_saved} tasks={tasks_saved}"
             )
-        _progress(
-            f"job completed farms_scanned={farms_scanned} farms_matched={farms_matched} "
-            f"fields={fields_saved} tasks={tasks_saved}"
-        )
-        return {
-            "ok": True,
-            "run_id": run_id,
-            "snapshot_date": str(snapshot_date),
-            "mode": "manual" if manual_mode else "scheduled",
-            "farms_scanned": farms_scanned,
-            "farms_matched": farms_matched,
-            "fields_saved": fields_saved,
-            "tasks_saved": tasks_saved,
-            "dry_run": req.dryRun,
-        }
-    except HTTPException as exc:
-        if should_persist:
-            hfr_snapshot_store.finish_run(
-                run_id,
-                snapshot_date=snapshot_date,
-                status="failed",
-                message=str(exc.detail),
-                farms_scanned=farms_scanned,
-                farms_matched=farms_matched,
-                fields_saved=fields_saved,
-                tasks_saved=tasks_saved,
-            )
-        _progress(f"job failed (http) detail={exc.detail}")
-        raise
-    except Exception as exc:
-        if should_persist:
-            hfr_snapshot_store.finish_run(
-                run_id,
-                snapshot_date=snapshot_date,
-                status="failed",
-                message=str(exc),
-                farms_scanned=farms_scanned,
-                farms_matched=farms_matched,
-                fields_saved=fields_saved,
-                tasks_saved=tasks_saved,
-            )
-        _progress(f"job failed (exception) type={exc.__class__.__name__} detail={str(exc)}")
-        raise HTTPException(500, {"reason": "snapshot_failed", "detail": str(exc)})
+            return {
+                "ok": True,
+                "run_id": run_id,
+                "snapshot_date": str(snapshot_date),
+                "mode": "manual" if manual_mode else "scheduled",
+                "farms_scanned": farms_scanned,
+                "farms_matched": farms_matched,
+                "fields_saved": fields_saved,
+                "tasks_saved": tasks_saved,
+                "dry_run": req.dryRun,
+            }
+        except HTTPException as exc:
+            if should_persist:
+                hfr_snapshot_store.finish_run(
+                    run_id,
+                    snapshot_date=snapshot_date,
+                    status="failed",
+                    message=str(exc.detail),
+                    farms_scanned=farms_scanned,
+                    farms_matched=farms_matched,
+                    fields_saved=fields_saved,
+                    tasks_saved=tasks_saved,
+                )
+            _progress(f"job failed (http) detail={exc.detail}")
+            raise
+        except Exception as exc:
+            if should_persist:
+                hfr_snapshot_store.finish_run(
+                    run_id,
+                    snapshot_date=snapshot_date,
+                    status="failed",
+                    message=str(exc),
+                    farms_scanned=farms_scanned,
+                    farms_matched=farms_matched,
+                    fields_saved=fields_saved,
+                    tasks_saved=tasks_saved,
+                )
+            _progress(f"job failed (exception) type={exc.__class__.__name__} detail={str(exc)}")
+            raise HTTPException(500, {"reason": "snapshot_failed", "detail": str(exc)})
+    finally:
+        _hfr_snapshot_job_lock.release()
 
 
 def _to_day_key(value: Any) -> str:
@@ -3307,10 +3350,46 @@ def _snapshot_task_family(task: Dict[str, Any]) -> str:
     return default_map.get(task_type, task_type or "その他")
 
 
+def _task_type_filter_from_families(family_set: set[str]) -> Optional[List[str]]:
+    """
+    Convert UI family labels to a coarse DB task_type filter.
+    Notes:
+    - Spraying subtypes (防除/施肥/雑草管理) all map to Spraying.
+    - If family set is empty, return None (no filter).
+    """
+    if not family_set:
+        return None
+    mapped: set[str] = set()
+    for fam in family_set:
+        f = str(fam or "").strip()
+        if not f:
+            continue
+        if f.startswith("防除タスク") or f == "施肥タスク" or f == "雑草管理タスク":
+            mapped.add("Spraying")
+        elif f == "播種タスク":
+            mapped.add("CropEstablishment")
+        elif f == "収穫タスク":
+            mapped.add("Harvest")
+        elif f == "水管理タスク":
+            mapped.add("WaterManagement")
+        elif f == "観察記録タスク":
+            mapped.add("Scouting")
+        elif f == "土壌管理タスク":
+            mapped.add("LandPreparation")
+        elif f == "種子処理タスク":
+            mapped.add("SeedTreatment")
+        elif f == "育苗箱処理タスク":
+            mapped.add("SeedBoxTreatment")
+    return sorted(mapped) if mapped else None
+
+
 @api_app.get("/hfr-snapshots/fields-csv")
 async def hfr_snapshots_fields_csv(
     snapshot_date: Optional[str] = None,
     farm_uuid: Optional[str] = None,
+    families: Optional[str] = None,
+    action_filter: str = "none",
+    today: Optional[str] = None,
     refresh: bool = False,
 ):
     """
@@ -3319,7 +3398,11 @@ async def hfr_snapshots_fields_csv(
     try:
         hfr_snapshot_store.ensure_schema()
         day = datetime.strptime(snapshot_date, "%Y-%m-%d").date() if snapshot_date else datetime.now(timezone(timedelta(hours=9))).date()
-        cache_key = f"hfr:fields-csv:{day}:{farm_uuid or '*'}"
+        family_list = [s.strip() for s in str(families or "").split(",") if s.strip()]
+        family_set = set(family_list)
+        today_key = today.strip() if isinstance(today, str) and today.strip() else day.isoformat()
+        in7days = (datetime.strptime(today_key, "%Y-%m-%d").date() + timedelta(days=7)).isoformat() if re.match(r"^\d{4}-\d{2}-\d{2}$", today_key) else day.isoformat()
+        cache_key = f"hfr:fields-csv:{day}:{farm_uuid or '*'}:{','.join(sorted(family_set))}:{action_filter}:{today_key}"
         if not refresh:
             cached = _hfr_snapshot_cache_get(cache_key)
             if cached and isinstance(cached.get("data", {}).get("content"), str):
@@ -3341,7 +3424,7 @@ async def hfr_snapshots_fields_csv(
         run_id = str(run.get("run_id") or "")
         fields = data.get("fields") or []
         tasks = data.get("tasks") or []
-        today = day.isoformat()
+        snapshot_day_key = day.isoformat()
 
         field_map: Dict[str, Dict[str, Any]] = {}
         for f in fields:
@@ -3351,7 +3434,7 @@ async def hfr_snapshots_fields_csv(
             if not field_uuid_key:
                 continue
             row = field_map.get(field_uuid_key) or {
-                "snapshot_date": today,
+                "snapshot_date": snapshot_day_key,
                 "run_id": run_id,
                 "farm_uuid": str(f.get("farm_uuid") or ""),
                 "farm_name": str(f.get("farm_name") or ""),
@@ -3383,7 +3466,7 @@ async def hfr_snapshots_fields_csv(
             if row is None:
                 # fields 側に行がなくても task 側だけで行を作る
                 row = {
-                    "snapshot_date": today,
+                    "snapshot_date": snapshot_day_key,
                     "run_id": run_id,
                     "farm_uuid": str(t.get("farm_uuid") or ""),
                     "farm_name": str(t.get("farm_name") or ""),
@@ -3405,17 +3488,30 @@ async def hfr_snapshots_fields_csv(
                 }
                 field_map[field_uuid_key] = row
 
+            family = _snapshot_task_family(t)
+            if family_set and family not in family_set:
+                continue
             planned = _to_day_key(t.get("planned_date")) or _to_day_key(t.get("task_date"))
             execution = _to_day_key(t.get("execution_date"))
             status = str(t.get("status") or "").upper()
             done = bool(execution) or ("DONE" in status or "COMPLETED" in status or "EXECUTED" in status)
+            if action_filter == "overdue" and not (planned and planned < today_key and not done):
+                continue
+            if action_filter == "due_today" and not (planned and planned == today_key and not done):
+                continue
+            if action_filter == "upcoming_3days" and not (planned and today_key < planned <= in7days and not done):
+                continue
+            if action_filter == "future" and not (planned and planned > today_key and not done):
+                continue
+            if action_filter == "incomplete" and done:
+                continue
 
             row["task_total"] += 1
             if planned:
-                row["due_count"] += 1 if planned <= today else 0
-                row["overdue_count"] += 1 if (planned < today and not done) else 0
-                row["due_today_count"] += 1 if (planned == today and not done) else 0
-                row["future_count"] += 1 if (planned > today and not done) else 0
+                row["due_count"] += 1 if planned <= today_key else 0
+                row["overdue_count"] += 1 if (planned < today_key and not done) else 0
+                row["due_today_count"] += 1 if (planned == today_key and not done) else 0
+                row["future_count"] += 1 if (planned > today_key and not done) else 0
                 if not row["first_planned_date"] or planned < row["first_planned_date"]:
                     row["first_planned_date"] = planned
                 if not row["last_planned_date"] or planned > row["last_planned_date"]:
@@ -3425,7 +3521,6 @@ async def hfr_snapshots_fields_csv(
                     row["future_count"] += 1
             row["completed_count"] += 1 if done else 0
 
-            family = _snapshot_task_family(t)
             if family:
                 row["task_types"].add(family)
 
@@ -3485,6 +3580,196 @@ async def hfr_snapshots_fields_csv(
         raise HTTPException(500, {"reason": "snapshot_fields_csv_failed", "detail": str(exc)})
 
 
+@api_app.get("/hfr-snapshots/tasks-csv")
+async def hfr_snapshots_tasks_csv(
+    snapshot_date: Optional[str] = None,
+    farm_uuid: Optional[str] = None,
+    families: Optional[str] = None,
+    action_filter: str = "none",
+    today: Optional[str] = None,
+    refresh: bool = False,
+):
+    try:
+        hfr_snapshot_store.ensure_schema()
+        day = datetime.strptime(snapshot_date, "%Y-%m-%d").date() if snapshot_date else datetime.now(timezone(timedelta(hours=9))).date()
+        family_list = [s.strip() for s in str(families or "").split(",") if s.strip()]
+        family_set = set(family_list)
+        today_key = today.strip() if isinstance(today, str) and today.strip() else day.isoformat()
+        in7days = (datetime.strptime(today_key, "%Y-%m-%d").date() + timedelta(days=7)).isoformat() if re.match(r"^\d{4}-\d{2}-\d{2}$", today_key) else day.isoformat()
+        cache_key = f"hfr:tasks-csv:v2:{day}:{farm_uuid or '*'}:{','.join(sorted(family_set))}:{action_filter}:{today_key}"
+        if not refresh:
+            cached = _hfr_snapshot_cache_get(cache_key)
+            if cached and isinstance(cached.get("data", {}).get("content"), str):
+                content = cached["data"]["content"]
+                filename = f"hfr_snapshot_tasks_{day.isoformat()}.csv"
+                headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+                return StreamingResponse(io.BytesIO(content.encode("utf-8-sig")), media_type="text/csv; charset=utf-8", headers=headers)
+
+        data = hfr_snapshot_store.fetch_snapshot(
+            day,
+            farm_uuid=farm_uuid,
+            include_fields=False,
+            include_tasks=True,
+            task_limit=50000,
+            limit=50000,
+        )
+        tasks = data.get("tasks") or []
+        run = data.get("run") or {}
+        run_id = str(run.get("run_id") or "")
+
+        growth_rows = hfr_snapshot_store.fetch_growth_stage_predictions(
+            day,
+            run_id,
+            field_uuid=None,
+            limit=300000,
+        ) if run_id else []
+
+        growth_by_field_season: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for g in growth_rows:
+            if not isinstance(g, dict):
+                continue
+            f_key = str(g.get("field_uuid") or "")
+            s_key = str(g.get("season_uuid") or "")
+            if not f_key:
+                continue
+            growth_by_field_season.setdefault((f_key, s_key), []).append(g)
+
+        def _pick_bbch_prediction(task_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            f_key = str(task_row.get("field_uuid") or "")
+            s_key = str(task_row.get("season_uuid") or "")
+            if not f_key:
+                return None
+            candidates = growth_by_field_season.get((f_key, s_key)) or growth_by_field_season.get((f_key, ""))
+            if not candidates:
+                return None
+
+            target_day = (
+                _to_day_key(task_row.get("planned_date"))
+                or _to_day_key(task_row.get("task_date"))
+                or _to_day_key(task_row.get("execution_date"))
+            )
+            if target_day:
+                in_range: List[Dict[str, Any]] = []
+                for c in candidates:
+                    sd = str(c.get("start_date") or "")
+                    ed = str(c.get("end_date") or "")
+                    if not sd:
+                        continue
+                    if sd <= target_day and (not ed or target_day <= ed):
+                        in_range.append(c)
+                if in_range:
+                    in_range.sort(key=lambda x: (str(x.get("start_date") or ""), str(x.get("prediction_index") or "")))
+                    return in_range[0]
+
+            bbch_idx = str(task_row.get("bbch_index") or "")
+            if bbch_idx:
+                for c in candidates:
+                    if str(c.get("prediction_index") or "") == bbch_idx:
+                        return c
+            return candidates[0] if candidates else None
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow([
+            "snapshot_date",
+            "run_id",
+            "farm_uuid",
+            "farm_name",
+            "field_uuid",
+            "field_name",
+            "season_uuid",
+            "crop_uuid",
+            "task_uuid",
+            "task_family",
+            "task_display",
+            "task_name",
+            "task_type",
+            "occurrence",
+            "task_date",
+            "planned_date",
+            "execution_date",
+            "status",
+            "user_name",
+            "assignee_name",
+            "product",
+            "dosage",
+            "spray_category",
+            "creation_flow_hint",
+            "bbch_index",
+            "bbch_scale",
+            "bbch_stage_code",
+            "bbch_stage_name",
+            "bbch_prediction_start_date",
+            "bbch_prediction_end_date",
+            "fetched_at",
+        ])
+
+        for t in tasks:
+            if not isinstance(t, dict):
+                continue
+            family = _snapshot_task_family(t)
+            if family_set and family not in family_set:
+                continue
+            planned = _to_day_key(t.get("planned_date")) or _to_day_key(t.get("task_date"))
+            execution = _to_day_key(t.get("execution_date"))
+            status = str(t.get("status") or "").upper()
+            done = bool(execution) or ("DONE" in status or "COMPLETED" in status or "EXECUTED" in status)
+            if action_filter == "overdue" and not (planned and planned < today_key and not done):
+                continue
+            if action_filter == "due_today" and not (planned and planned == today_key and not done):
+                continue
+            if action_filter == "upcoming_3days" and not (planned and today_key < planned <= in7days and not done):
+                continue
+            if action_filter == "future" and not (planned and planned > today_key and not done):
+                continue
+            if action_filter == "incomplete" and done:
+                continue
+
+            occ = int(t.get("occurrence") or 1)
+            pred = _pick_bbch_prediction(t)
+            writer.writerow([
+                str(t.get("snapshot_date") or day.isoformat()),
+                str(t.get("run_id") or ""),
+                str(t.get("farm_uuid") or ""),
+                str(t.get("farm_name") or ""),
+                str(t.get("field_uuid") or ""),
+                str(t.get("field_name") or ""),
+                str(t.get("season_uuid") or ""),
+                str(t.get("crop_uuid") or ""),
+                str(t.get("task_uuid") or ""),
+                family,
+                f"{family} {occ}回目",
+                str(t.get("task_name") or ""),
+                str(t.get("task_type") or ""),
+                occ,
+                str(t.get("task_date") or ""),
+                str(t.get("planned_date") or ""),
+                str(t.get("execution_date") or ""),
+                str(t.get("status") or ""),
+                str(t.get("user_name") or ""),
+                str(t.get("assignee_name") or ""),
+                str(t.get("product") or ""),
+                str(t.get("dosage") or ""),
+                str(t.get("spray_category") or ""),
+                str(t.get("creation_flow_hint") or ""),
+                str(t.get("bbch_index") or ""),
+                str(t.get("bbch_scale") or ""),
+                str((pred or {}).get("stage_code") or ""),
+                str((pred or {}).get("stage_name") or ""),
+                str((pred or {}).get("start_date") or ""),
+                str((pred or {}).get("end_date") or ""),
+                str(t.get("fetched_at") or ""),
+            ])
+
+        csv_text = output.getvalue()
+        _hfr_snapshot_cache_set(cache_key, {"content": csv_text})
+        filename = f"hfr_snapshot_tasks_{day.isoformat()}.csv"
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return StreamingResponse(io.BytesIO(csv_text.encode("utf-8-sig")), media_type="text/csv; charset=utf-8", headers=headers)
+    except Exception as exc:
+        raise HTTPException(500, {"reason": "snapshot_tasks_csv_failed", "detail": str(exc)})
+
+
 @api_app.get("/hfr-snapshots/summary")
 async def hfr_snapshots_summary(
     snapshot_date: Optional[str] = None,
@@ -3493,6 +3778,7 @@ async def hfr_snapshots_summary(
     refresh: bool = False,
 ):
     try:
+        started = time.perf_counter()
         hfr_snapshot_store.ensure_schema()
         day = datetime.strptime(snapshot_date, "%Y-%m-%d").date() if snapshot_date else datetime.now(timezone(timedelta(hours=9))).date()
         family_list = [s.strip() for s in str(families or "").split(",") if s.strip()]
@@ -3501,7 +3787,23 @@ async def hfr_snapshots_summary(
         if not refresh:
             cached = _hfr_snapshot_cache_get(cache_key)
             if cached:
-                return {**cached["data"], "source": "cache", "cached_at": cached.get("cached_at")}
+                return {
+                    **cached["data"],
+                    "source": "cache",
+                    "cached_at": cached.get("cached_at"),
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                }
+            # Fast path: precomputed default summary cache (no family/action filter).
+            if not family_set and action_filter == "none":
+                cached_payload = hfr_snapshot_store.fetch_dashboard_summary_cache(day)
+                if isinstance(cached_payload, dict) and cached_payload:
+                    _hfr_snapshot_cache_set(cache_key, cached_payload)
+                    return {
+                        **cached_payload,
+                        "source": "db_precomputed",
+                        "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+                        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    }
 
         today = str(day)
         in3days = (day + timedelta(days=3)).isoformat()
@@ -3518,6 +3820,10 @@ async def hfr_snapshots_summary(
             action_filter_in3days=in3days if sql_action else None,
         )
         tasks = data.get("tasks") or []
+        run = data.get("run") or {}
+        run_id = str(run.get("run_id") or "")
+        field_agg = hfr_snapshot_store.fetch_field_aggregate(day, run_id)
+        no_task_farmers = hfr_snapshot_store.fetch_no_task_farmers(day, run_id)
 
         filtered_tasks: List[Dict[str, Any]] = []
         action_already_sql = sql_action is not None
@@ -3751,6 +4057,9 @@ async def hfr_snapshots_summary(
         payload = {
             "ok": True,
             "snapshot_date": str(day),
+            "farmer_count": int(field_agg.get("farmer_count") or 0),
+            "field_count": int(field_agg.get("field_count") or 0),
+            "total_area_m2": float(field_agg.get("total_area_m2") or 0.0),
             "kpi": {
                 "completion_rate": _rate(total_completed, total_due),
                 "completed_count": total_completed,
@@ -3761,20 +4070,29 @@ async def hfr_snapshots_summary(
                 "upcoming_3days_count": total_upcoming,
                 "future_count": total_future,
                 "total_task_count": len(filtered_tasks),
-                "as_of": ((data.get("run") or {}).get("finished_at") or (data.get("run") or {}).get("started_at") or str(day)),
+                "as_of": (run.get("finished_at") or run.get("started_at") or str(day)),
             },
             "farmers": farmers,
             "task_types": task_types,
             "distribution": distribution,
             "trend": trend,
             "farmer_details": farmer_details,
-            "as_of": ((data.get("run") or {}).get("finished_at") or (data.get("run") or {}).get("started_at") or str(day)),
+            "no_task_farmers": no_task_farmers,
+            "as_of": (run.get("finished_at") or run.get("started_at") or str(day)),
         }
+        if not family_set and action_filter == "none":
+            try:
+                run_id_to_cache = str(run.get("run_id") or "")
+                if run_id_to_cache:
+                    hfr_snapshot_store.upsert_dashboard_summary_cache(day, run_id_to_cache, payload)
+            except Exception:
+                pass
         _hfr_snapshot_cache_set(cache_key, payload)
         return {
             **payload,
             "source": "db",
             "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
         }
     except Exception as exc:
         raise HTTPException(500, {"reason": "snapshot_summary_failed", "detail": str(exc)})
@@ -3792,6 +4110,7 @@ async def hfr_snapshots(
     refresh: bool = False,
 ):
     try:
+        started = time.perf_counter()
         hfr_snapshot_store.ensure_schema()
         day = datetime.strptime(snapshot_date, "%Y-%m-%d").date() if snapshot_date else datetime.now(timezone(timedelta(hours=9))).date()
         safe_limit = max(1, min(limit, 50000))
@@ -3809,6 +4128,7 @@ async def hfr_snapshots(
                     **cached["data"],
                     "source": "cache",
                     "cached_at": cached.get("cached_at"),
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 }
 
         data = hfr_snapshot_store.fetch_snapshot(
@@ -3827,14 +4147,97 @@ async def hfr_snapshots(
             "fields": data.get("fields") or [],
             "tasks": data.get("tasks") or [],
         }
+        # Lightweight aggregate for dashboard bootstrap.
+        # This keeps initial UI informative without issuing the heavy summary query.
+        if not include_fields and not include_tasks:
+            run = data.get("run") or {}
+            run_id = str(run.get("run_id") or "")
+            agg = hfr_snapshot_store.fetch_field_aggregate(day, run_id)
+            payload["farmer_count"] = int(agg.get("farmer_count") or 0)
+            payload["field_count"] = int(agg.get("field_count") or 0)
+            payload["total_area_m2"] = float(agg.get("total_area_m2") or 0.0)
+            summary_cached = hfr_snapshot_store.fetch_dashboard_summary_cache(day, run_id=run_id)
+            payload["no_task_farmers"] = (
+                (summary_cached or {}).get("no_task_farmers")
+                if isinstance(summary_cached, dict)
+                else []
+            )
         _hfr_snapshot_cache_set(cache_key, payload)
         return {
             **payload,
             "source": "db",
             "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
         }
     except Exception as exc:
         raise HTTPException(500, {"reason": "snapshot_read_failed", "detail": str(exc)})
+
+
+@api_app.get("/hfr-snapshots/tasks-lite")
+async def hfr_snapshots_tasks_lite(
+    snapshot_date: Optional[str] = None,
+    farm_uuid: Optional[str] = None,
+    limit: int = 2000,
+    task_limit: Optional[int] = None,
+    families: Optional[str] = None,
+    action_filter: str = "none",
+    today: Optional[str] = None,
+    refresh: bool = False,
+):
+    try:
+        started = time.perf_counter()
+        hfr_snapshot_store.ensure_schema()
+        day = datetime.strptime(snapshot_date, "%Y-%m-%d").date() if snapshot_date else datetime.now(timezone(timedelta(hours=9))).date()
+        safe_limit = max(1, min(limit, 50000))
+        safe_task_limit = max(1, min(int(task_limit if task_limit is not None else safe_limit), 50000))
+        family_list = [s.strip() for s in str(families or "").split(",") if s.strip()]
+        family_set = set(family_list)
+        task_type_in = _task_type_filter_from_families(family_set)
+        today_key = today.strip() if isinstance(today, str) and today.strip() else str(day)
+        in7days = (datetime.strptime(today_key, "%Y-%m-%d").date() + timedelta(days=7)).isoformat() if re.match(r"^\d{4}-\d{2}-\d{2}$", today_key) else str(day)
+        sql_action = action_filter if action_filter in ("overdue", "due_today", "upcoming_3days", "future", "incomplete") else None
+        cache_key = (
+            f"hfr:tasks-lite:{day}:{farm_uuid or '*'}:{safe_task_limit}:"
+            f"fam={','.join(sorted(family_set))}:act={action_filter}:today={today_key}"
+        )
+        if not refresh:
+            cached = _hfr_snapshot_cache_get(cache_key)
+            if cached:
+                return {
+                    **cached["data"],
+                    "source": "cache",
+                    "cached_at": cached.get("cached_at"),
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                }
+
+        data = hfr_snapshot_store.fetch_snapshot(
+            day,
+            farm_uuid=farm_uuid,
+            limit=safe_limit,
+            include_fields=False,
+            include_tasks=True,
+            task_limit=safe_task_limit,
+            task_type_in=task_type_in,
+            action_filter=sql_action,
+            action_filter_today=today_key if sql_action else None,
+            action_filter_in3days=in7days if sql_action else None,
+            tasks_projection="lite",
+        )
+        payload = {
+            "ok": True,
+            "snapshot_date": str(day),
+            "run": data.get("run"),
+            "tasks": data.get("tasks") or [],
+        }
+        _hfr_snapshot_cache_set(cache_key, payload)
+        return {
+            **payload,
+            "source": "db",
+            "cached_at": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        }
+    except Exception as exc:
+        raise HTTPException(500, {"reason": "snapshot_tasks_lite_failed", "detail": str(exc)})
 
 
 @api_app.get("/hfr-snapshots/dates")

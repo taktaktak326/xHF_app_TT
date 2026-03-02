@@ -40,6 +40,9 @@ interface DataContextType {
   setCombinedRetryCountdown: (value: number | null) => void;
   combinedFetchProgress: CombinedFetchProgress | null;
   setCombinedFetchProgress: Dispatch<SetStateAction<CombinedFetchProgress | null>>;
+  /** 圃場名フィルタ（空文字 = フィルタなし） */
+  fieldNameFilter: string;
+  setFieldNameFilter: (filter: string) => void;
 }
 
 const DataContext = createContext<DataContextType | undefined>(undefined);
@@ -53,6 +56,7 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
   const [combinedFetchMaxAttempts, setCombinedFetchMaxAttempts] = useState(1);
   const [combinedRetryCountdown, setCombinedRetryCountdown] = useState<number | null>(null);
   const [combinedFetchProgress, setCombinedFetchProgress] = useState<CombinedFetchProgress | null>(null);
+  const [fieldNameFilter, setFieldNameFilter] = useState('');
 
   return (
     <DataContext.Provider
@@ -73,6 +77,8 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
         setCombinedRetryCountdown,
         combinedFetchProgress,
         setCombinedFetchProgress,
+        fieldNameFilter,
+        setFieldNameFilter,
       }}
     >
       {children}

@@ -2,6 +2,7 @@
 |---|---|---|---|
 | FastAPI（バックエンド） | uvicorn main:app --reload --port 8080 | xhf-app/apps/api | Python の API サーバ |
 | Vite（フロントエンド） | npm run dev | xhf-app/apps/web | React の開発サーバ |
+| Streamlit（HFRダッシュボード） | streamlit run streamlit_hfr_dashboard.py | xhf-app/apps/api | HFR圃場を持つ農場を抽出する最小ダッシュボード |
 ※ Vite のポートは空き状況で 5173 / 5174…に変わることがあります（表示された URL を使用）。
 
 ## ローカルでテストする手順
@@ -19,6 +20,13 @@
    ```
 
 3. ブラウザで `http://localhost:5173` を開き、本番同様に機能を確認する。
+
+4. **Streamlit ダッシュボードを起動（任意）**
+   ```bash
+   cd /Users/takuya/Desktop/xhf-app/apps/api
+   streamlit run streamlit_hfr_dashboard.py
+   ```
+   ブラウザで `http://localhost:8501` を開き、ログイン後に `HFR農場を取得` を押す。
 
 ## フロントエンドのセッションキャッシュ（同一セッションで二重取得しない）
 
