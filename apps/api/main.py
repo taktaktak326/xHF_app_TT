@@ -775,7 +775,7 @@ async def farms_hfr_candidates(req: HfrFarmCandidatesReq):
         })
 
     suffix = str(req.suffix).strip() if req.suffix is not None else "HFR"
-    pattern = re.compile(rf"{re.escape(suffix)}$", re.IGNORECASE) if suffix else None
+    suffix_lower = suffix.lower() if suffix else ""
     scan_chunk_size = int(os.getenv("HFR_SCAN_CHUNK_SIZE", "20"))
 
     matched_farm_uuid_set = set()
@@ -799,7 +799,7 @@ async def farms_hfr_candidates(req: HfrFarmCandidatesReq):
             name = str(field.get("name") or "").strip()
             if not name:
                 continue
-            if pattern is not None and not pattern.search(name):
+            if suffix_lower and suffix_lower not in name.lower():
                 continue
             farm = field.get("farmV2") or {}
             farm_uuid = str((farm or {}).get("uuid") or "")
@@ -854,7 +854,7 @@ async def farms_hfr_csv_fields(req: HfrCsvFieldsReq):
         })
 
     suffix = str(req.suffix).strip() if req.suffix is not None else "HFR"
-    pattern = re.compile(rf"{re.escape(suffix)}$", re.IGNORECASE) if suffix else None
+    suffix_lower = suffix.lower() if suffix else ""
 
     payload = make_payload("HfrCsvFieldsData", HFR_CSV_FIELDS_DATA, {
         "farmUuids": farm_uuids,
@@ -872,7 +872,7 @@ async def farms_hfr_csv_fields(req: HfrCsvFieldsReq):
             name = str(field.get("name") or "").strip()
             if not name:
                 continue
-            if pattern is not None and not pattern.search(name):
+            if suffix_lower and suffix_lower not in name.lower():
                 continue
             matched_fields.append(field)
 
@@ -3057,7 +3057,7 @@ async def jobs_hfr_snapshot(
                 "yes",
             )
             suffix = str(req.suffix or "").strip()
-            suffix_pattern = re.compile(rf"{re.escape(suffix)}$", re.IGNORECASE) if suffix else None
+            suffix_lower = suffix.lower() if suffix else ""
             collected_fields: List[Dict[str, Any]] = []
             farm_chunks = _chunk_list(matched_farm_uuids, chunk_size)
             total_chunks = len(farm_chunks)
@@ -3176,13 +3176,13 @@ async def jobs_hfr_snapshot(
 
             _progress(f"step3: fetch completed collected_fields={len(collected_fields)}")
             filtered_fields = collected_fields
-            if suffix_pattern is not None:
+            if suffix_lower:
                 filtered_fields = []
                 for field in collected_fields:
                     name = str((field or {}).get("name") or "").strip()
                     if not name:
                         continue
-                    if suffix_pattern.search(name):
+                    if suffix_lower in name.lower():
                         filtered_fields.append(field)
                 _progress(
                     f"step3.5: suffix filter suffix={suffix} "
