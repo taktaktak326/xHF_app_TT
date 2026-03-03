@@ -60,12 +60,12 @@ type FieldCenter = {
   longitude: number;
 };
 
-const getFieldCenter = (field: Field): FieldCenter | null => {
-  const farmV2 = (field as any).farmV2 ?? (field as any).farm ?? null;
-  const farmCenter = farmV2 && typeof farmV2.latitude === 'number' && typeof farmV2.longitude === 'number'
-    ? { latitude: farmV2.latitude, longitude: farmV2.longitude }
-    : null;
-  const candidates = [field.location?.center, (field as any).center, (field as any).centroid, farmCenter];
+const getFieldCenter = (
+  field: Field,
+  locationOverride?: Partial<NonNullable<Field['location']>>,
+): FieldCenter | null => {
+  const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
+  const candidates = [effectiveLocation?.center, (field as any).center, (field as any).centroid];
   for (const candidate of candidates) {
     if (candidate && typeof candidate.latitude === 'number' && typeof candidate.longitude === 'number') {
       return { latitude: candidate.latitude, longitude: candidate.longitude };
@@ -344,7 +344,7 @@ function FieldsTable({
 	          const noteError = noteImageErrorByField[field.uuid] ?? '';
 	          const locationOverride = locationByFieldUuid[field.uuid];
 	          const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
-	          const center = getFieldCenter(field);
+	          const center = getFieldCenter(field, locationOverride);
 	          const farmName = getFarmName(field);
 	          const ownerName = getFarmOwnerName(field);
 	          const bbch89Date = getBbch89Date(season);
@@ -1154,8 +1154,12 @@ export function FarmsPage() {
     return pickGeometry(boundary);
   };
 
-  const getFieldCenter = (field: Field) => {
-    const candidates = [field.location?.center, (field as any).center, (field as any).centroid];
+  const getFieldCenter = (
+    field: Field,
+    locationOverride?: Partial<NonNullable<Field['location']>>,
+  ) => {
+    const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
+    const candidates = [effectiveLocation?.center, (field as any).center, (field as any).centroid];
     for (const candidate of candidates) {
       if (
         candidate &&
@@ -1661,7 +1665,7 @@ export function FarmsPage() {
       if (hasPrefCity) return;
       if (prefCityByFieldUuid[field.uuid]) return;
       if (prefCityPendingRef.current.has(field.uuid)) return;
-      const center = getFieldCenter(field);
+      const center = getFieldCenter(field, prefCityByFieldUuid[field.uuid]);
       const lat = center?.latitude;
       const lon = center?.longitude;
       if (typeof lat !== 'number' || typeof lon !== 'number') return;
@@ -1734,7 +1738,7 @@ export function FarmsPage() {
 		    const rows = pairs.map(({ field, season, nextStage }) => {
 		      const locationOverride = prefCityByFieldUuid[field.uuid];
 		      const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
-		      const center = getFieldCenter(field);
+		      const center = getFieldCenter(field, locationOverride);
 		      const latitude = center?.latitude ?? null;
 		      const longitude = center?.longitude ?? null;
 		      const farmName = getFarmName(field);

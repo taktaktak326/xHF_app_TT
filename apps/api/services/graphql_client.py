@@ -56,12 +56,12 @@ async def call_graphql(payload: Dict[str, Any], login_token: str, api_token: str
     except Exception:
         out["response_text"] = r.text[:2000]
 
-    # ★ ここで直近レスポンスとして保存（新規が来たら上書き）
+    if r.status_code >= 400:
+        raise HTTPException(r.status_code, out)
+
+    # 成功レスポンスのみ直近キャッシュとして保存
     operation = (payload.get("operationName") if isinstance(payload, dict) else "") or ""
     save_response(operation, payload, out)
     print(f"✅ [CACHE] Saved response for operation: {operation}")
-
-    if r.status_code >= 400:
-        raise HTTPException(r.status_code, out)
 
     return out

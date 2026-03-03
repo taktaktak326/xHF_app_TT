@@ -367,9 +367,88 @@ def upsert_fields(rows: List[Dict[str, Any]]) -> int:
 def upsert_tasks(rows: List[Dict[str, Any]]) -> int:
     if not rows:
         return 0
+
+    # PK単位で重複を圧縮して無駄な conflict update を減らす。
+    deduped: Dict[tuple, Dict[str, Any]] = {}
+    for row in rows:
+        key = (row.get("snapshot_date"), row.get("task_uuid"))
+        deduped[key] = row
+    deduped_rows = list(deduped.values())
+
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.executemany(
+            cur.execute(
+                """
+                CREATE TEMP TABLE tmp_hfr_snapshot_tasks (
+                  snapshot_date DATE NOT NULL,
+                  run_id TEXT NOT NULL,
+                  task_uuid TEXT NOT NULL,
+                  field_uuid TEXT NOT NULL,
+                  season_uuid TEXT NOT NULL DEFAULT '',
+                  crop_uuid TEXT,
+                  farm_uuid TEXT,
+                  farm_name TEXT,
+                  field_name TEXT,
+                  user_name TEXT,
+                  task_name TEXT,
+                  task_type TEXT,
+                  task_date DATE,
+                  planned_date TIMESTAMPTZ,
+                  execution_date TIMESTAMPTZ,
+                  status TEXT,
+                  assignee_name TEXT,
+                  product TEXT,
+                  dosage TEXT,
+                  spray_category TEXT,
+                  creation_flow_hint TEXT,
+                  bbch_index TEXT,
+                  bbch_scale TEXT,
+                  occurrence INTEGER
+                ) ON COMMIT DROP
+                """,
+            )
+            with cur.copy(
+                """
+                COPY tmp_hfr_snapshot_tasks (
+                  snapshot_date, run_id, task_uuid, field_uuid, season_uuid, crop_uuid,
+                  farm_uuid, farm_name, field_name, user_name,
+                  task_name, task_type, task_date,
+                  planned_date, execution_date, status, assignee_name,
+                  product, dosage, spray_category, creation_flow_hint, bbch_index, bbch_scale, occurrence
+                ) FROM STDIN
+                """
+            ) as copy:
+                for row in deduped_rows:
+                    copy.write_row(
+                        (
+                            row.get("snapshot_date"),
+                            row.get("run_id"),
+                            row.get("task_uuid"),
+                            row.get("field_uuid"),
+                            row.get("season_uuid"),
+                            row.get("crop_uuid"),
+                            row.get("farm_uuid"),
+                            row.get("farm_name"),
+                            row.get("field_name"),
+                            row.get("user_name"),
+                            row.get("task_name"),
+                            row.get("task_type"),
+                            row.get("task_date"),
+                            row.get("planned_date"),
+                            row.get("execution_date"),
+                            row.get("status"),
+                            row.get("assignee_name"),
+                            row.get("product"),
+                            row.get("dosage"),
+                            row.get("spray_category"),
+                            row.get("creation_flow_hint"),
+                            row.get("bbch_index"),
+                            row.get("bbch_scale"),
+                            row.get("occurrence"),
+                        )
+                    )
+
+            cur.execute(
                 """
                 INSERT INTO hfr_snapshot_tasks (
                   snapshot_date, run_id, task_uuid, field_uuid, season_uuid, crop_uuid,
@@ -377,13 +456,14 @@ def upsert_tasks(rows: List[Dict[str, Any]]) -> int:
                   task_name, task_type, task_date,
                   planned_date, execution_date, status, assignee_name,
                   product, dosage, spray_category, creation_flow_hint, bbch_index, bbch_scale, occurrence
-                ) VALUES (
-                  %(snapshot_date)s, %(run_id)s, %(task_uuid)s, %(field_uuid)s, %(season_uuid)s, %(crop_uuid)s,
-                  %(farm_uuid)s, %(farm_name)s, %(field_name)s, %(user_name)s,
-                  %(task_name)s, %(task_type)s, %(task_date)s,
-                  %(planned_date)s, %(execution_date)s, %(status)s, %(assignee_name)s,
-                  %(product)s, %(dosage)s, %(spray_category)s, %(creation_flow_hint)s, %(bbch_index)s, %(bbch_scale)s, %(occurrence)s
                 )
+                SELECT
+                  snapshot_date, run_id, task_uuid, field_uuid, season_uuid, crop_uuid,
+                  farm_uuid, farm_name, field_name, user_name,
+                  task_name, task_type, task_date,
+                  planned_date, execution_date, status, assignee_name,
+                  product, dosage, spray_category, creation_flow_hint, bbch_index, bbch_scale, occurrence
+                  FROM tmp_hfr_snapshot_tasks
                 ON CONFLICT (snapshot_date, task_uuid)
                 DO UPDATE SET
                   run_id = EXCLUDED.run_id,
@@ -409,29 +489,88 @@ def upsert_tasks(rows: List[Dict[str, Any]]) -> int:
                   bbch_scale = EXCLUDED.bbch_scale,
                   occurrence = EXCLUDED.occurrence,
                   fetched_at = NOW()
-                """,
-                rows,
+                """
             )
         conn.commit()
-    return len(rows)
+    return len(deduped_rows)
 
 
 def upsert_growth_stage_predictions(rows: List[Dict[str, Any]]) -> int:
     if not rows:
         return 0
+
+    # Primary key 単位で重複を圧縮し、不要な conflict/update を減らす。
+    deduped: Dict[tuple, Dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            row.get("snapshot_date"),
+            row.get("field_uuid"),
+            row.get("season_uuid"),
+            row.get("prediction_index"),
+            row.get("start_date"),
+        )
+        deduped[key] = row
+    deduped_rows = list(deduped.values())
+
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.executemany(
+            cur.execute(
+                """
+                CREATE TEMP TABLE tmp_hfr_growth_stage_predictions (
+                  snapshot_date DATE NOT NULL,
+                  run_id TEXT NOT NULL,
+                  field_uuid TEXT NOT NULL,
+                  season_uuid TEXT NOT NULL DEFAULT '',
+                  prediction_index TEXT NOT NULL DEFAULT '',
+                  start_date TEXT NOT NULL DEFAULT '',
+                  end_date TEXT,
+                  scale TEXT,
+                  gs_order TEXT,
+                  stage_uuid TEXT,
+                  stage_name TEXT,
+                  stage_code TEXT
+                ) ON COMMIT DROP
+                """,
+            )
+            with cur.copy(
+                """
+                COPY tmp_hfr_growth_stage_predictions (
+                  snapshot_date, run_id, field_uuid, season_uuid,
+                  prediction_index, start_date, end_date, scale, gs_order,
+                  stage_uuid, stage_name, stage_code
+                ) FROM STDIN
+                """
+            ) as copy:
+                for row in deduped_rows:
+                    copy.write_row(
+                        (
+                            row.get("snapshot_date"),
+                            row.get("run_id"),
+                            row.get("field_uuid"),
+                            row.get("season_uuid"),
+                            row.get("prediction_index"),
+                            row.get("start_date"),
+                            row.get("end_date"),
+                            row.get("scale"),
+                            row.get("gs_order"),
+                            row.get("stage_uuid"),
+                            row.get("stage_name"),
+                            row.get("stage_code"),
+                        )
+                    )
+
+            cur.execute(
                 """
                 INSERT INTO hfr_snapshot_growth_stage_predictions (
                   snapshot_date, run_id, field_uuid, season_uuid,
                   prediction_index, start_date, end_date, scale, gs_order,
                   stage_uuid, stage_name, stage_code
-                ) VALUES (
-                  %(snapshot_date)s, %(run_id)s, %(field_uuid)s, %(season_uuid)s,
-                  %(prediction_index)s, %(start_date)s, %(end_date)s, %(scale)s, %(gs_order)s,
-                  %(stage_uuid)s, %(stage_name)s, %(stage_code)s
                 )
+                SELECT
+                  snapshot_date, run_id, field_uuid, season_uuid,
+                  prediction_index, start_date, end_date, scale, gs_order,
+                  stage_uuid, stage_name, stage_code
+                  FROM tmp_hfr_growth_stage_predictions
                 ON CONFLICT (snapshot_date, field_uuid, season_uuid, prediction_index, start_date)
                 DO UPDATE SET
                   run_id = EXCLUDED.run_id,
@@ -442,11 +581,10 @@ def upsert_growth_stage_predictions(rows: List[Dict[str, Any]]) -> int:
                   stage_name = EXCLUDED.stage_name,
                   stage_code = EXCLUDED.stage_code,
                   fetched_at = NOW()
-                """,
-                rows,
+                """
             )
         conn.commit()
-    return len(rows)
+    return len(deduped_rows)
 
 
 def fetch_snapshot(
@@ -1039,8 +1177,45 @@ def rebuild_dashboard_summary_cache(snapshot_date: date, run_id: str) -> Dict[st
                 (snapshot_date, run_id),
             )
             rows = cur.fetchall() or []
+            cur.execute(
+                """
+                SELECT farm_uuid, farm_name, field_uuid, area_m2
+                  FROM hfr_snapshot_fields
+                 WHERE snapshot_date = %s
+                   AND run_id = %s
+                """,
+                (snapshot_date, run_id),
+            )
+            field_rows = cur.fetchall() or []
 
-    field_agg = fetch_field_aggregate(snapshot_date, run_id)
+    field_area_by_uuid: Dict[str, float] = {}
+    farmer_name_by_id: Dict[str, str] = {}
+    farmer_fields: Dict[str, set] = {}
+    for f in field_rows:
+        field_uuid = str(f.get("field_uuid") or "")
+        if field_uuid:
+            area_val = f.get("area_m2")
+            try:
+                area_num = float(area_val) if area_val is not None else 0.0
+            except Exception:
+                area_num = 0.0
+            current = field_area_by_uuid.get(field_uuid)
+            if current is None or area_num > current:
+                field_area_by_uuid[field_uuid] = area_num
+
+        farm_uuid = str(f.get("farm_uuid") or "").strip()
+        farm_name = str(f.get("farm_name") or "")
+        farmer_id = farm_uuid if farm_uuid else f"name:{farm_name}"
+        if farmer_id not in farmer_name_by_id:
+            farmer_name_by_id[farmer_id] = farm_name
+        if field_uuid:
+            farmer_fields.setdefault(farmer_id, set()).add(field_uuid)
+
+    field_agg = {
+        "field_count": len(field_area_by_uuid),
+        "total_area_m2": float(sum(field_area_by_uuid.values())),
+        "farmer_count": len(farmer_fields),
+    }
     day_key = snapshot_date.isoformat()
     in7days = (snapshot_date + timedelta(days=7)).isoformat()
     in3days = (snapshot_date + timedelta(days=3)).isoformat()
@@ -1082,6 +1257,7 @@ def rebuild_dashboard_summary_cache(snapshot_date: date, run_id: str) -> Dict[st
         }
 
     farmers_map: Dict[str, Dict[str, Any]] = {}
+    task_fields_by_farmer: Dict[str, set] = {}
     for task in rows:
         farmer_id = str(task.get("farm_uuid") or f"name:{task.get('farm_name') or ''}")
         row = farmers_map.get(farmer_id)
@@ -1091,6 +1267,7 @@ def rebuild_dashboard_summary_cache(snapshot_date: date, run_id: str) -> Dict[st
         field_uuid = str(task.get("field_uuid") or "")
         if field_uuid:
             row["field_set"].add(field_uuid)
+            task_fields_by_farmer.setdefault(farmer_id, set()).add(field_uuid)
         row["tasks"].append(task)
 
     farmers: List[Dict[str, Any]] = []
@@ -1251,7 +1428,22 @@ def rebuild_dashboard_summary_cache(snapshot_date: date, run_id: str) -> Dict[st
         "distribution": distribution,
         "trend": trend,
         "farmer_details": farmer_details,
-        "no_task_farmers": fetch_no_task_farmers(snapshot_date, run_id),
+        "no_task_farmers": [
+            {
+                "id": farmer_id,
+                "name": farmer_name_by_id.get(farmer_id, ""),
+                "field_count": len(fields_all),
+                "no_task_field_count": len(fields_all - task_fields_by_farmer.get(farmer_id, set())),
+            }
+            for farmer_id, fields_all in sorted(
+                farmer_fields.items(),
+                key=lambda item: (
+                    -len(item[1] - task_fields_by_farmer.get(item[0], set())),
+                    farmer_name_by_id.get(item[0], ""),
+                ),
+            )
+            if len(fields_all - task_fields_by_farmer.get(farmer_id, set())) > 0
+        ],
         "as_of": str(as_of),
     }
     upsert_dashboard_summary_cache(snapshot_date, run_id, payload)
