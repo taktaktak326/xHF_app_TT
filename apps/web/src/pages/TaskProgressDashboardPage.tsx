@@ -3277,7 +3277,7 @@ export function TaskProgressDashboardPage() {
           </div>
           <div className="toolbar-meta">
             {tasksHydrating && <span>詳細タスク読込中...</span>}
-            <span>{new Date(dashboard.as_of).toLocaleString('ja-JP')}</span>
+            <span>データ更新時刻: {formatDateTime(dashboard.as_of)}</span>
             <span className="source-tag">snapshot: {snapshotRun?.run_id ?? '-'}</span>
           </div>
         </div>

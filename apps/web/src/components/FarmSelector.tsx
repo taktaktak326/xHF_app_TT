@@ -350,7 +350,13 @@ function farmLabel(f: Farm) {
 export function FarmSelector() {
   const navigate = useNavigate();
   const { auth } = useAuth();
-  const { selectedFarms, setSelectedFarms, replaceSelectedAndSubmittedFarms, cancelCombinedFetch } = useFarms();
+  const {
+    selectedFarms,
+    setSelectedFarms,
+    replaceSelectedAndSubmittedFarms,
+    cancelCombinedFetch,
+    setSubmittedFieldUuids,
+  } = useFarms();
   const { combinedLoading, combinedInProgress, setFieldNameFilter } = useData();
   const { status: warmupStatus, startWarmup } = useWarmup();
   const { language, t } = useLanguage();
@@ -708,12 +714,17 @@ export function FarmSelector() {
       const matchedFarmUuids: string[] = (out?.response?.data?.matchedFarmUuids || [])
         .map((u: any) => String(u || ''))
         .filter(Boolean);
+      const matchedFieldUuids: string[] = (out?.response?.data?.matchedFieldUuids || [])
+        .map((u: any) => String(u || ''))
+        .filter(Boolean);
       if (matchedFarmUuids.length === 0) {
+        setSubmittedFieldUuids([]);
         setHfrStatus(t('farm_selector.hfr_no_match', { suffix: hfrSuffix || t('farm_selector.hfr_suffix_empty') }));
         return;
       }
 
       replaceSelectedAndSubmittedFarms(matchedFarmUuids);
+      setSubmittedFieldUuids(matchedFieldUuids);
       setFieldNameFilter(hfrSuffix);
       setHfrStatus(t('farm_selector.hfr_matched_count', { count: matchedFarmUuids.length }));
       setDropdownOpen(false);
@@ -736,7 +747,7 @@ export function FarmSelector() {
       setHfrLoading(false);
       setHfrProgress({ current: 0, total: 0 });
     }
-  }, [auth, selectedFarms, allFarmIds, t, replaceSelectedAndSubmittedFarms, hfrSuffix, setFieldNameFilter]);
+  }, [auth, selectedFarms, allFarmIds, t, replaceSelectedAndSubmittedFarms, hfrSuffix, setFieldNameFilter, setSubmittedFieldUuids]);
 
   const handleFetchData = useCallback(async (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
@@ -748,6 +759,7 @@ export function FarmSelector() {
       return;
     }
     setHfrStatus(null);
+    setSubmittedFieldUuids([]);
     setFieldNameFilter('');
     setDropdownOpen(false);
     navigate('/farms');

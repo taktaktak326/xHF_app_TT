@@ -159,30 +159,53 @@ export const formatRiskAlert = (season: CropSeason | null): StatusDisplay => {
 export const formatCurrentWaterRecommendations = (recommendations: CropSeason['waterRecommendations']): ReactNode => {
   if (!recommendations) return 'N/A';
 
-  const recommendationNodes = groupConsecutiveItems(
+  const grouped = groupConsecutiveItems(
     recommendations.filter(rec => rec.status !== 'INACTIVE' && rec.status !== 'NOT_NEEDED'),
     'actionType',
-  ).map((rec, recIndex) => {
-    const description = rec.description || rec.actionType;
-    const dateRange =
-      rec.startDate && rec.endDate
-        ? `(${getLocalDateString(rec.startDate)} - ${formatInclusiveEndDate(rec.endDate)})`
-        : '';
-    const text = `${description}${dateRange ? ` ${dateRange}` : ''}`;
-    const lang = getCurrentLanguage();
-    const sentences = (lang === 'ja' ? text.split('。') : text.split('.')).filter(s => s);
-    const sentenceElements = sentences.map((sentence, sentenceIndex) =>
-      createElement(
-        'div',
-        { key: sentenceIndex },
-        `${sentence.trim()}${sentenceIndex < sentences.length - 1 ? (lang === 'ja' ? '。' : '.') : ''}`
-      )
-    );
-    return createElement(Fragment, { key: recIndex }, sentenceElements);
-  });
+  );
+  if (grouped.length === 0) return 'N/A';
 
-  if (recommendationNodes.length === 0) return 'N/A';
-  return recommendationNodes;
+  const now = Date.now();
+  const parseTs = (value?: string | null): number | null => {
+    if (!value) return null;
+    const ts = new Date(value).getTime();
+    return Number.isFinite(ts) ? ts : null;
+  };
+
+  const withTimes = grouped.map((rec) => ({
+    rec,
+    startTs: parseTs(rec.startDate),
+    endTs: parseTs(rec.endDate),
+  }));
+
+  const current = withTimes
+    .filter((x) => x.startTs !== null && x.endTs !== null && x.startTs <= now && now < x.endTs)
+    .sort((a, b) => (a.startTs! - b.startTs!))[0];
+  const upcoming = withTimes
+    .filter((x) => x.startTs !== null && x.startTs > now)
+    .sort((a, b) => (a.startTs! - b.startTs!))[0];
+  const latestPast = withTimes
+    .filter((x) => x.startTs !== null && x.startTs <= now)
+    .sort((a, b) => (b.startTs! - a.startTs!))[0];
+
+  const picked = current ?? upcoming ?? latestPast ?? withTimes[0];
+  const rec = picked.rec;
+  const description = rec.description || rec.actionType;
+  const dateRange =
+    rec.startDate && rec.endDate
+      ? `(${getLocalDateString(rec.startDate)} - ${formatInclusiveEndDate(rec.endDate)})`
+      : '';
+  const text = `${description}${dateRange ? ` ${dateRange}` : ''}`;
+  const lang = getCurrentLanguage();
+  const sentences = (lang === 'ja' ? text.split('。') : text.split('.')).filter(s => s);
+  const sentenceElements = sentences.map((sentence, sentenceIndex) =>
+    createElement(
+      'div',
+      { key: sentenceIndex },
+      `${sentence.trim()}${sentenceIndex < sentences.length - 1 ? (lang === 'ja' ? '。' : '.') : ''}`
+    )
+  );
+  return createElement(Fragment, null, sentenceElements);
 };
 
 /**

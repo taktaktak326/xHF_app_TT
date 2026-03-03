@@ -60,16 +60,98 @@ type FieldCenter = {
   longitude: number;
 };
 
+const toValidCenter = (candidate: any): FieldCenter | null => {
+  if (!candidate || typeof candidate !== 'object') return null;
+  const latRaw = (candidate as any).latitude;
+  const lonRaw = (candidate as any).longitude;
+  const lat = typeof latRaw === 'number' ? latRaw : Number(latRaw);
+  const lon = typeof lonRaw === 'number' ? lonRaw : Number(lonRaw);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const inRange = (la: number, lo: number) => Math.abs(la) <= 90 && Math.abs(lo) <= 180;
+  if (inRange(lat, lon)) return { latitude: lat, longitude: lon };
+  if (inRange(lon, lat)) return { latitude: lon, longitude: lat };
+  return null;
+};
+
+const getBoundaryCenter = (boundary: unknown): FieldCenter | null => {
+  const pickGeometry = (raw: any) => {
+    if (!raw || typeof raw !== 'object') return null;
+    const candidate = raw.geojson || raw.geoJson || raw.geometry || raw;
+    if (
+      candidate &&
+      (candidate.type === 'Polygon' || candidate.type === 'MultiPolygon') &&
+      Array.isArray(candidate.coordinates)
+    ) {
+      return { type: candidate.type, coordinates: candidate.coordinates as any[] };
+    }
+    return null;
+  };
+
+  const geometry = (() => {
+    if (!boundary) return null;
+    if (typeof boundary === 'string') {
+      const text = boundary.trim();
+      if (!(text.startsWith('{') && text.endsWith('}'))) return null;
+      try {
+        return pickGeometry(JSON.parse(text));
+      } catch {
+        return null;
+      }
+    }
+    return pickGeometry(boundary);
+  })();
+
+  if (!geometry) return null;
+
+  let minLon = Infinity;
+  let maxLon = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  const pushPoint = (point: any) => {
+    if (!Array.isArray(point) || point.length < 2) return;
+    const lon = Number(point[0]);
+    const lat = Number(point[1]);
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  };
+
+  if (geometry.type === 'Polygon') {
+    for (const ring of geometry.coordinates as any[]) {
+      if (!Array.isArray(ring)) continue;
+      for (const point of ring) pushPoint(point);
+    }
+  } else {
+    for (const polygon of geometry.coordinates as any[]) {
+      if (!Array.isArray(polygon)) continue;
+      for (const ring of polygon) {
+        if (!Array.isArray(ring)) continue;
+        for (const point of ring) pushPoint(point);
+      }
+    }
+  }
+
+  if (!Number.isFinite(minLon) || !Number.isFinite(minLat) || !Number.isFinite(maxLon) || !Number.isFinite(maxLat)) {
+    return null;
+  }
+  return {
+    latitude: (minLat + maxLat) / 2,
+    longitude: (minLon + maxLon) / 2,
+  };
+};
+
 const getFieldCenter = (
   field: Field,
   locationOverride?: Partial<NonNullable<Field['location']>>,
 ): FieldCenter | null => {
   const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
-  const candidates = [effectiveLocation?.center, (field as any).center, (field as any).centroid];
+  const boundaryCenter = getBoundaryCenter((field as any).boundary);
+  const candidates = [boundaryCenter, (field as any).centroid, (field as any).center, effectiveLocation?.center];
   for (const candidate of candidates) {
-    if (candidate && typeof candidate.latitude === 'number' && typeof candidate.longitude === 'number') {
-      return { latitude: candidate.latitude, longitude: candidate.longitude };
-    }
+    const center = toValidCenter(candidate);
+    if (center) return center;
   }
   return null;
 };
@@ -1108,7 +1190,7 @@ export function FarmsPage() {
   useEffect(() => {
     // For large farm selections, require completeness and let the fetch layer retry
     // until all chunks succeed (instead of silently accepting partial results).
-    fetchCombinedDataIfNeeded({ requireComplete: submittedFarms.length >= 20 });
+    fetchCombinedDataIfNeeded({ includeTasks: false, requireComplete: submittedFarms.length >= 20, withBoundarySvg: true });
   }, [fetchCombinedDataIfNeeded, submittedFarms.length]);
 
   useEffect(() => {
@@ -1159,15 +1241,11 @@ export function FarmsPage() {
     locationOverride?: Partial<NonNullable<Field['location']>>,
   ) => {
     const effectiveLocation = mergeLocationPreferNonEmpty(field.location, locationOverride);
-    const candidates = [effectiveLocation?.center, (field as any).center, (field as any).centroid];
+    const boundaryCenter = getBoundaryCenter((field as any).boundary);
+    const candidates = [boundaryCenter, (field as any).centroid, (field as any).center, effectiveLocation?.center];
     for (const candidate of candidates) {
-      if (
-        candidate &&
-        typeof candidate.latitude === 'number' &&
-        typeof candidate.longitude === 'number'
-      ) {
-        return { latitude: candidate.latitude, longitude: candidate.longitude };
-      }
+      const center = toValidCenter(candidate);
+      if (center) return center;
     }
     return null;
   };
@@ -1796,7 +1874,7 @@ export function FarmsPage() {
           className={`fields-action-btn${seasonView === 'active' ? ' fields-action-btn--accent' : ''}`}
           onClick={() => {
             setSeasonView('active');
-	            fetchCombinedDataIfNeeded({ includeTasks: false, force: true, requireComplete: submittedFarms.length >= 20 });
+	            fetchCombinedDataIfNeeded({ includeTasks: false, force: true, requireComplete: submittedFarms.length >= 20, withBoundarySvg: true });
             setSelectedFieldIds(new Set());
           }}
         >

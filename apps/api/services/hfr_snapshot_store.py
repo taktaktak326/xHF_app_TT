@@ -129,6 +129,32 @@ def ensure_schema() -> None:
             )
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS hfr_snapshot_field_notes (
+                  note_uuid TEXT PRIMARY KEY,
+                  snapshot_date DATE NOT NULL,
+                  run_id TEXT NOT NULL,
+                  field_uuid TEXT NOT NULL,
+                  field_name TEXT,
+                  season_uuid TEXT NOT NULL DEFAULT '',
+                  farm_uuid TEXT,
+                  farm_name TEXT,
+                  note_text TEXT,
+                  categories_json TEXT,
+                  creation_date TIMESTAMPTZ,
+                  location_type TEXT,
+                  region TEXT,
+                  location_json TEXT,
+                  creator_uuid TEXT,
+                  creator_name TEXT,
+                  attachments_json TEXT,
+                  image_urls_json TEXT,
+                  audio_attachments_json TEXT,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
                 ALTER TABLE hfr_snapshot_tasks
                 ADD COLUMN IF NOT EXISTS crop_uuid TEXT
                 """
@@ -174,6 +200,18 @@ def ensure_schema() -> None:
                 """
                 CREATE INDEX IF NOT EXISTS idx_snapshot_growth_stage_date_run
                 ON hfr_snapshot_growth_stage_predictions (snapshot_date, run_id)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_snapshot_field_notes_date_run
+                ON hfr_snapshot_field_notes (snapshot_date, run_id)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_snapshot_field_notes_field_uuid
+                ON hfr_snapshot_field_notes (field_uuid, creation_date DESC)
                 """
             )
             cur.execute(
@@ -585,6 +623,107 @@ def upsert_growth_stage_predictions(rows: List[Dict[str, Any]]) -> int:
             )
         conn.commit()
     return len(deduped_rows)
+
+
+def insert_new_field_notes(rows: List[Dict[str, Any]]) -> int:
+    if not rows:
+        return 0
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        note_uuid = str(row.get("note_uuid") or "").strip()
+        if not note_uuid:
+            continue
+        deduped[note_uuid] = row
+    deduped_rows = list(deduped.values())
+    if not deduped_rows:
+        return 0
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TEMP TABLE tmp_hfr_snapshot_field_notes (
+                  note_uuid TEXT NOT NULL,
+                  snapshot_date DATE NOT NULL,
+                  run_id TEXT NOT NULL,
+                  field_uuid TEXT NOT NULL,
+                  field_name TEXT,
+                  season_uuid TEXT NOT NULL DEFAULT '',
+                  farm_uuid TEXT,
+                  farm_name TEXT,
+                  note_text TEXT,
+                  categories_json TEXT,
+                  creation_date TIMESTAMPTZ,
+                  location_type TEXT,
+                  region TEXT,
+                  location_json TEXT,
+                  creator_uuid TEXT,
+                  creator_name TEXT,
+                  attachments_json TEXT,
+                  image_urls_json TEXT,
+                  audio_attachments_json TEXT
+                ) ON COMMIT DROP
+                """
+            )
+            with cur.copy(
+                """
+                COPY tmp_hfr_snapshot_field_notes (
+                  note_uuid, snapshot_date, run_id, field_uuid, field_name, season_uuid,
+                  farm_uuid, farm_name, note_text, categories_json, creation_date,
+                  location_type, region, location_json, creator_uuid, creator_name,
+                  attachments_json, image_urls_json, audio_attachments_json
+                ) FROM STDIN
+                """
+            ) as copy:
+                for row in deduped_rows:
+                    copy.write_row(
+                        (
+                            row.get("note_uuid"),
+                            row.get("snapshot_date"),
+                            row.get("run_id"),
+                            row.get("field_uuid"),
+                            row.get("field_name"),
+                            row.get("season_uuid"),
+                            row.get("farm_uuid"),
+                            row.get("farm_name"),
+                            row.get("note_text"),
+                            row.get("categories_json"),
+                            row.get("creation_date"),
+                            row.get("location_type"),
+                            row.get("region"),
+                            row.get("location_json"),
+                            row.get("creator_uuid"),
+                            row.get("creator_name"),
+                            row.get("attachments_json"),
+                            row.get("image_urls_json"),
+                            row.get("audio_attachments_json"),
+                        )
+                    )
+
+            cur.execute(
+                """
+                WITH ins AS (
+                  INSERT INTO hfr_snapshot_field_notes (
+                    note_uuid, snapshot_date, run_id, field_uuid, field_name, season_uuid,
+                    farm_uuid, farm_name, note_text, categories_json, creation_date,
+                    location_type, region, location_json, creator_uuid, creator_name,
+                    attachments_json, image_urls_json, audio_attachments_json
+                  )
+                  SELECT
+                    note_uuid, snapshot_date, run_id, field_uuid, field_name, season_uuid,
+                    farm_uuid, farm_name, note_text, categories_json, creation_date,
+                    location_type, region, location_json, creator_uuid, creator_name,
+                    attachments_json, image_urls_json, audio_attachments_json
+                    FROM tmp_hfr_snapshot_field_notes
+                  ON CONFLICT (note_uuid) DO NOTHING
+                  RETURNING 1
+                )
+                SELECT COUNT(*)::INTEGER AS inserted_count FROM ins
+                """
+            )
+            row = cur.fetchone() or {}
+        conn.commit()
+    return int(row.get("inserted_count") or 0)
 
 
 def fetch_snapshot(

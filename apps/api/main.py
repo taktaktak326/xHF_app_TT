@@ -999,19 +999,29 @@ def merge_fields_data(base_data, insights_data, predictions_data, tasks_data):
 @api_app.post("/combined-fields")
 async def combined_fields(req: CombinedFieldsReq):
     farms = list(dict.fromkeys(str(u) for u in (req.farm_uuids or []) if str(u)))
-    req = req.copy(update={"farm_uuids": farms})
+    fields = list(
+        dict.fromkeys(
+            str(u)
+            for u in ((getattr(req, "field_uuids", None) or []) + (getattr(req, "fieldUuids", None) or []))
+            if str(u)
+        )
+    )
+    req = req.copy(update={"farm_uuids": farms, "field_uuids": fields, "fieldUuids": fields})
 
     sync_max_farms = int(os.getenv("COMBINED_FIELDS_SYNC_MAX_FARMS", "200"))
     hard_max_farms = int(os.getenv("COMBINED_FIELDS_HARD_MAX_FARMS", "500"))
     hard_max_farms = max(sync_max_farms, hard_max_farms)
 
-    if len(farms) > hard_max_farms:
+    if len(farms) > hard_max_farms and not fields:
         raise HTTPException(status_code=422, detail={
             "reason": "too_many_farms",
             "received_farms": len(farms),
             "max_farms": hard_max_farms,
             "sync_max_farms": sync_max_farms,
         })
+
+    if fields:
+        return await _combined_fields_single(req)
 
     # For large (but allowed) selections, force reliability mode:
     # - non-stream
@@ -1111,6 +1121,16 @@ def _extract_field_uuids_from_fields(fields: Any) -> List[str]:
         seen.add(key)
         out.append(key)
     return out
+
+
+def _query_for_field_scope(query: str) -> str:
+    if not isinstance(query, str):
+        return query
+    return (
+        query
+        .replace("$farmUuids: [UUID!]!,", "$fieldUuids: [UUID!]!,")
+        .replace("fieldsV2(farmUuids: $farmUuids)", "fieldsV2(uuids: $fieldUuids)")
+    )
 
 
 async def _run_combined_chunk_pass(
@@ -1304,12 +1324,28 @@ async def _combined_fields_single(req: CombinedFieldsReq):
     from_date = from_dt_utc.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
     till_date = till_dt_utc.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
+    field_uuids = list(
+        dict.fromkeys(
+            str(u)
+            for u in ((getattr(req, "field_uuids", None) or []) + (getattr(req, "fieldUuids", None) or []))
+            if str(u)
+        )
+    )
+    use_field_scope = len(field_uuids) > 0
+
+    def _make_scoped_payload(operation_name: str, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
+        if use_field_scope:
+            next_vars = {k: v for k, v in variables.items() if k != "farmUuids"}
+            next_vars["fieldUuids"] = field_uuids
+            return make_payload(operation_name, _query_for_field_scope(query), next_vars)
+        return make_payload(operation_name, query, variables)
+
     # 各サブリクエスト設定を config 化
     include_tasks = getattr(req, "includeTasks", True)
     request_configs = {
         "base": {
             "optional": False,
-            "payload": make_payload("CombinedDataBase", COMBINED_DATA_BASE, {
+            "payload": _make_scoped_payload("CombinedDataBase", COMBINED_DATA_BASE, {
                 "farmUuids": req.farm_uuids,
                 "languageCode": req.languageCode,
                 "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
@@ -1319,7 +1355,7 @@ async def _combined_fields_single(req: CombinedFieldsReq):
         "insights": {
             "optional": True,
             "timeout": 10.0,
-            "payload": make_payload("CombinedDataInsights", COMBINED_DATA_INSIGHTS, {
+            "payload": _make_scoped_payload("CombinedDataInsights", COMBINED_DATA_INSIGHTS, {
                 "farmUuids": req.farm_uuids,
                 "fromDate": from_date,
                 "tillDate": till_date,
@@ -1330,7 +1366,7 @@ async def _combined_fields_single(req: CombinedFieldsReq):
         "predictions": {
             "optional": True,
             "timeout": 10.0,
-            "payload": make_payload("CombinedDataPredictions", COMBINED_DATA_PREDICTIONS, {
+            "payload": _make_scoped_payload("CombinedDataPredictions", COMBINED_DATA_PREDICTIONS, {
                 "farmUuids": req.farm_uuids,
                 "languageCode": req.languageCode,
                 "countryCode": req.countryCode,
@@ -1339,7 +1375,7 @@ async def _combined_fields_single(req: CombinedFieldsReq):
         },
         "risk1": {
             "optional": True,
-            "payload": make_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
+            "payload": _make_scoped_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
                 "farmUuids": req.farm_uuids,
                 "fromDate": from_date,
                 "tillDate": till_date,
@@ -1358,7 +1394,7 @@ async def _combined_fields_single(req: CombinedFieldsReq):
         },
         "risk2": {
             "optional": True,
-            "payload": make_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
+            "payload": _make_scoped_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
                 "farmUuids": req.farm_uuids,
                 "fromDate": from_date,
                 "tillDate": till_date,
@@ -1382,7 +1418,7 @@ async def _combined_fields_single(req: CombinedFieldsReq):
     if include_tasks:
         request_configs["tasks"] = {
             "optional": True,
-            "payload": make_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
+            "payload": _make_scoped_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
                 "farmUuids": req.farm_uuids,
                 "languageCode": req.languageCode,
                 "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
@@ -1406,7 +1442,7 @@ async def _combined_fields_single(req: CombinedFieldsReq):
         request_configs["tasks_sprayings"] = {
             "optional": True,
             "condition": lambda rq: rq.withSprayingsV2,
-            "payload": make_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
+            "payload": _make_scoped_payload("CombinedFieldData", COMBINED_FIELD_DATA_TASKS, {
                 "farmUuids": req.farm_uuids,
                 "languageCode": req.languageCode,
                 "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
@@ -1622,7 +1658,7 @@ async def _combined_fields_single(req: CombinedFieldsReq):
             # If base fails (often timeout) and boundary was requested, retry once without boundary.
             if isinstance(fetched.get("base"), Exception) and req.withBoundarySvg:
                 try:
-                    retry_payload = make_payload("CombinedDataBase", COMBINED_DATA_BASE, {
+                    retry_payload = _make_scoped_payload("CombinedDataBase", COMBINED_DATA_BASE, {
                         "farmUuids": req.farm_uuids,
                         "languageCode": req.languageCode,
                         "cropSeasonLifeCycleStates": req.cropSeasonLifeCycleStates,
@@ -3008,6 +3044,94 @@ def _extract_snapshot_rows(
     return {"fields": field_rows, "tasks": task_rows, "growth_stages": growth_stage_rows}
 
 
+def _extract_field_note_rows(
+    *,
+    run_id: str,
+    snapshot_date: date,
+    fields: List[Dict[str, Any]],
+    field_notes_fields: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    target_field_uuids = {str((f or {}).get("uuid") or "").strip() for f in fields if isinstance(f, dict)}
+    target_field_uuids.discard("")
+    if not target_field_uuids:
+        return []
+
+    field_meta: Dict[str, Dict[str, str]] = {}
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        field_uuid = str(field.get("uuid") or "").strip()
+        if not field_uuid:
+            continue
+        farm = (field.get("farmV2") or field.get("farm") or {}) if isinstance(field, dict) else {}
+        field_meta[field_uuid] = {
+            "field_name": str(field.get("name") or "").strip(),
+            "farm_uuid": str((farm or {}).get("uuid") or "").strip(),
+            "farm_name": str((farm or {}).get("name") or "").strip(),
+        }
+
+    out: List[Dict[str, Any]] = []
+    image_content_types = ("image/",)
+    for field in field_notes_fields:
+        if not isinstance(field, dict):
+            continue
+        field_uuid = str(field.get("uuid") or "").strip()
+        if not field_uuid or field_uuid not in target_field_uuids:
+            continue
+        notes = field.get("fieldNotes") or []
+        if not isinstance(notes, list):
+            continue
+        meta = field_meta.get(field_uuid, {})
+        for note in notes:
+            if not isinstance(note, dict):
+                continue
+            note_uuid = str(note.get("uuid") or "").strip()
+            if not note_uuid:
+                continue
+            creator = note.get("creator") or {}
+            attachments = note.get("attachments") or []
+            audio_attachments = note.get("audioAttachments") or []
+            categories = note.get("categories") or []
+            image_urls: List[str] = []
+            if isinstance(attachments, list):
+                for a in attachments:
+                    if not isinstance(a, dict):
+                        continue
+                    url = str(a.get("url") or "").strip()
+                    thumb = str(a.get("thumbnailUrl") or "").strip()
+                    ctype = str(a.get("contentType") or "").strip().lower()
+                    is_image = ctype.startswith(image_content_types) or url.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic"))
+                    if is_image:
+                        if url:
+                            image_urls.append(url)
+                        elif thumb:
+                            image_urls.append(thumb)
+            out.append(
+                {
+                    "note_uuid": note_uuid,
+                    "snapshot_date": snapshot_date,
+                    "run_id": run_id,
+                    "field_uuid": field_uuid,
+                    "field_name": meta.get("field_name") or str(field.get("name") or "").strip(),
+                    "season_uuid": str(((note.get("cropSeason") or {}) if isinstance(note.get("cropSeason"), dict) else {}).get("uuid") or "").strip(),
+                    "farm_uuid": meta.get("farm_uuid") or "",
+                    "farm_name": meta.get("farm_name") or "",
+                    "note_text": str(note.get("note") or ""),
+                    "categories_json": json.dumps(categories, ensure_ascii=False, default=str),
+                    "creation_date": note.get("creationDate"),
+                    "location_type": str(note.get("locationType") or ""),
+                    "region": str(note.get("region") or ""),
+                    "location_json": json.dumps(note.get("location"), ensure_ascii=False, default=str),
+                    "creator_uuid": str((creator or {}).get("uuid") or ""),
+                    "creator_name": _full_name(creator if isinstance(creator, dict) else {}),
+                    "attachments_json": json.dumps(attachments, ensure_ascii=False, default=str),
+                    "image_urls_json": json.dumps(image_urls, ensure_ascii=False, default=str),
+                    "audio_attachments_json": json.dumps(audio_attachments, ensure_ascii=False, default=str),
+                }
+            )
+    return out
+
+
 @api_app.post("/jobs/hfr-snapshot")
 async def jobs_hfr_snapshot(
     req: HfrSnapshotJobReq,
@@ -3036,6 +3160,7 @@ async def jobs_hfr_snapshot(
         farms_matched = 0
         fields_saved = 0
         tasks_saved = 0
+        field_notes_saved = 0
         should_persist = not req.dryRun
         started_at = time.perf_counter()
 
@@ -3301,6 +3426,37 @@ async def jobs_hfr_snapshot(
                     f"step4: extraction completed field_rows={len(extracted['fields'])} "
                     f"task_rows={len(extracted['tasks'])} growth_stage_rows={len(extracted.get('growth_stages') or [])}"
                 )
+                try:
+                    _progress("step4.5: field notes scan started")
+                    notes_resp = await field_notes(
+                        FieldNotesReq(
+                            login_token=login_token,
+                            api_token=api_token,
+                            farm_uuids=matched_farm_uuids,
+                            includeTokens=False,
+                        )
+                    )
+                    notes_json = _response_to_json(notes_resp)
+                    notes_fields = (((notes_json.get("response") or {}).get("data") or {}).get("fieldsV2") or [])
+                    if not isinstance(notes_fields, list):
+                        notes_fields = []
+                    note_rows = _extract_field_note_rows(
+                        run_id=run_id,
+                        snapshot_date=snapshot_date,
+                        fields=filtered_fields,
+                        field_notes_fields=[f for f in notes_fields if isinstance(f, dict)],
+                    )
+                    field_notes_saved = (
+                        hfr_snapshot_store.insert_new_field_notes(note_rows)
+                        if should_persist
+                        else len(note_rows)
+                    )
+                    _progress(
+                        f"step4.5: field notes scan completed scanned_notes={len(note_rows)} "
+                        f"{'new_notes' if should_persist else 'notes_in_scan'}={field_notes_saved}"
+                    )
+                except Exception as exc:  # pylint: disable=broad-except
+                    _progress(f"step4.5: field notes scan failed detail={str(exc)}")
                 if not req.dryRun:
                     step5_started_at = time.perf_counter()
 
@@ -3368,7 +3524,7 @@ async def jobs_hfr_snapshot(
                 )
             _progress(
                 f"job completed farms_scanned={farms_scanned} farms_matched={farms_matched} "
-                f"fields={fields_saved} tasks={tasks_saved}"
+                f"fields={fields_saved} tasks={tasks_saved} field_notes_new={field_notes_saved}"
             )
             return {
                 "ok": True,
@@ -3379,6 +3535,7 @@ async def jobs_hfr_snapshot(
                 "farms_matched": farms_matched,
                 "fields_saved": fields_saved,
                 "tasks_saved": tasks_saved,
+                "field_notes_saved": field_notes_saved,
                 "dry_run": req.dryRun,
             }
         except HTTPException as exc:

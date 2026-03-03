@@ -235,6 +235,7 @@ const mergeCropseasonPayload = (core: any, extra: any) => {
 async function fetchCombinedFieldsApi(params: {
   auth: LoginAndTokenResp;
   farmUuids: string[];
+  fieldUuids?: string[];
   languageCode: 'ja' | 'en';
   onChunk?: (chunk: CombinedChunk) => void;
   stream?: boolean;
@@ -250,11 +251,14 @@ async function fetchCombinedFieldsApi(params: {
   const cacheKey = cacheEnabled
     ? (() => {
         const farms = [...params.farmUuids].sort();
+        const fields = [...(params.fieldUuids || [])].sort();
         const keyPayload = JSON.stringify({
           farms,
+          fields,
           languageCode: params.languageCode,
           includeTasks,
           requireComplete,
+          withBoundarySvg: params.withBoundarySvg === true,
           countryCode: 'JP',
         });
         return `${COMBINED_FIELDS_CACHE_KEY_PREFIX}:${fnv1a(keyPayload)}`;
@@ -274,6 +278,9 @@ async function fetchCombinedFieldsApi(params: {
     languageCode: params.languageCode,
     countryCode: 'JP',
   };
+  if (params.fieldUuids !== undefined) {
+    requestBody.field_uuids = params.fieldUuids;
+  }
   if (requireComplete !== undefined) {
     requestBody.requireComplete = requireComplete;
   }
@@ -432,13 +439,15 @@ interface FarmContextType {
   selectedFarms: string[];
   setSelectedFarms: (farms: string[]) => void;
   submittedFarms: string[];
+  submittedFieldUuids: string[];
+  setSubmittedFieldUuids: (fieldUuids: string[]) => void;
   replaceSelectedAndSubmittedFarms: (farms: string[]) => void;
   submitSelectedFarms: (opts?: { mode?: 'replace' | 'append' }) => void;
   clearSelectedFarms: () => void;
   clearCombinedCache: () => void;
   cancelCombinedFetch: () => void;
   // データ取得ロジックを追加
-  fetchCombinedDataIfNeeded: (opts?: { force?: boolean; includeTasks?: boolean; requireComplete?: boolean }) => void;
+  fetchCombinedDataIfNeeded: (opts?: { force?: boolean; includeTasks?: boolean; requireComplete?: boolean; withBoundarySvg?: boolean; fieldUuids?: string[] }) => void;
 }
 
 const FarmContext = createContext<FarmContextType | undefined>(undefined);
@@ -447,8 +456,10 @@ const COMBINED_SESSION_STORAGE_MAX_BYTES = 3 * 1024 * 1024;
 export const FarmProvider = ({ children }: { children: ReactNode }) => {
   const [selectedFarms, setSelectedFarms] = useState<string[]>([]);
   const [submittedFarms, setSubmittedFarms] = useState<string[]>([]);
+  const [submittedFieldUuids, setSubmittedFieldUuids] = useState<string[]>([]);
   const selectedFarmsRef = useRef<string[]>([]);
   const submittedFarmsRef = useRef<string[]>([]);
+  const submittedFieldUuidsRef = useRef<string[]>([]);
   const lastFarmUuidsRef = useRef<string[] | null>(null);
   const lastRefreshRef = useRef<number>(0);
   const { language } = useLanguage();
@@ -480,6 +491,9 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     submittedFarmsRef.current = submittedFarms;
   }, [submittedFarms]);
+  useEffect(() => {
+    submittedFieldUuidsRef.current = submittedFieldUuids;
+  }, [submittedFieldUuids]);
   const requestIdRef = useRef(0);
   const combinedFetchInFlightRef = useRef<Map<string, Promise<void>>>(new Map());
   const combinedAbortControllerRef = useRef<AbortController | null>(null);
@@ -505,6 +519,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
     if (mode === 'replace') {
       const next = selectedFarmsRef.current;
       setSubmittedFarms(next);
+      setSubmittedFieldUuids([]);
       return;
     }
     // append: keep existing submitted farms and add newly selected farms (stable order)
@@ -525,6 +540,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
     })();
     setSelectedFarms(next);
     setSubmittedFarms(next);
+    setSubmittedFieldUuids([]);
   };
   const replaceSelectedAndSubmittedFarms = (farms: string[]) => {
     const seen = new Set<string>();
@@ -537,11 +553,13 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
       });
     setSelectedFarms(next);
     setSubmittedFarms(next);
+    setSubmittedFieldUuids([]);
   };
   const clearSelectedFarms = () => {
     cancelCombinedFetch();
     setSelectedFarms([]);
     setSubmittedFarms([]);
+    setSubmittedFieldUuids([]);
     // データもクリアする
     setCombinedOut(null);
     setCombinedErr(null);
@@ -570,11 +588,18 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
           payload?.farm_uuids ??
           payload?.farmUuids ??
           [];
+        const fieldUuids: string[] =
+          payload?.field_uuids ??
+          payload?.fieldUuids ??
+          [];
         if (farms.length) {
           setSelectedFarms(farms);
           setSubmittedFarms(farms);
           lastFarmUuidsRef.current = [...farms].sort();
         }
+        setSubmittedFieldUuids(
+          [...new Set((fieldUuids || []).map((u) => String(u || '')).filter(Boolean))],
+        );
         lastRefreshRef.current = Date.now();
       }
     } catch (err) {
@@ -647,12 +672,14 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [combinedOut]);
 
-  const fetchCombinedDataIfNeeded = useCallback(async (opts?: { force?: boolean; includeTasks?: boolean; requireComplete?: boolean }) => {
+  const fetchCombinedDataIfNeeded = useCallback(async (opts?: { force?: boolean; includeTasks?: boolean; requireComplete?: boolean; withBoundarySvg?: boolean; fieldUuids?: string[] }) => {
     if (!auth) return;
     const force = opts?.force ?? false;
     const includeTasks = opts?.includeTasks ?? false;
+    const withBoundarySvg = opts?.withBoundarySvg ?? false;
+    const targetFieldUuids = [...new Set((opts?.fieldUuids ?? submittedFieldUuidsRef.current).map((u) => String(u || '')).filter(Boolean))];
     const hardMaxFarms = Math.max(COMBINED_FIELDS_SYNC_MAX_FARMS, COMBINED_FIELDS_HARD_MAX_FARMS);
-    if (submittedFarms.length > hardMaxFarms) {
+    if (submittedFarms.length > hardMaxFarms && targetFieldUuids.length === 0) {
       setCombinedErr(tr('error.too_many_farms', { count: submittedFarms.length, max: hardMaxFarms }));
       setCombinedLoading(false);
       setCombinedInProgress(false);
@@ -662,13 +689,13 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
       setCombinedFetchProgress(null);
       return;
     }
-    const forceReliabilityMode = submittedFarms.length > COMBINED_FIELDS_SYNC_MAX_FARMS;
+    const forceReliabilityMode = targetFieldUuids.length === 0 && submittedFarms.length > COMBINED_FIELDS_SYNC_MAX_FARMS;
     const requireComplete = forceReliabilityMode
       ? true
       : (opts?.requireComplete ?? (submittedFarms.length >= COMBINED_FIELDS_REQUIRE_COMPLETE_THRESHOLD));
 
     // Same session: avoid firing the same request twice (e.g. React StrictMode effect replay).
-    const requestKey = `${language}:${includeTasks ? '1' : '0'}:${requireComplete ? '1' : '0'}:${[...submittedFarms].sort().join(',')}`;
+    const requestKey = `${language}:${includeTasks ? '1' : '0'}:${requireComplete ? '1' : '0'}:${withBoundarySvg ? '1' : '0'}:farms=${[...submittedFarms].sort().join(',')}:fields=${[...targetFieldUuids].sort().join(',')}`;
     if (!force) {
       const pending = combinedFetchInFlightRef.current.get(requestKey);
       if (pending) return pending;
@@ -680,7 +707,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
       try {
 	      // For strict completeness mode, avoid streaming to prevent partial-success paths.
 	      const STREAM_FARM_LIMIT = 5;
-	      const USE_STREAM = !requireComplete && submittedFarms.length <= STREAM_FARM_LIMIT;
+	      const USE_STREAM = !requireComplete && targetFieldUuids.length === 0 && submittedFarms.length <= STREAM_FARM_LIMIT;
       const LAUNCH_BACKGROUND_FULL_FETCH = true;
       requestIdRef.current += 1;
       const requestId = requestIdRef.current;
@@ -697,7 +724,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	      };
 
       // 選択中の農場がない場合は、表示をクリア
-      if (submittedFarms.length === 0) {
+      if (submittedFarms.length === 0 && targetFieldUuids.length === 0) {
         setCombinedOut(null);
         setCombinedLoading(false);
         setCombinedInProgress(false);
@@ -745,7 +772,16 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
         payload.farmUuids ??
         [];
       if (JSON.stringify([...currentFarmUuids].sort()) === JSON.stringify(target)) {
-        return true;
+        const currentFieldUuids =
+          payload.field_uuids ??
+          payload.fieldUuids ??
+          [];
+        if (
+          JSON.stringify([...currentFieldUuids].map((u: any) => String(u || '')).filter(Boolean).sort()) ===
+          JSON.stringify([...targetFieldUuids].sort())
+        ) {
+          return true;
+        }
       }
       return false;
     };
@@ -779,9 +815,10 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 
 		    const tryChunkedFallback = async (fallbackIncludeTasks: boolean) => {
 	      // Safety valve: prevent infinite loops. In the worst case we end up with
-	      // 1 request per farm UUID (after repeated splitting), so the number of
-	      // processed chunks should never exceed submittedFarms.length.
-	      const MAX_CHUNKS = Math.max(1, submittedFarms.length + 5);
+	      // 1 request per identifier (farm/field UUID, after repeated splitting), so the number of
+	      // processed chunks should never exceed target length.
+	      const maxUnits = targetFieldUuids.length > 0 ? targetFieldUuids.length : submittedFarms.length;
+	      const MAX_CHUNKS = Math.max(1, maxUnits + 5);
 	      let processedChunks = 0;
 	      const successes: any[] = [];
 	      const failures: Array<{ farmUuids: string[]; error: any; includeTasks: boolean }> = [];
@@ -833,12 +870,20 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	      };
 
       // Reliability-first: fetch sequentially with small chunks (default: 1 farm per request).
-	      const initialChunks = chunkArray(submittedFarms, COMBINED_FIELDS_CHUNK_SIZE).map((farmUuids) => ({
-	        farmUuids,
-	        includeTasks: fallbackIncludeTasks,
-	      }));
+	      const initialChunks =
+	        targetFieldUuids.length > 0
+	          ? chunkArray(targetFieldUuids, COMBINED_FIELDS_CHUNK_SIZE).map((fieldUuids) => ({
+	              farmUuids: submittedFarms,
+	              fieldUuids,
+	              includeTasks: fallbackIncludeTasks,
+	            }))
+	          : chunkArray(submittedFarms, COMBINED_FIELDS_CHUNK_SIZE).map((farmUuids) => ({
+	              farmUuids,
+	              fieldUuids: [] as string[],
+	              includeTasks: fallbackIncludeTasks,
+	            }));
 
-	      const queue: Array<{ farmUuids: string[]; includeTasks: boolean }> = [...initialChunks];
+	      const queue: Array<{ farmUuids: string[]; fieldUuids: string[]; includeTasks: boolean }> = [...initialChunks];
 	      total = queue.length;
 	      updateChunkedProgress();
 
@@ -865,7 +910,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	        }
 	      };
 
-		      const runOne = async (item: { farmUuids: string[]; includeTasks: boolean }) => {
+		      const runOne = async (item: { farmUuids: string[]; fieldUuids: string[]; includeTasks: boolean }) => {
 		        if (!isActiveRequest()) return;
 		        const token = (activeTokenSeq += 1);
 		        activeChunks.set(token, item.farmUuids);
@@ -896,12 +941,12 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 		            got = await fetchCombinedFieldsApi({
 		              auth,
 		              farmUuids: item.farmUuids,
+                  fieldUuids: item.fieldUuids,
 		              languageCode: language,
 		              stream: false,
 		              includeTasks: effectiveIncludeTasks,
 		              requireComplete,
-		              // Boundary SVG is huge; omit it for chunked fallback to maximize reliability.
-		              withBoundarySvg: false,
+		              withBoundarySvg,
                   signal: runAbortController.signal,
 		            });
 	            if (got?.response?.data?.fieldsV2) break;
@@ -909,7 +954,8 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	          } catch (err: any) {
 	            lastErr = err;
 	            // If single-farm with tasks is failing, retry once without tasks to at least get base/predictions.
-	            if (isRecoverableCombinedFieldsError(err) && item.farmUuids.length === 1 && effectiveIncludeTasks) {
+	            const unitCount = item.fieldUuids.length > 0 ? item.fieldUuids.length : item.farmUuids.length;
+	            if (isRecoverableCombinedFieldsError(err) && unitCount === 1 && effectiveIncludeTasks) {
 	              failures.push({ farmUuids: item.farmUuids, error: err, includeTasks: true });
 	              effectiveIncludeTasks = false;
 	            } else if (!isRecoverableCombinedFieldsError(err)) {
@@ -941,10 +987,16 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 		        }
 
 	        const err = lastErr ?? new Error('combined-fields: unknown failure');
-	        if (isRecoverableCombinedFieldsError(err) && item.farmUuids.length > 1) {
-	          const [a, b] = chunkInHalf(item.farmUuids);
-	          queue.push({ farmUuids: a, includeTasks: item.includeTasks });
-	          queue.push({ farmUuids: b, includeTasks: item.includeTasks });
+	        const splitTargets = item.fieldUuids.length > 0 ? item.fieldUuids : item.farmUuids;
+	        if (isRecoverableCombinedFieldsError(err) && splitTargets.length > 1) {
+	          const [a, b] = chunkInHalf(splitTargets);
+	          if (item.fieldUuids.length > 0) {
+	            queue.push({ farmUuids: item.farmUuids, fieldUuids: a, includeTasks: item.includeTasks });
+	            queue.push({ farmUuids: item.farmUuids, fieldUuids: b, includeTasks: item.includeTasks });
+	          } else {
+	            queue.push({ farmUuids: a, fieldUuids: [], includeTasks: item.includeTasks });
+	            queue.push({ farmUuids: b, fieldUuids: [], includeTasks: item.includeTasks });
+	          }
 	          // One chunk was already counted in `total`; replacing it with two chunks increases the total by 1.
 	          total += 1;
 	          updateChunkedProgress();
@@ -1002,6 +1054,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
           headers: first?.request?.headers ?? {},
           payload: {
             farm_uuids: submittedFarms,
+            field_uuids: targetFieldUuids,
             languageCode: language,
             includeTasks: fallbackIncludeTasks,
             requireComplete,
@@ -1016,7 +1069,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
       setCombinedFetchAttempt(attempt);
       try {
         // For large farm selections, skip streaming and directly use chunked fallback.
-	        if (!USE_STREAM && submittedFarms.length > 1) {
+	        if (!USE_STREAM && (submittedFarms.length > 1 || targetFieldUuids.length > 1)) {
 	          const fallbackRes: any = await tryChunkedFallback(includeTasks);
 	          if (fallbackRes.applied) {
 	            lastFarmUuidsRef.current = [...submittedFarms].sort();
@@ -1038,10 +1091,12 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	            ? fetchCombinedFieldsApi({
 	                auth,
 	                farmUuids: submittedFarms,
+                  fieldUuids: targetFieldUuids.length > 0 ? targetFieldUuids : undefined,
 	                languageCode: language,
 	                stream: false,
 	                includeTasks,
 	                requireComplete,
+                  withBoundarySvg,
                   signal: runAbortController.signal,
 	              }).catch((e) => {
 	                console.warn('[FarmContext] background full fetch failed', e);
@@ -1094,7 +1149,11 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
             if (!safePredictions) warnings.push({ reason: 'predictions_pending' });
             if (includeTasks && !safeTasks) warnings.push({ reason: 'tasks_pending' });
             const basePayload = (safeBase?.request?.payload as any) ?? { farmUuids: submittedFarms };
-            const requestPayload = { ...basePayload, farm_uuids: basePayload.farm_uuids ?? basePayload.farmUuids ?? submittedFarms };
+            const requestPayload = {
+              ...basePayload,
+              farm_uuids: basePayload.farm_uuids ?? basePayload.farmUuids ?? submittedFarms,
+              field_uuids: basePayload.field_uuids ?? basePayload.fieldUuids ?? (targetFieldUuids.length > 0 ? targetFieldUuids : undefined),
+            };
             const requestHeaders = (safeBase?.request?.headers as any) ?? {};
             const partial = {
               ok: true,
@@ -1123,9 +1182,11 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	          const streamPromise = fetchCombinedFieldsApi({
 	            auth,
 	            farmUuids: submittedFarms,
+              fieldUuids: targetFieldUuids.length > 0 ? targetFieldUuids : undefined,
 	            languageCode: language,
 	            stream: true,
 	            includeTasks,
+              withBoundarySvg,
               signal: runAbortController.signal,
 	            onChunk: (chunk) => {
               if (!isActiveRequest()) return;
@@ -1214,7 +1275,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
               throw streamError;
             }
             // Stream partial ok but connection dropped; attempt chunked fallback to improve completeness.
-            if (submittedFarms.length > 1 && isRecoverableCombinedFieldsError(streamError)) {
+            if ((submittedFarms.length > 1 || targetFieldUuids.length > 1) && isRecoverableCombinedFieldsError(streamError)) {
               try {
 	                const fallbackRes = await tryChunkedFallback(includeTasks);
 	                if (fallbackRes.applied) {
@@ -1240,10 +1301,12 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
 	          const res = await fetchCombinedFieldsApi({
 	            auth,
 	            farmUuids: submittedFarms,
+              fieldUuids: targetFieldUuids.length > 0 ? targetFieldUuids : undefined,
 	            languageCode: language,
 	            stream: false,
 	            includeTasks,
 	            requireComplete,
+              withBoundarySvg,
               signal: runAbortController.signal,
 	          });
           if (!isActiveRequest()) return;
@@ -1278,7 +1341,7 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
         const status = Number(error?.status ?? 0);
 
         // Fallback: if large payload causes timeout, split farms and fetch in smaller batches.
-        if (isRecoverableCombinedFieldsError(error) && submittedFarms.length > 1) {
+        if (isRecoverableCombinedFieldsError(error) && (submittedFarms.length > 1 || targetFieldUuids.length > 1)) {
           try {
 	            const fallbackRes = await tryChunkedFallback(includeTasks);
 	            if (fallbackRes.applied) {
@@ -1393,6 +1456,8 @@ export const FarmProvider = ({ children }: { children: ReactNode }) => {
       selectedFarms,
       setSelectedFarms,
       submittedFarms,
+      submittedFieldUuids,
+      setSubmittedFieldUuids,
       replaceSelectedAndSubmittedFarms,
       submitSelectedFarms,
       clearSelectedFarms,

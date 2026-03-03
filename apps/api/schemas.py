@@ -101,7 +101,9 @@ class FieldDataLayerImageReq(BaseModel):
 class CombinedFieldsReq(BaseModel):
     login_token: str
     api_token: str
-    farm_uuids: List[str]
+    farm_uuids: List[str] = []
+    field_uuids: List[str] = []
+    fieldUuids: List[str] = []
     languageCode: str = "ja"
     countryCode: str = "JP"
     cropSeasonLifeCycleStates: List[str] = ["ACTIVE", "PLANNED"]

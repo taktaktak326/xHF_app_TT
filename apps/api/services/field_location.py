@@ -618,6 +618,14 @@ def extract_field_centroid(field: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         lat_f, lon_f = _normalize_lat_lon(lat_f, lon_f)
         return {"latitude": lat_f, "longitude": lon_f, "source": "direct"}
 
+    boundary = field.get("boundary")
+    geometry = _extract_geometry(boundary)
+    if geometry:
+        centroid = _centroid_from_geometry(geometry)
+        if centroid:
+            centroid["source"] = "boundary"
+            return centroid
+
     for farm_key in ("farmV2", "farm"):
         farm = field.get(farm_key)
         if isinstance(farm, dict):
@@ -628,14 +636,6 @@ def extract_field_centroid(field: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 lon_f = float(lon)
                 lat_f, lon_f = _normalize_lat_lon(lat_f, lon_f)
                 return {"latitude": lat_f, "longitude": lon_f, "source": "farm"}
-
-    boundary = field.get("boundary")
-    geometry = _extract_geometry(boundary)
-    if geometry:
-        centroid = _centroid_from_geometry(geometry)
-        if centroid:
-            centroid["source"] = "boundary"
-            return centroid
     return None
 
 
