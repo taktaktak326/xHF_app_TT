@@ -203,6 +203,14 @@ const sanitizeZipName = (names: string[]) => {
   return safe.toLowerCase().endsWith('.zip') ? safe : `${safe}.zip`;
 };
 
+const escapeCsvValue = (value: string | number | null | undefined): string => {
+  const str = String(value ?? '');
+  if (/[",\n\r]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+};
+
 const filterNotes = (notes: AggregatedNote[], filters: FiltersState) => {
   const from = filters.dateFrom ? new Date(filters.dateFrom) : null;
   const to = filters.dateTo ? new Date(filters.dateTo) : null;
@@ -397,6 +405,56 @@ export function FieldMemoPage() {
     }
   };
 
+  const handleDownloadCsv = () => {
+    const headers = [
+      t('table.created_at'),
+      t('table.field'),
+      t('table.category'),
+      t('table.memo'),
+      t('table.creator'),
+      t('table.attachment_images'),
+      t('table.attachment_audio'),
+      t('table.location'),
+    ];
+
+    const rows = filteredNotes.map((note) => {
+      const creator = note.creator ? `${note.creator.lastName} ${note.creator.firstName}`.trim() : '-';
+      const images = (note.attachments || [])
+        .filter((att) => Boolean(att.url))
+        .map((att) => buildDownloadFileName(att, { creationDate: note.creationDate, fieldName: note.fieldName }))
+        .join(' | ') || '-';
+      const audios = (note.audioAttachments || [])
+        .filter((att) => isAudioAttachment(att))
+        .map((att) => getDisplayName(att))
+        .join(' | ') || '-';
+      const location = note.lat && note.lon ? `${note.lat.toFixed(4)}, ${note.lon.toFixed(4)}` : '-';
+
+      return [
+        getLocalDateString(note.creationDate),
+        note.fieldName || '-',
+        note.categories?.join(', ') || '-',
+        note.note || '',
+        creator,
+        images,
+        audios,
+        location,
+      ];
+    });
+
+    const csvLines = [headers, ...rows].map((row) => row.map((v) => escapeCsvValue(v)).join(','));
+    const csv = `\uFEFF${csvLines.join('\n')}`;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const day = formatDateInput(new Date());
+    a.href = url;
+    a.download = `field_memos_${day}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const handleFetchNotes = async () => {
     if (!auth || submittedFarms.length === 0) return;
 
@@ -446,6 +504,12 @@ export function FieldMemoPage() {
                 )}
               </p>
               <div style={{ marginBottom: '0.75rem', display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                <button
+                  onClick={handleDownloadCsv}
+                  disabled={filteredNotes.length === 0 || zipLoading}
+                >
+                  {t('action.csv_download')}
+                </button>
                 <button
                   onClick={handleDownloadAll}
                   disabled={zipLoading || downloadableAttachments.length === 0}
