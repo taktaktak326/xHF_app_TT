@@ -51,7 +51,6 @@ export function Layout() {
           <nav style={{ display: 'flex', gap: '1rem' }}>
             <NavLink to="/farms" className={navClass}>{t('nav.farms')}</NavLink>
             <NavLink to="/tasks" className={navClass}>{t('nav.tasks')}</NavLink>
-            <NavLink to="/task-progress-dashboard" className={navClass}>{t('nav.task_progress_dashboard')}</NavLink>
             <NavLink to="/ndvi" className={navClass}>{t('nav.ndvi')}</NavLink>
             <NavLink to="/satellite-map" className={navClass}>{t('nav.satellite_map')}</NavLink>
             <NavLink to="/crop-registration" className={navClass}>{t('nav.crop_registration')}</NavLink>
