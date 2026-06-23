@@ -392,36 +392,42 @@ const downloadDailyWeatherExcel = (dailyRows: DailyWeather[], fieldName: string)
     { key: 'airTempCMin', label: '最低気温(℃)', numeric: true },
     { key: 'sunshineDurationH', label: '日照時間(h)', numeric: true },
     { key: 'precipitationBestMm', label: '降水量(mm)', numeric: true },
-    { key: 'precipitationProbabilityPct', label: '降水確率(%)', numeric: true },
     { key: 'windSpeedMSAvg', label: '平均風速(m/s)', numeric: true },
-    { key: 'windDirectionDeg', label: '風向(deg)', numeric: true },
     { key: 'relativeHumidityPctAvg', label: '平均湿度(%)', numeric: true },
     { key: 'relativeHumidityPctMax', label: '最高湿度(%)', numeric: true },
     { key: 'relativeHumidityPctMin', label: '最低湿度(%)', numeric: true },
-    { key: 'leafWetnessDurationH', label: '葉面濡れ時間(h)', numeric: true },
   ];
 
-  const headerCells = [
-    makeTextCell('A1', '項目 / 日付'),
-    ...sortedRows.map((row, index) => makeTextCell(`${getExcelColumnName(index + 2)}1`, getJstDateKey(row.date))),
-  ].join('');
-  const sheetRows = [
-    `<row r="1">${headerCells}</row>`,
-    ...rows.map((row, rowIndex) => {
-      const excelRow = rowIndex + 2;
-      const cells = [
-        makeTextCell(`A${excelRow}`, row.label),
-        ...sortedRows.map((day, colIndex) => {
-          const ref = `${getExcelColumnName(colIndex + 2)}${excelRow}`;
-          return row.numeric ? makeNumberCell(ref, day[row.key]) : makeTextCell(ref, day[row.key] ?? '');
-        }),
-      ].join('');
-      return `<row r="${excelRow}">${cells}</row>`;
-    }),
-  ].join('');
-  const lastColumn = getExcelColumnName(sortedRows.length + 1);
-  const lastRow = rows.length + 1;
-  const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  const rowsByYear = sortedRows.reduce<Record<string, DailyWeather[]>>((acc, row) => {
+    const year = getJstDateKey(row.date).slice(0, 4) || 'unknown';
+    if (!acc[year]) acc[year] = [];
+    acc[year].push(row);
+    return acc;
+  }, {});
+  const sheetGroups = Object.entries(rowsByYear).sort(([a], [b]) => a.localeCompare(b));
+
+  const buildWorksheet = (sheetRowsSource: DailyWeather[]) => {
+    const headerCells = [
+      makeTextCell('A1', '項目 / 日付'),
+      ...sheetRowsSource.map((row, index) => makeTextCell(`${getExcelColumnName(index + 2)}1`, getJstDateKey(row.date))),
+    ].join('');
+    const sheetRows = [
+      `<row r="1">${headerCells}</row>`,
+      ...rows.map((row, rowIndex) => {
+        const excelRow = rowIndex + 2;
+        const cells = [
+          makeTextCell(`A${excelRow}`, row.label),
+          ...sheetRowsSource.map((day, colIndex) => {
+            const ref = `${getExcelColumnName(colIndex + 2)}${excelRow}`;
+            return row.numeric ? makeNumberCell(ref, day[row.key]) : makeTextCell(ref, day[row.key] ?? '');
+          }),
+        ].join('');
+        return `<row r="${excelRow}">${cells}</row>`;
+      }),
+    ].join('');
+    const lastColumn = getExcelColumnName(sheetRowsSource.length + 1);
+    const lastRow = rows.length + 1;
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <dimension ref="A1:${lastColumn}${lastRow}"/>
   <sheetViews><sheetView workbookViewId="0"><pane xSplit="1" ySplit="1" topLeftCell="B2" activePane="bottomRight" state="frozen"/><selection pane="bottomRight"/></sheetView></sheetViews>
@@ -429,6 +435,16 @@ const downloadDailyWeatherExcel = (dailyRows: DailyWeather[], fieldName: string)
   <cols><col min="1" max="1" width="20" customWidth="1"/></cols>
   <sheetData>${sheetRows}</sheetData>
 </worksheet>`;
+  };
+
+  const worksheetFiles = sheetGroups.map(([year, yearRows], index) => ({
+    sheetId: index + 1,
+    relId: `rId${index + 1}`,
+    name: year,
+    path: `xl/worksheets/sheet${index + 1}.xml`,
+    content: buildWorksheet(yearRows),
+  }));
+
   const files = [
     {
       path: '[Content_Types].xml',
@@ -439,7 +455,7 @@ const downloadDailyWeatherExcel = (dailyRows: DailyWeather[], fieldName: string)
   <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
   <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
   <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  ${worksheetFiles.map((sheet) => `<Override PartName="/${sheet.path}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('\n  ')}
 </Types>`,
     },
     {
@@ -471,17 +487,17 @@ const downloadDailyWeatherExcel = (dailyRows: DailyWeather[], fieldName: string)
       path: 'xl/workbook.xml',
       content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets><sheet name="Daily Weather" sheetId="1" r:id="rId1"/></sheets>
+  <sheets>${worksheetFiles.map((sheet) => `<sheet name="${escapeXml(sheet.name)}" sheetId="${sheet.sheetId}" r:id="${sheet.relId}"/>`).join('')}</sheets>
 </workbook>`,
     },
     {
       path: 'xl/_rels/workbook.xml.rels',
       content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  ${worksheetFiles.map((sheet) => `<Relationship Id="${sheet.relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="${sheet.path.replace('xl/', '')}"/>`).join('\n  ')}
 </Relationships>`,
     },
-    { path: 'xl/worksheets/sheet1.xml', content: worksheet },
+    ...worksheetFiles.map((sheet) => ({ path: sheet.path, content: sheet.content })),
   ];
   const blob = createZipBlob(files, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   const url = URL.createObjectURL(blob);
