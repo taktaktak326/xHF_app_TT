@@ -239,23 +239,148 @@ const toFiniteNumber = (value: unknown): number | null => {
   return Number.isFinite(num) ? num : null;
 };
 
-const formatExcelNumber = (value: unknown): string | number => {
-  const num = toFiniteNumber(value);
-  return num === null ? '' : num;
-};
-
-const escapeHtml = (value: unknown): string => {
+const escapeXml = (value: unknown): string => {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/'/g, '&apos;');
 };
 
 const sanitizeFileName = (value: string): string => {
   const cleaned = value.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_').trim();
   return cleaned || 'field';
+};
+
+const makeCrc32Table = () => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let j = 0; j < 8; j += 1) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+};
+
+const CRC32_TABLE = makeCrc32Table();
+
+const crc32 = (bytes: Uint8Array): number => {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) {
+    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
+const writeUint16 = (view: DataView, offset: number, value: number) => {
+  view.setUint16(offset, value, true);
+};
+
+const writeUint32 = (view: DataView, offset: number, value: number) => {
+  view.setUint32(offset, value >>> 0, true);
+};
+
+const concatUint8Arrays = (chunks: Uint8Array[]): Uint8Array => {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return out;
+};
+
+const createZipBlob = (files: Array<{ path: string; content: string }>, mimeType: string): Blob => {
+  const encoder = new TextEncoder();
+  const localChunks: Uint8Array[] = [];
+  const centralChunks: Uint8Array[] = [];
+  let localOffset = 0;
+
+  files.forEach((file) => {
+    const nameBytes = encoder.encode(file.path);
+    const contentBytes = encoder.encode(file.content);
+    const checksum = crc32(contentBytes);
+
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const localView = new DataView(localHeader.buffer);
+    writeUint32(localView, 0, 0x04034b50);
+    writeUint16(localView, 4, 20);
+    writeUint16(localView, 6, 0x0800);
+    writeUint16(localView, 8, 0);
+    writeUint16(localView, 10, 0);
+    writeUint16(localView, 12, 0);
+    writeUint32(localView, 14, checksum);
+    writeUint32(localView, 18, contentBytes.length);
+    writeUint32(localView, 22, contentBytes.length);
+    writeUint16(localView, 26, nameBytes.length);
+    writeUint16(localView, 28, 0);
+    localHeader.set(nameBytes, 30);
+    localChunks.push(localHeader, contentBytes);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const centralView = new DataView(centralHeader.buffer);
+    writeUint32(centralView, 0, 0x02014b50);
+    writeUint16(centralView, 4, 20);
+    writeUint16(centralView, 6, 20);
+    writeUint16(centralView, 8, 0x0800);
+    writeUint16(centralView, 10, 0);
+    writeUint16(centralView, 12, 0);
+    writeUint16(centralView, 14, 0);
+    writeUint32(centralView, 16, checksum);
+    writeUint32(centralView, 20, contentBytes.length);
+    writeUint32(centralView, 24, contentBytes.length);
+    writeUint16(centralView, 28, nameBytes.length);
+    writeUint16(centralView, 30, 0);
+    writeUint16(centralView, 32, 0);
+    writeUint16(centralView, 34, 0);
+    writeUint16(centralView, 36, 0);
+    writeUint32(centralView, 38, 0);
+    writeUint32(centralView, 42, localOffset);
+    centralHeader.set(nameBytes, 46);
+    centralChunks.push(centralHeader);
+
+    localOffset += localHeader.length + contentBytes.length;
+  });
+
+  const centralDirectory = concatUint8Arrays(centralChunks);
+  const endRecord = new Uint8Array(22);
+  const endView = new DataView(endRecord.buffer);
+  writeUint32(endView, 0, 0x06054b50);
+  writeUint16(endView, 4, 0);
+  writeUint16(endView, 6, 0);
+  writeUint16(endView, 8, files.length);
+  writeUint16(endView, 10, files.length);
+  writeUint32(endView, 12, centralDirectory.length);
+  writeUint32(endView, 16, localOffset);
+  writeUint16(endView, 20, 0);
+
+  const zipBytes = concatUint8Arrays([...localChunks, centralDirectory, endRecord]);
+  return new Blob([zipBytes], { type: mimeType });
+};
+
+const getExcelColumnName = (columnNumber: number): string => {
+  let n = columnNumber;
+  let name = '';
+  while (n > 0) {
+    const mod = (n - 1) % 26;
+    name = String.fromCharCode(65 + mod) + name;
+    n = Math.floor((n - mod) / 26);
+  }
+  return name;
+};
+
+const makeTextCell = (ref: string, value: unknown): string => {
+  return `<c r="${ref}" t="inlineStr"><is><t>${escapeXml(value)}</t></is></c>`;
+};
+
+const makeNumberCell = (ref: string, value: unknown): string => {
+  const num = toFiniteNumber(value);
+  if (num === null) return `<c r="${ref}"/>`;
+  return `<c r="${ref}"><v>${num}</v></c>`;
 };
 
 const downloadDailyWeatherExcel = (dailyRows: DailyWeather[], fieldName: string) => {
@@ -276,49 +401,96 @@ const downloadDailyWeatherExcel = (dailyRows: DailyWeather[], fieldName: string)
     { key: 'leafWetnessDurationH', label: '葉面濡れ時間(h)', numeric: true },
   ];
 
-  const dateHeader = sortedRows
-    .map((row) => `<th>${escapeHtml(getJstDateKey(row.date))}</th>`)
-    .join('');
-  const body = rows
-    .map((row) => {
-      const cells = sortedRows
-        .map((day) => {
-          const rawValue = day[row.key];
-          const value = row.numeric ? formatExcelNumber(rawValue) : rawValue ?? '';
-          const style = row.numeric ? ' style="mso-number-format:General;"' : '';
-          return `<td${style}>${escapeHtml(value)}</td>`;
-        })
-        .join('');
-      return `<tr><th class="row-heading">${escapeHtml(row.label)}</th>${cells}</tr>`;
-    })
-    .join('');
-
-  const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="UTF-8" />
-  <style>
-    table { border-collapse: collapse; }
-    th, td { border: 1px solid #999; padding: 4px 8px; }
-    th { background: #e8eef8; font-weight: bold; }
-    .corner, .row-heading { background: #d9e2f3; }
-  </style>
-</head>
-<body>
-  <table>
-    <thead><tr><th class="corner">項目 / 日付</th>${dateHeader}</tr></thead>
-    <tbody>${body}</tbody>
-  </table>
-</body>
-</html>`;
-  const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+  const headerCells = [
+    makeTextCell('A1', '項目 / 日付'),
+    ...sortedRows.map((row, index) => makeTextCell(`${getExcelColumnName(index + 2)}1`, getJstDateKey(row.date))),
+  ].join('');
+  const sheetRows = [
+    `<row r="1">${headerCells}</row>`,
+    ...rows.map((row, rowIndex) => {
+      const excelRow = rowIndex + 2;
+      const cells = [
+        makeTextCell(`A${excelRow}`, row.label),
+        ...sortedRows.map((day, colIndex) => {
+          const ref = `${getExcelColumnName(colIndex + 2)}${excelRow}`;
+          return row.numeric ? makeNumberCell(ref, day[row.key]) : makeTextCell(ref, day[row.key] ?? '');
+        }),
+      ].join('');
+      return `<row r="${excelRow}">${cells}</row>`;
+    }),
+  ].join('');
+  const lastColumn = getExcelColumnName(sortedRows.length + 1);
+  const lastRow = rows.length + 1;
+  const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:${lastColumn}${lastRow}"/>
+  <sheetViews><sheetView workbookViewId="0"><pane xSplit="1" ySplit="1" topLeftCell="B2" activePane="bottomRight" state="frozen"/><selection pane="bottomRight"/></sheetView></sheetViews>
+  <sheetFormatPr defaultRowHeight="15"/>
+  <cols><col min="1" max="1" width="20" customWidth="1"/></cols>
+  <sheetData>${sheetRows}</sheetData>
+</worksheet>`;
+  const files = [
+    {
+      path: '[Content_Types].xml',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>`,
+    },
+    {
+      path: '_rels/.rels',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>`,
+    },
+    {
+      path: 'docProps/app.xml',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>xhf-app</Application>
+</Properties>`,
+    },
+    {
+      path: 'docProps/core.xml',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>Past Daily Weather</dc:title>
+  <dc:creator>xhf-app</dc:creator>
+  <dcterms:created xsi:type="dcterms:W3CDTF">${new Date().toISOString()}</dcterms:created>
+</cp:coreProperties>`,
+    },
+    {
+      path: 'xl/workbook.xml',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Daily Weather" sheetId="1" r:id="rId1"/></sheets>
+</workbook>`,
+    },
+    {
+      path: 'xl/_rels/workbook.xml.rels',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>`,
+    },
+    { path: 'xl/worksheets/sheet1.xml', content: worksheet },
+  ];
+  const blob = createZipBlob(files, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   const dates = sortedRows.map((row) => getJstDateKey(row.date)).filter(Boolean);
   const firstDate = dates[0] ?? 'weather';
   const lastDate = dates[dates.length - 1] ?? 'daily';
   anchor.href = url;
-  anchor.download = `past_daily_weather_${sanitizeFileName(fieldName)}_${firstDate}_${lastDate}.xls`;
+  anchor.download = `past_daily_weather_${sanitizeFileName(fieldName)}_${firstDate}_${lastDate}.xlsx`;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
