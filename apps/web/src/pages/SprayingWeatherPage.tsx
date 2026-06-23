@@ -17,15 +17,20 @@ import { postJsonCached } from '../utils/cachedJsonFetch';
 // =============================================================================
 
 interface DailyWeather {
+  datetime?: string;
   date: string;
   airTempCMin: number;
   airTempCMax: number;
   airTempCAvg?: number;
   sunshineDurationH?: number;
   precipitationBestMm: number;
+  precipitationProbabilityPct?: number;
   windSpeedMSAvg: number;
   windDirectionDeg?: number;
   relativeHumidityPctAvg?: number;
+  relativeHumidityPctMax?: number;
+  relativeHumidityPctMin?: number;
+  leafWetnessDurationH?: number;
 }
 
 interface ClimatologyWeather {
@@ -232,6 +237,92 @@ const toFiniteNumber = (value: unknown): number | null => {
   if (value === null || value === undefined) return null;
   const num = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(num) ? num : null;
+};
+
+const formatExcelNumber = (value: unknown): string | number => {
+  const num = toFiniteNumber(value);
+  return num === null ? '' : num;
+};
+
+const escapeHtml = (value: unknown): string => {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+};
+
+const sanitizeFileName = (value: string): string => {
+  const cleaned = value.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_').trim();
+  return cleaned || 'field';
+};
+
+const downloadDailyWeatherExcel = (dailyRows: DailyWeather[], fieldName: string) => {
+  const sortedRows = [...dailyRows].sort((a, b) => getJstDateKey(a.date).localeCompare(getJstDateKey(b.date)));
+  const rows: Array<{ key: keyof DailyWeather; label: string; numeric?: boolean }> = [
+    { key: 'datetime', label: '日時' },
+    { key: 'airTempCAvg', label: '平均気温(℃)', numeric: true },
+    { key: 'airTempCMax', label: '最高気温(℃)', numeric: true },
+    { key: 'airTempCMin', label: '最低気温(℃)', numeric: true },
+    { key: 'sunshineDurationH', label: '日照時間(h)', numeric: true },
+    { key: 'precipitationBestMm', label: '降水量(mm)', numeric: true },
+    { key: 'precipitationProbabilityPct', label: '降水確率(%)', numeric: true },
+    { key: 'windSpeedMSAvg', label: '平均風速(m/s)', numeric: true },
+    { key: 'windDirectionDeg', label: '風向(deg)', numeric: true },
+    { key: 'relativeHumidityPctAvg', label: '平均湿度(%)', numeric: true },
+    { key: 'relativeHumidityPctMax', label: '最高湿度(%)', numeric: true },
+    { key: 'relativeHumidityPctMin', label: '最低湿度(%)', numeric: true },
+    { key: 'leafWetnessDurationH', label: '葉面濡れ時間(h)', numeric: true },
+  ];
+
+  const dateHeader = sortedRows
+    .map((row) => `<th>${escapeHtml(getJstDateKey(row.date))}</th>`)
+    .join('');
+  const body = rows
+    .map((row) => {
+      const cells = sortedRows
+        .map((day) => {
+          const rawValue = day[row.key];
+          const value = row.numeric ? formatExcelNumber(rawValue) : rawValue ?? '';
+          const style = row.numeric ? ' style="mso-number-format:General;"' : '';
+          return `<td${style}>${escapeHtml(value)}</td>`;
+        })
+        .join('');
+      return `<tr><th class="row-heading">${escapeHtml(row.label)}</th>${cells}</tr>`;
+    })
+    .join('');
+
+  const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    table { border-collapse: collapse; }
+    th, td { border: 1px solid #999; padding: 4px 8px; }
+    th { background: #e8eef8; font-weight: bold; }
+    .corner, .row-heading { background: #d9e2f3; }
+  </style>
+</head>
+<body>
+  <table>
+    <thead><tr><th class="corner">項目 / 日付</th>${dateHeader}</tr></thead>
+    <tbody>${body}</tbody>
+  </table>
+</body>
+</html>`;
+  const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  const dates = sortedRows.map((row) => getJstDateKey(row.date)).filter(Boolean);
+  const firstDate = dates[0] ?? 'weather';
+  const lastDate = dates[dates.length - 1] ?? 'daily';
+  anchor.href = url;
+  anchor.download = `past_daily_weather_${sanitizeFileName(fieldName)}_${firstDate}_${lastDate}.xls`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 };
 
 const estimateSoilStatus = (days: DailyWeather[]): { label: string; tone: 'dry' | 'ok' | 'wet'; reason: string } | null => {
@@ -569,7 +660,11 @@ export function SprayingWeatherPage() {
         />
       )}
       {activeTab === 'history' && (
-        <PastWeatherPanel weatherData={historyWeatherData} plannedTasksDetail={plannedTasksByDate.tasks} />
+        <PastWeatherPanel
+          weatherData={historyWeatherData}
+          plannedTasksDetail={plannedTasksByDate.tasks}
+          fieldName={fieldName}
+        />
       )}
     </div>
   );
@@ -596,7 +691,10 @@ type CandidateDay = {
 const PastWeatherPanel: FC<{
   weatherData: WeatherData | null;
   plannedTasksDetail: Record<string, PlannedTaskEntry[]>;
-}> = ({ weatherData, plannedTasksDetail }) => {
+  fieldName: string;
+}> = ({ weatherData, plannedTasksDetail, fieldName }) => {
+  const dailyRows = weatherData?.weatherHistoricForecastDaily ?? [];
+  const canDownload = dailyRows.length > 0;
   const plannedMonths = useMemo(() => {
     const monthMap = new Map<string, number>();
     Object.entries(plannedTasksDetail).forEach(([dateKey, tasks]) => {
@@ -831,10 +929,26 @@ const PastWeatherPanel: FC<{
   return (
     <div className="weather-content">
       <div className="weather-section">
-        <h3>過去の天気（前年・2年前の実績）</h3>
-        <p className="weather-history-note">
-          今日から過去5年分のデータを取得し、散布タスクの予定月に合わせて表示します。
-          {!hasPlannedMonths && ' 散布予定がないため、当月を基準に表示しています。'}
+        <div className="weather-section-header">
+          <div>
+            <h3>過去の天気（前年・2年前の実績）</h3>
+            <p className="weather-history-note">
+              今日から過去5年分のデータを取得し、散布タスクの予定月に合わせて表示します。
+              {!hasPlannedMonths && ' 散布予定がないため、当月を基準に表示しています。'}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="weather-download-button"
+            disabled={!canDownload}
+            onClick={() => downloadDailyWeatherExcel(dailyRows, fieldName)}
+            title={canDownload ? '過去の日別天気情報をExcel形式でダウンロード' : 'ダウンロードできる日別データがありません'}
+          >
+            Excelダウンロード
+          </button>
+        </div>
+        <p className="weather-history-download-meta">
+          {canDownload ? `${dailyRows.length.toLocaleString('ja-JP')}日分の日別データを出力できます。` : '日別データの取得後にダウンロードできます。'}
         </p>
       </div>
 

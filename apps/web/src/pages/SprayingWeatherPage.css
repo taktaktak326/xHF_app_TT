@@ -208,10 +208,61 @@
   margin: 0;
 }
 
+.weather-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.weather-section-header h3 {
+  margin-top: 0;
+}
+
+.weather-download-button {
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 0.45rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid #5f6bff;
+  background: rgba(100, 108, 255, 0.18);
+  color: #f3f5ff;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s, transform 0.2s, opacity 0.2s;
+}
+
+.weather-download-button:hover:not(:disabled) {
+  background: rgba(100, 108, 255, 0.3);
+  border-color: #8d93ff;
+  transform: translateY(-1px);
+}
+
+.weather-download-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.weather-history-download-meta {
+  margin: 0.75rem 0 0;
+  color: #9fa3b8;
+  font-size: 0.85rem;
+}
+
 .weather-section h3 {
   margin-bottom: 1rem;
   border-bottom: 1px solid #4a4a4f;
   padding-bottom: 0.5rem;
+}
+
+@media (max-width: 720px) {
+  .weather-section-header {
+    flex-direction: column;
+  }
+
+  .weather-download-button {
+    width: 100%;
+  }
 }
 
 .weather-cards {
